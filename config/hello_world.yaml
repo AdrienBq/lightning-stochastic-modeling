@@ -1,0 +1,22 @@
+project_uri: 'src/stages'                                                           # the path of the directory where each stage scrip is saved
+log_artifacts: false                                                                # whether to log the output file/directory as artifact
+log_models: false                                                                   # whether to log the output model
+lazy: false                                                                         # set true to skip a stage whose code state + parameters + input
+                                                                                    # checksums match a previously recorded successful run (tracked in the
+                                                                                    # MLflow store) whose outputs are still byte-identical on disk.
+                                                                                    # Overridable per stage via a `lazy:` key inside that stage's parameters.
+ensure_determinism: false                                                           # when an executed stage produces a different output for unchanged
+                                                                                    # code+inputs+params, that non-determinism is warned about; set true to
+                                                                                    # raise instead. Overridable per stage (`ensure-determinism:`).
+# lazy_content_max_file_mb: 256                                                     # (optional) files larger than this are fingerprinted by size only
+# lazy_content_max_dir_mb: 2048                                                     # (optional) directories larger than this are fingerprinted by size only
+banner: true                                                                        # set false to disable the start-up welcome banner entirely
+# banner_font: small                                                                # (optional) any pyfiglet font name (install pyfiglet); defaults to the
+                                                                                    # bundled `small` font
+description: 'A minimalistic ML pipeline template'                                  # (optional) one-line tagline shown in the welcome banner
+
+stages:
+    - hello_world: {}
+
+tags:                                                                               # tags to be applied to the run
+    version: 1.0

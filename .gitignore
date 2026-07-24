@@ -1,0 +1,10 @@
+.idea/
+.vscode/
+**/__pycache__/
+**/.DS_Store
+/mlruns/
+/.cmdstan/
+**/lightning_logs/
+/output.log
+/outputs/
+**/*.db

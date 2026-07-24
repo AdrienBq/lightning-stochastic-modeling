@@ -1,0 +1,41 @@
+# Conda environment for the `plumber` ML pipeline template.
+#
+#   conda env create -f environment.yml
+#   conda activate plumber
+#
+# Python 3.11 is pinned because the optional Prefect stack below is verified working there; 3.12 also works (the
+# project's existing `cmcc-raws` env). The default `orchestrator: mlflow` backend needs only mlflow + fire +
+# pyyaml; the rest is for building real stages and the optional Prefect frontend.
+name: plumber
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  # version-control helpers the template expects (git lfs tracks the ML binaries declared in .gitattributes)
+  - git
+  - git-lfs
+  # scientific stack used by stages, the plotting utils and deterministic seeding
+  - numpy
+  - pandas
+  - scikit-learn
+  - matplotlib
+  - joblib
+  - pyyaml
+  - pip:
+      # --- core orchestration (required by both backends) ---
+      # mlflow is pinned < 3.13: from 3.13 the local file-store backend (the template's default when no
+      # tracking_uri is passed) is hard-disabled. The sqlite backend works on any version -- to use it, launch
+      # the UI with:  mlflow ui --backend-store-uri sqlite:///mlflow.db
+      - "mlflow>=2.12,<3.13"
+      - fire
+      # --- optional Prefect backend (orchestrator: prefect) ---
+      # Safe to delete: the orchestrator falls back to the mlflow backend automatically if Prefect is absent.
+      # This exact trio is pinned because the current Prefect 3.7 + starlette 1.x combination breaks Prefect's
+      # ephemeral server ("'PrefectRouter' object has no attribute 'routes'"); the versions below are verified.
+      - "prefect==3.1.15"
+      - "fastapi==0.115.6"
+      - "starlette==0.41.3"
+      # --- optional: PyTorch, only needed for neural-network stages (e.g. a notebook-style MLP). Uncomment for
+      #     the default CPU build; pick a CUDA/Metal build per https://pytorch.org if you need acceleration. ---
+      # - torch
