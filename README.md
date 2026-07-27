@@ -1,13 +1,54 @@
-# Plumber
+# Lightning Stochastic Modeling
 
-**A minimalistic ML pipeline template**
+**Stochastic ML parameterization of lightning from ERA5 reanalysis**
+
+Given a day's gridded ERA5 reanalysis predictors (`MU_LI`, `MU_MIXR`, `RH_500850`, `cp`, `lsm`), predict that
+day's gridded lightning field (from ATDnet). This is a diagnostic ERA5 → lightning mapping — **not** a temporal
+forecast: there is no `t + dt` nowcasting objective. Three model families (MC-dropout, flow matching, and a
+distributional-regression U-net) share one pipeline and report the same metrics through one common evaluation.
+
+> **Status:** the repository is being rebuilt block by block from the `plumber` pipeline template; see
+> [`.claude/plans/rebuild-plan.md`](.claude/plans/rebuild-plan.md). The sections below still describe the
+> template's mechanics and are progressively reworked as the rebuild proceeds.
 
 ## Installation
 
-Once you instantiate the template and clone the repository, install [`git lfs`](https://git-lfs.com/).
-You can find the default options in the [`.gitattributes`](.gitattributes) file.
+[`minimal_requirements.txt`](minimal_requirements.txt) is the source of truth for the environment
+(Python 3.11, CPU-only). `environment.yml` is the template's conda recipe and is kept unmaintained.
 
-It is highly recommended to create a Python environment (3.11+) via `conda` or `Pipenv` for versioning.
+```shell
+python -m venv /path/to/.venvs/lightning-stochastic-modeling
+source /path/to/.venvs/lightning-stochastic-modeling/bin/activate
+pip install -r minimal_requirements.txt++
+```
+
+Also install [`git lfs`](https://git-lfs.com/); the tracked file types are declared in
+[`.gitattributes`](.gitattributes).
+
+## Data
+
+The dataset root is **`/homedata/aburq/batta_torch`** (~48 GB, local; the machine is CPU-only, so smoke runs use
+a 2-day slice):
+
+```
+/homedata/aburq/batta_torch/
+  metadata.json     # batta_torch_2: 6 variables, 0.25 deg, 35-60N / -12-25E, 2008-01-02 -> 2023-12-31
+  metadata.csv      # date,id,num_lightnings,pixels_with_lightning
+  samples/          # 5843 x sample_XXXXXX.pt, ~8.7 MB each
+  scalers/          # final, old, split_0 .. split_12
+```
+
+Each `sample_XXXXXX.pt` holds the five ERA5 predictors plus `lightnings`, the ERA5-gridded ATDnet field for that
+day. Raw ATDnet observations (CSV) are at `/homedata/aburq/lightning/ATDnet`; the upstream yearly ERA5 netCDFs
+are at `/homedata/aburq/post_processed_era5` and are not read by the pipeline.
+
+The train/validation/test split is by year:
+
+| Split | Years |
+|---|---|
+| Test | 2008, 2015, 2023 |
+| Validation | 2009, 2016, 2022 |
+| Train | 2010–2014, 2017–2021 |
 
 ## Usage
 

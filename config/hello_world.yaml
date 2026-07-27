@@ -13,7 +13,7 @@ ensure_determinism: false                                                       
 banner: true                                                                        # set false to disable the start-up welcome banner entirely
 # banner_font: small                                                                # (optional) any pyfiglet font name (install pyfiglet); defaults to the
                                                                                     # bundled `small` font
-description: 'A minimalistic ML pipeline template'                                  # (optional) one-line tagline shown in the welcome banner
+description: 'Stochastic ML parameterization of lightning from ERA5 reanalysis'      # (optional) one-line tagline shown in the welcome banner
 
 stages:
     - hello_world: {}

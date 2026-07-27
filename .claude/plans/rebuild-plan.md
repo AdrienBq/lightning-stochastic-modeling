@@ -30,6 +30,11 @@ evaluation**. We rebuild block by block, verifying each block with a real CPU sm
 | `claude/quizzical-golick-7417bd` | strict ancestor of `aru-probabilistic-eval` (behind 10, 0 unique) | **ignore** |
 | `aru-diffusion-model` | strict ancestor of `aru-probabilistic-eval` (behind 31, 0 unique) | **ignore** |
 
+> ⚠️ **The local source clone is stale (found in Step 0).**
+> `/home/aburq/repos/fers/fers26p8-knowledge-guided-tail-ml` holds only 4 commits and **no model code** — every
+> branch above exists on `origin` (`git@github.com:aurelio-raffa/fers26p8-knowledge-guided-tail-ml.git`) but is
+> unfetched. Network to GitHub works. **`git fetch --all` in that clone is a prerequisite for Step 1.**
+
 `aru-probabilistic-eval` and `adrien-mc-dropout` genuinely diverged (merge-base `e3c13a0`; +126 / +38 commits).
 The template's `src/stages/run.py`, `utils/io/lazy.py`, `utils/seeding.py`, `utils/plotting/*` are an evolved
 superset of aru's infrastructure, so the template already provides the orchestration layer.
@@ -40,6 +45,22 @@ superset of aru's infrastructure, so the template already provides the orchestra
 - MC-dropout's two-phase (train → finetune) fit is folded into the **shared** tuning harness.
 - Verification: **real CPU smoke runs — 1 epoch, 2 days of data** (full data is local, machine is CPU-only) at
   each block, plus unit tests + import/parse checks.
+
+### Environment & data (established in Step 0)
+- **Environment:** `minimal_requirements.txt` (Python 3.11, pip/venv) is the source of truth; loose version
+  bounds. The venv lives at `/homedata/aburq/.venvs/lightning-stochastic-modeling` and must be activated
+  explicitly (`~/.bash_aburq` auto-activates `$VENV_ROOT/default` in every new shell). `environment.yml` is
+  retained but unmaintained.
+- **Machine:** `nproc = 1`, 251 GB RAM, **no GPU** — hence the CPU torch wheel and genuinely tiny smoke runs.
+- **Data root: `/homedata/aburq/batta_torch`** (~48 GB). *The path originally written in this plan
+  (`/home/aburq/repos/fers/data/era5_post_process`) does not exist.* Layout: `metadata.json`
+  (`batta_torch_2`; vars `MU_LI, MU_MIXR, RH_500850, cp, lsm, lightnings`; 0.25°; 35–60N / −12–25E;
+  2008-01-02 → 2023-12-31), `metadata.csv` (`date,id,num_lightnings,pixels_with_lightning`),
+  `samples/` with 5843 × ~8.7 MB `sample_XXXXXX.pt`, and `scalers/` (`final`, `old`, `split_0`…`split_12`).
+  Raw ATDnet CSVs: `/homedata/aburq/lightning/ATDnet`. The upstream yearly ERA5 netCDFs at
+  `/homedata/aburq/post_processed_era5` are **not** read by the pipeline.
+- **Split (by year):** test 2008 / 2015 / 2023 · validation 2009 / 2016 / 2022 · train the rest
+  (2010–2014, 2017–2021).
 
 ## Target architecture (high level — details firm up as we go)
 
@@ -67,17 +88,38 @@ feeds the **shared** `scores.ensemble_partials`. distr_regression supplies the u
 
 ## Rebuild sequence
 
-Block order a → b → c → d. Each step ends with the verification gate and a plan update.
+Block order a → b → c → d → e. Each step ends with the verification gate and a plan update.
 
-### Step 0 — Bootstrap & hygiene
-- Rebrand template; set local smoke data path `/home/aburq/repos/fers/data/era5_post_process` (CPU).
-- **`minimal_requirements.txt`:** hand-build a lean env (py3.11, torch, lightning, mlflow, optuna, fire,
-  pyyaml, numpy/scipy/scikit-learn/pandas, matplotlib; add geopandas/cartopy only when the plotting spec needs
-  them). Do **not** copy aru's full conda export — it likely carries unused packages. Add deps only as steps
-  require them.
-- Carry over `.gitattributes` (git-lfs) and `.gitignore`.
+### Step 0 — Bootstrap & hygiene — ✅ **DONE** (2026-07-27)
+- **Rebranded:** `README.md` (title, framing paragraph — diagnostic mapping, not forecasting — plus new
+  Installation and Data sections); `config/hello_world.yaml` `description` → the project tagline (feeds the
+  banner; the banner *name* auto-derives from the directory, so no code change). `environment.yml` kept but
+  marked **unmaintained** with a header pointing at `minimal_requirements.txt`.
+- **`minimal_requirements.txt` written** — hand-built, loose bounds (`>=`,`<`): mlflow, fire, pyyaml, torch,
+  lightning, optuna, numpy, pandas, scipy, scikit-learn, matplotlib, pytest. Carries
+  `--extra-index-url https://download.pytorch.org/whl/cpu` because the machine has **no GPU** and the default
+  PyPI linux torch wheel bundles ~2.5 GB of `nvidia-*` deps. Confirmed correct **not** to copy the old
+  `requirements.txt`: it is a 154-line full env dump (horovod, poetry, fastapi, jupyter, rasterio…).
+  Excluded until a step needs them: `cartopy`/`geopandas` (Step 1's map spec decides), `xarray`/`netCDF4`
+  (data is `.pt` + CSV, not netCDF), `prefect` (`run.py` falls back to the mlflow orchestrator when absent).
+  `torchmetrics` arrives anyway as a `lightning` transitive dep.
+- **`.gitattributes` / `.gitignore`: no carry-over needed.** The template's are a strict superset of
+  `fers26p8`'s — identical LFS lists plus the template's ML-checkpoint/tensor blocks (`*.pt`, `*.ckpt`,
+  `*.safetensors`, `*.npz`…), and the template `.gitignore` adds `/outputs/` and `**/*.db`. Verified via
+  `git check-attr`, not modified.
+- **Verified:** venv is Python 3.11.7 and runs standalone (`module load python/meso-3.11` needed only to
+  *create* it); `torch 2.13.0+cpu` with zero `nvidia-*` packages; all deps import; `parse_config` reads the
+  YAML; `python run_project.py config/hello_world.yaml STEP0_SMOKE` exits 0 with the rebranded banner and
+  seeding applied to `random, numpy, lightning, torch`; `git status` scoped to the 4 intended files.
+- **Open follow-up (deliberately deferred):** `mlflow` resolved to **3.12.0**, one minor release below the
+  `<3.13` ceiling where the local file-store backend is disabled — a fresh install in a few weeks will break.
+  Tighten the bound when that bites.
 
 ### Step 1 (block a) — Docs = design decisions (the pivotal step)
+**Prerequisite:** `git fetch --all` in `/home/aburq/repos/fers/fers26p8-knowledge-guided-tail-ml` — the clone is
+stale and none of the source branches are present locally (see the branch-findings warning above). Without it
+there is no `aru-probabilistic-eval` / `adrien-mc-dropout` code to inventory metrics and losses from.
+
 This is a **design activity**, not just porting. Produce, and record decisions in:
 - **Global** `CLAUDE.md` + `README.md`: correct framing (ML parameterization from reanalysis, not forecasting),
   data/split/design invariants, pipeline conventions.
@@ -105,6 +147,16 @@ metrics (`scores`, `evaluation`, `reporting`, `diagnostics`) → confirm plottin
 `setup` → merged `prepare_regression` → shared-harness `tune_*` → `retrain_best_*` → **`evaluate_regression`
 (common)** → `tabulate_metrics` → `combine_curves`; wire the per-family + cross-model pipelines; port the CPU
 unit tests.
+
+### Step 5 (block e) — Portability: user-agnostic & machine-agnostic
+
+This repo is meant to be used on other machines or remote servers and by other users, so the paths baked in
+during Step 0 (`/homedata/aburq/.venvs/lightning-stochastic-modeling`, the `/homedata/aburq/batta_torch` data
+root) will not be applicable to other contexts — this is the final step, once the pipelines themselves are
+merged and stable. It adds a local, per-user config file where each user specifies their own paths (data root,
+venv/output locations, etc.), so nothing user- or machine-specific is hardcoded in the pipeline YAMLs or code.
+It also broadens installation beyond pip: `minimal_requirements.txt` currently assumes a plain `venv` + `pip`
+workflow; this step adds equivalent install paths for `uv` and `conda` so the repo isn't tied to one tool.
 
 ## Key merge tasks & risks (carried through Steps 3–4)
 1. **MC-dropout de-duplication:** drop aru's stale vendored `modeling/mc_dropout/` package; use adrien's current

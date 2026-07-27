@@ -1,3 +1,6 @@
+# UNMAINTAINED: kept from the `plumber` template for anyone who prefers conda. The environment actually used by
+# this project is defined in `minimal_requirements.txt` (Python 3.11, pip/venv), which is the source of truth.
+#
 # Conda environment for the `plumber` ML pipeline template.
 #
 #   conda env create -f environment.yml

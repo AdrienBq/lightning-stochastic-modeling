@@ -1,0 +1,38 @@
+# Minimal dependency set for lightning-stochastic-modeling (Python 3.11, CPU-only).
+#
+#   module load python/meso-3.11
+#   python -m venv /homedata/aburq/.venvs/lightning-stochastic-modeling
+#   source /homedata/aburq/.venvs/lightning-stochastic-modeling/bin/activate
+#   pip install -r minimal_requirements.txt
+#
+# This file is the source of truth for the environment; `environment.yml` is the template's conda
+# recipe and is kept unmaintained. Deps are added as rebuild steps need them -- keep this lean.
+
+# torch comes from the CPU wheel index: the default PyPI linux wheel bundles the CUDA runtime
+# (~2.5 GB of nvidia-* packages) and this machine has no GPU.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# --- pipeline orchestration (run_project.py, src/stages/run.py) ---
+# mlflow < 3.13: from 3.13 the local file-store backend (the default when no tracking_uri is passed) is disabled.
+mlflow>=2.12,<3.13
+fire>=0.6,<1
+pyyaml>=6,<7
+
+# --- modeling (shared U-net backbone + the three families) ---
+torch>=2.4,<3
+lightning>=2.4,<3
+
+# --- hyper-parameter search (shared tuning harness) ---
+optuna>=4,<5
+
+# --- scientific stack ---
+numpy>=1.26,<3
+pandas>=2.2,<3
+scipy>=1.13,<2
+scikit-learn>=1.5,<2
+
+# --- plotting (src/utils/plotting) ---
+matplotlib>=3.9,<4
+
+# --- tests (verification gate for every rebuild step) ---
+pytest>=8,<9
