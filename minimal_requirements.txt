@@ -32,7 +32,11 @@ scipy>=1.13,<2
 scikit-learn>=1.5,<2
 
 # --- plotting (src/utils/plotting) ---
+# cartopy: the Step 1 map spec plots the gridded lightning field on a real projection with coastlines and
+# borders, so spatial error is interpretable (sea vs. land, orography). Ships manylinux wheels from 0.22, so
+# no system GEOS/PROJ build is needed on Python 3.11.
 matplotlib>=3.9,<4
+cartopy>=0.22,<1
 
 # --- tests (verification gate for every rebuild step) ---
 pytest>=8,<9

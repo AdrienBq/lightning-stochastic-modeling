@@ -7,9 +7,36 @@ day's gridded lightning field (from ATDnet). This is a diagnostic ERA5 → light
 forecast: there is no `t + dt` nowcasting objective. Three model families (MC-dropout, flow matching, and a
 distributional-regression U-net) share one pipeline and report the same metrics through one common evaluation.
 
-> **Status:** the repository is being rebuilt block by block from the `plumber` pipeline template; see
-> [`.claude/plans/rebuild-plan.md`](.claude/plans/rebuild-plan.md). The sections below still describe the
-> template's mechanics and are progressively reworked as the rebuild proceeds.
+> **Status:** the repository is being rebuilt block by block from the `plumber` pipeline template. The plan and the
+> design decision record live in [`.claude/plans/`](.claude/plans/) — start at
+> [`rebuild-plan.md`](.claude/plans/rebuild-plan.md). Sections below marked *(template)* still describe the
+> template's mechanics and are reworked as the rebuild proceeds.
+
+## Modelling scope
+
+The **first** target is **occurrence** rather than unbounded stroke counts:
+
+| Mode | Target | Nature |
+|---|---|---|
+| `hourly` | lightning occurred in this cell/hour | binary classification |
+| `daily` | **number of hours with lightning, `0–24`** (`daily_lightning_hours`) | bounded regression |
+
+Consequently there is **no target transform**: training space and evaluation space are the same space, so no
+prediction is ever back-transformed. The bounded `0–24` target keeps ordinary distance losses (MSE / MAE / Huber)
+and error metrics meaningful, while machinery for unbounded heavy-tailed counts (Tweedie, Poisson NLL, tail
+quantiles) does not apply.
+
+The three families are:
+
+| Family | Nature |
+|---|---|
+| `distr_regression` | deterministic U-net — baseline, and the *upstream* model for residual mode |
+| `mc_dropout` | stochastic via MC-dropout at inference; two-phase fit (train → finetune) |
+| `diffusion` | flow matching; optionally **residual** (predicts a correction on top of the upstream) |
+
+Because ~99.93 % of cells are zero, evaluation leads with base-rate-robust categorical scores (ETS, SEDI),
+skill against trivial baselines (all-zero, climatology, persistence), and spectral/neighbourhood scores that
+detect the over-smoothing U-nets are prone to.
 
 ## Installation
 
@@ -19,7 +46,7 @@ distributional-regression U-net) share one pipeline and report the same metrics 
 ```shell
 python -m venv /path/to/.venvs/lightning-stochastic-modeling
 source /path/to/.venvs/lightning-stochastic-modeling/bin/activate
-pip install -r minimal_requirements.txt++
+pip install -r minimal_requirements.txt
 ```
 
 Also install [`git lfs`](https://git-lfs.com/); the tracked file types are declared in
@@ -27,22 +54,32 @@ Also install [`git lfs`](https://git-lfs.com/); the tracked file types are decla
 
 ## Data
 
-The dataset root is **`/homedata/aburq/batta_torch`** (~48 GB, local; the machine is CPU-only, so smoke runs use
-a 2-day slice):
+The dataset root is given by the **`DATA_ROOT`** environment variable — no data path is hardcoded in code or
+config, so the repo moves between machines by setting that one variable:
+
+```shell
+export DATA_ROOT=/path/to/batta_torch      # e.g. /homedata/aburq/batta_torch on this host (~48 GB)
+```
 
 ```
-/homedata/aburq/batta_torch/
-  metadata.json     # batta_torch_2: 6 variables, 0.25 deg, 35-60N / -12-25E, 2008-01-02 -> 2023-12-31
+$DATA_ROOT/
+  metadata.json     # 6 variables, 0.25 deg, 35-60N / -12-25E, 2008-01-02 -> 2023-12-31
   metadata.csv      # date,id,num_lightnings,pixels_with_lightning
   samples/          # 5843 x sample_XXXXXX.pt, ~8.7 MB each
   scalers/          # final, old, split_0 .. split_12
 ```
 
-Each `sample_XXXXXX.pt` holds the five ERA5 predictors plus `lightnings`, the ERA5-gridded ATDnet field for that
-day. Raw ATDnet observations (CSV) are at `/homedata/aburq/lightning/ATDnet`; the upstream yearly ERA5 netCDFs
-are at `/homedata/aburq/post_processed_era5` and are not read by the pipeline.
+Each `sample_XXXXXX.pt` is a torch tensor holding the five ERA5 predictors plus `lightnings`, the ERA5-gridded
+ATDnet field for that day — **not** netCDF, so no `xarray` dependency. Raw ATDnet observations (CSV) live
+alongside the dataset; the upstream yearly ERA5 netCDFs are not read by the pipeline.
 
-The train/validation/test split is by year:
+| Invariant | Value |
+|---|---|
+| Grid | **101 × 149**, `origin='upper'` (array row 0 is the north edge) |
+| Domain | 0.25°, 35–60 °N / −12–25 °E |
+| Zero fraction | ~99.93 % of cells |
+
+The train/validation/test split is **by year**:
 
 | Split | Years |
 |---|---|
@@ -50,7 +87,11 @@ The train/validation/test split is by year:
 | Validation | 2009, 2016, 2022 |
 | Train | 2010–2014, 2017–2021 |
 
-## Usage
+Smoke runs use a 2-day slice on CPU; see the `*_local.yaml` pipeline variants. Note `ensemble-size` must be **≥ 2**
+in any run that reports ensemble metrics — the spread-skill ratio uses an unbiased (`ddof=1`) variance, so a
+single-member ensemble yields `NaN` rather than an error.
+
+## Usage *(template)*
 
 This template is intended for pipeline execution with [MLflow](https://mlflow.org/).
 Pipelines are a tool for tracking the execution of code _while_ you develop.
