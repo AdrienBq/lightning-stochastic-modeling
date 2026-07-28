@@ -31,12 +31,10 @@ The three families are:
 | Family | Nature |
 |---|---|
 | `distr_regression` | deterministic U-net — baseline, and the *upstream* model for residual mode |
-| `mc_dropout` | stochastic via MC-dropout at inference; two-phase fit (train → finetune) |
 | `diffusion` | flow matching; optionally **residual** (predicts a correction on top of the upstream) |
+| `mc_dropout` | stochastic via MC-dropout at inference; two-phase fit (train → finetune) |
 
-Because ~99.93 % of cells are zero, evaluation leads with base-rate-robust categorical scores (ETS, SEDI),
-skill against trivial baselines (all-zero, climatology, persistence), and spectral/neighbourhood scores that
-detect the over-smoothing U-nets are prone to.
+Because ~99.93 % of cells (hourly) are zero, evaluation leads with base-rate-robust categorical scores (ETS, SEDI), skill against trivial baselines (all-zero, climatology, persistence), and spectral/neighbourhood scores that detect the over-smoothing U-nets are prone to.
 
 ## Installation
 

@@ -12,6 +12,13 @@ metric/loss name referenced must exist in an annotated `keep`/`modify` row.
 
 ---
 
+## 0. change distr_regression name and 
+
+This naming is confusing. The job of this network is to provide a deterministic U-Net which is then used to compute the residuals that are the targets of the diffusion (flow-matching) model. 
+Rename to deterministic_module.
+Change everywhere that applies (also the README and other steps plans for example).
+
+
 ## 1. File inventory
 
 ```
@@ -53,9 +60,6 @@ by_year:
     train: [2010, 2011, 2012, 2013, 2014, 2017, 2018, 2019, 2020, 2021]
 ```
 
-**Decision needed:** the source `metadata.json` starts **2008-01-02**, so 2008 is a 364-day year and
-`persistence` (lag 1) has no predecessor for the first test day. Confirm that's acceptable or drop 2008-01-02.
-
 ---
 
 ## 3. `config/metrics.yaml` — the shared suite
@@ -70,8 +74,8 @@ a clean reference doc** — every entry keeps a one-line rationale.
 baselines:
     zero: {}                          # all-zero predictor: the imbalance-exploiting cheat
     climatology: {window_days: 90}    # per-cell day-of-year mean, ±45 days
-    persistence: {lag: 1}             # previous day (or hour, in hourly mode)
 ```
+Drop the persistence baseline : only acceptable for forecasting tasks. Here we are doing reanalysis parameterization. We do not have observations in the past so persistence is not applicable and is therefore not a good baseline.
 
 ### 3.2 `thresholds` — ⚠️ **must be redefined**
 
@@ -110,11 +114,13 @@ categorical:
 
 All seven kept. ETS is chance-corrected; SEDI stays non-degenerate as the base rate → 0; `frequency_bias > 1`
 flags the preferred conservative over-forecasting.
+Add ROC-AUC and PR-AUC
 
 ### 3.5 `metrics.skill` — unchanged
 
 `mse_skill_score` (vs zero/climatology/persistence), `mae_conditional_skill_score` (vs zero/climatology,
 conditioned on `obs_positive`), `brier_skill_score` (vs climatology, target `occurrence`).
+Add the explained deviance
 
 ### 3.6 `metrics.calibration` — reduced
 
@@ -134,9 +140,7 @@ conditioned on `obs_positive`), `brier_skill_score` (vs climatology, target `occ
 `log_spectral_distance`, `fss` (thresholds × scales `[1,3,5,9,17]`, `report_useful_scale: true`),
 `sharpness_ratio`, `variance_ratio`.
 
-Challenge (B) survives the scope change intact — spectral scores work on binary occurrence fields as well as
-`0–24` fields. Keep **both** `psd_high_fidelity` and `psd_full_fidelity`: the full band is dominated by the large
-scales of the red lightning spectrum, so it under-penalises over-smoothing; the high band is the sharp detector.
+Unify the psd_fidelity : one function with band as argument that can take "high", "mid", "low" or "full" as values. psd_band_ratios can take similar arguments as input
 
 ### 3.8 `metrics.ensemble` — unchanged
 
@@ -148,7 +152,7 @@ scales of the red lightning spectrum, so it under-penalises over-smoothing; the 
 ```yaml
 reporting:
     figures:
-        - maps_worst_best_days        # restyled to the 02a spec (inventory-figures.md §1)
+        - maps_most_extreme_days      # reports the most extreme day in test / val styled to the 02a spec (inventory-figures.md §1)
         - psd_curves
         - fss_vs_scale
         - reliability                 # was `reliability_and_pit` -- PIT half removed
@@ -165,9 +169,8 @@ reporting:
     formats: [png, csv]
 ```
 
-**Open:** whether to add the two occurrence-task figures that exist nowhere yet — **ROC / PR curves** (backed by
-`average_precision`) and a **confusion matrix per threshold**. Recommend adding both; they are the natural
-headline diagnostics now.
+Add the two occurrence-task figures that exist nowhere yet — **ROC / PR curves** (backed by
+`average_precision`) and a **confusion matrix per threshold**. 
 
 ---
 
@@ -193,7 +196,7 @@ loss:
     huber_delta:   {type: float, low: 0.5, high: 3.0}
     alpha:         {type: float, low: 0.5, high: 1.0}            # wmae_psd: pointwise weight; (1-alpha) -> PSD
 
-occurrence_head:                                                  # kept -- "occurrence head is still in scope"
+occurrence_head:                                                 # kept -- "occurrence head is still in scope"
     enabled: {type: categorical, choices: [true, false]}
     loss: {type: categorical, choices: [focal_bce, dice, brier, crps_binary]}
     focal_gamma: {type: float, low: 1.0, high: 3.0}
@@ -219,7 +222,9 @@ max_epochs: 50
 
 > **Class-weighting overlap to settle:** `intensity_weights` with γ>0 and `focal_bce`'s `positive_class_weight`
 > both up-weight positives. On a *binary* target `(1+y)^γ` collapses to `{1, 2^γ}` — i.e. a plain positive-class
-> weight — so the two mechanisms duplicate. Decide which owns it.
+> weight — so the two mechanisms duplicate. if focal_bce is selected then intensity_weights must be disabled.
+
+Add the wmae-psd and wmse-psd variants in the possible losses. These are necessary for the mc-dropout pipeline (see the afcrps_psd with loss_weight below).
 
 ### 4.2 `mc_dropout/search_space.yaml` — adds
 
@@ -343,6 +348,19 @@ Override only what makes the run tiny; inherit everything else by copy:
 | `n-trials` sampler | `random` | TPE is pointless at one trial |
 
 ---
+
+### 5.4 `*_local.yaml` — GPU smoke variants
+
+Override only what makes the run tiny; inherit everything else by copy:
+
+| Parameter | Smoke value | Why |
+|---|---|---|
+| `n-trials` | `2` | one trial |
+| `max-epochs` | `1` | one epoch |
+| split | 10-day slice | via a `max-days: 10` parameter on `prepare_regression`, or a dedicated `split_local.yaml` |
+| `ensemble-size` | **`5`** | ⚠️ **not `1`** — `spread_skill_sums` uses `ddof=1`, so `M=1` silently yields `NaN` |
+| `lazy` | `false` | never cache a smoke run |
+| `n-trials` sampler | `TPE` | TPE is pointless at one trial |
 
 ## 6. Step 2 verification
 
