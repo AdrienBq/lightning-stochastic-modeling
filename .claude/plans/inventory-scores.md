@@ -66,6 +66,7 @@ stay; what goes is machinery for **unbounded heavy-tailed counts** and for the t
 | `r2_score` | 105 | 155 | `A-SUPERSET` | 🎯 `TAIL-THRESH` Coefficient of determination. **A adds `condition=`** for per-subgroup R². Valid for the `0–24` regression; **meaningless for binary** (use Brier / AP instead) | keep A |
 | `estimation_tendency` | 127 | 171 | `IDENTICAL` | 🎯 `TAIL-THRESH` Under-/over-estimated cell fractions with a `tolerance` dead-band. Valid for `0–24`; for binary it collapses into the contingency table | keep |
 | `skill_score` | 243 | 148 | `IDENTICAL` | `1 - model_error / baseline_error` | keep |
+| `explained_deviance` | — | — | **NEW (Step 2)** | ✅ `CLASSIF` **Bernoulli** explained deviance on the occurrence head vs the climatology baseline: `1 - logloss(model) / logloss(climatology)`. Deliberately scoped to the *binary* head — with `tweedie_deviance_score` removed, the bounded `0–24` target has no likelihood left to take a deviance of, so a "regression explained deviance" would be undefined here. On the occurrence probability it is well-defined, proper, and the standard likelihood-based complement to `brier_skill_score` (which is the *quadratic* rather than *logarithmic* score) | keep — **new code in Step 3**; lives in `metrics.skill`, emits the flat key `explained_deviance` |
 
 ## 3. Rank / ordering agreement
 
@@ -80,7 +81,7 @@ stay; what goes is machinery for **unbounded heavy-tailed counts** and for the t
 | `fss` | 253 | 223 | `A-SUPERSET` | Fractions skill score at threshold × neighbourhood scale. A takes extra params | keep |
 | `fss_useful_scale` | 291 | 256 | `IDENTICAL` | Smallest scale where `FSS > 0.5 + base_rate/2` | modify : do not recompute the fss at all scales, but used the precomputed scores from the passes of fss |
 | `mean_power_spectrum` | 313 | 277 | `A-SUPERSET` | Mean 2-D power spectrum. **A adds a `progress` callback** (for long streaming passes) | keep |
-| `_wavelength_grid` | 323 | 285 | `IDENTICAL` | Private: pixel-wavelength grid for radial binning | |
+| `_wavelength_grid` | 323 | 285 | `IDENTICAL` | Private: pixel-wavelength grid for radial binning | keep — the shared basis of every PSD score, so the band edges in `metrics.yaml` mean the same thing everywhere |
 | `radial_psd` | 332 | 294 | `A-SUPERSET` | Radially-averaged PSD; A's signature is richer | keep |
 | `radial_psd_per_map` | 364 | — | `A-ONLY` | Per-map PSD instead of pre-averaged — required for **pooled ensemble** structure scoring (avoids averaging maps before spectra) | keep |
 | `psd_band_ratios` | 410 | 315 | `IDENTICAL` | Pred/obs PSD ratio per named wavelength band (`full`/`low`/`mid`/`high`, pixels) | keep |
@@ -104,8 +105,9 @@ stay; what goes is machinery for **unbounded heavy-tailed counts** and for the t
 | Score | A | D | Status | What it computes | Decision |
 |---|---|---|---|---|---|
 | `brier_score` | 572 | 515 | `IDENTICAL` | ✅ `CLASSIF` Brier score on occurrence probabilities — a **proper** score for the new primary task | keep |
-| `average_precision` | 576 | 519 | `IDENTICAL` | ✅ `CLASSIF` Area under precision-recall, `max_samples` subsampling cap. The right summary under extreme imbalance (PR beats ROC when positives are rare) | keep |
+| `average_precision` | 576 | 519 | `IDENTICAL` | ✅ `CLASSIF` Area under precision-recall, `max_samples` subsampling cap. The right summary under extreme imbalance (PR beats ROC when positives are rare) | keep — **and it is now the discrimination term of the tuning selection score**, as `average_precision_occurrence` (Step 2) |
 | `dice_coefficient` | — | 533 | `D-ONLY` | ✅ `CLASSIF` Dice/F1 overlap on binarised fields. **Not in A at all** — and its value rises sharply under the new scope | keep |
+| `roc_auc` | — | — | **NEW (Step 2)** | ✅ `CLASSIF` Area under the ROC curve, per event threshold. Threshold-free like `average_precision`, but reported *alongside* it rather than instead: ROC-AUC is the familiar, cross-study-comparable number, while being **optimistic when negatives dominate** (at a 0.07 % base rate a useless model still scores well on it). Having both makes that gap visible — a high `roc_auc` with a low `average_precision` is the signature of imbalance-exploitation. Emitted through the categorical group's `<score>_<threshold>` grammar, and backs the new `roc_pr_curves` figure | keep — **new code in Step 3** |
 
 ## 7. Ensemble scores — ⚠️ the merge hazard
 
@@ -116,7 +118,7 @@ stay; what goes is machinery for **unbounded heavy-tailed counts** and for the t
 | `crps_ensemble` | 647 | 429 | ⚠️ `CONTRACT-DIFFERS` | **A returns `float`** (aggregated, accepts `condition=`). **D returns `np.ndarray`** (per-element). Same name, incompatible contracts | keep A |
 | `almost_fair_crps_ensemble` | 653 | 451 | ⚠️ `CONTRACT-DIFFERS` | Same divergence: A → `float` + `condition=`, D → `np.ndarray` | keep A |
 | `spread_skill_sums` | 659 | — | `A-ONLY` | Partial sums for spread-skill streaming | keep |
-| `spread_skill_ratio` | 680 | — | `A-ONLY` | `sqrt(mean ensemble variance) / RMSE(ensemble mean)`; ~1 calibrated, `<1` over-confident | |
+| `spread_skill_ratio` | 680 | — | `A-ONLY` | `sqrt(mean ensemble variance) / RMSE(ensemble mean)`; ~1 calibrated, `<1` over-confident | keep — ⚠️ its partials (`spread_skill_sums`) use `ddof=1`, so **`ensemble-size` must be ≥ 2**: `M = 1` divides by zero and yields a silent `NaN` rather than raising |
 | `rank_histogram_counts` | 690 | 465 | `A-SUPERSET` | Talagrand rank counts (randomised tie-breaking); A's signature is richer | keep |
 | `rank_histogram_reliability` | 725 | — | `A-ONLY` | Scalar flatness of the rank histogram (0 = calibrated) | keep |
 | `ensemble_partials` | 739 | — | `A-ONLY` | **The streaming ensemble contract.** Emits per-batch partials that `evaluation.merge_ensemble_partials` accumulates and `finalize_ensemble_metrics` reduces. This is the mechanism that lets MC-dropout and diffusion report *identical* ensemble metrics | keep |

@@ -1,4 +1,4 @@
-# Step 2 (block b) — Config
+# Step 2 (block b) — Config ✅ **DONE (2026-07-29)**
 
 > Part of the split rebuild plan. Index: [`rebuild-plan.md`](rebuild-plan.md) ·
 > Context: [`00-context.md`](00-context.md) · Prev: [Step 1](step-1-design.md) · Next: [Step 3](step-3-utils.md)
@@ -12,6 +12,61 @@ metric/loss name referenced must exist in an annotated `keep`/`modify` row.
 
 ---
 
+## ▶ OUTCOME — what was actually built, and how it differs from this spec
+
+**18 files**, laid out one directory per concern (this supersedes the flat tree in §1):
+
+```
+config/
+├── split/               split.yaml · split_smoke_cpu.yaml · split_smoke_gpu.yaml
+├── eval/                metrics.yaml · probabilistic_eval.yaml · probabilistic_eval_smoke_cpu.yaml
+├── deterministic_unet/  deterministic_unet.yaml · …_smoke_cpu.yaml · …_smoke_gpu.yaml · search_space.yaml
+├── mc_dropout/          mc_dropout.yaml          · …_smoke_cpu.yaml · …_smoke_gpu.yaml · search_space.yaml
+└── diffusion/           diffusion.yaml           · …_smoke_cpu.yaml · …_smoke_gpu.yaml · search_space.yaml
+```
+
+All gates pass: 19/19 files parse; `{{$DATA_ROOT}}` and `{{$UPSTREAM_MODEL}}` interpolate to `''` when unset;
+every loss/metric/figure name resolves to an inventory row; every `thresholds:`/`bins:` reference and every
+`*_fidelity` band resolves; all three `selection` blocks sum to 1.00 and name emittable keys; no forbidden name
+survives in active YAML *or* in any parsed config; no absolute path; every smoke-split id maps to a real,
+lightning-active, year-disjoint mid-July day.
+
+### Corrections to this spec, found while executing it
+
+| # | This document said | Reality | Resolution |
+|---|---|---|---|
+| 1 | §3.2 + §7: `kind: absolute` needs a **new** branch in `evaluation.resolve_threshold` | `absolute` **already exists and is the default kind** (`aru:src/utils/metrics/evaluation.py:58-76`) | Hour bands work with no new code. **Step 3 deferral deleted.** |
+| 2 | §5.1: `data-path: ${DATA_ROOT}` | `parse_config` matches `{{\$([^}]+)}}` **only**; `${VAR}` passes through literally and an unset var becomes `''` | Wrote `'{{$DATA_ROOT}}'`; documented the token in `CLAUDE.md` + `README.md`, which had never stated it |
+| 3 | §5.3/§5.4: smoke split via `max-days: 2` | No such parameter exists. `prepare_regression` has a *global* `max_samples` = `index.head(N)` **and raises if any split is empty** — on the year split `head(2)` is 2 days of 2008, i.e. test-only → hard error | Dedicated `split_smoke_{cpu,gpu}.yaml` (`by_sample_id`, `cross_check: false`), **mid-July** so the occurrence base rate is non-zero. No new stage parameter |
+| 4 | §3.3: `tweedie_deviance` removal "pending conflict #3" | Already resolved in `step-1-design.md` — **remove** is final | Removed; the "pending" marker was stale |
+| 5 | §4.1 `calibration:` shows only `occurrence` | §6 item 9 (remove `MonotoneCalibration`) is superseded by Step 1 Q2 ("keep and extend") | Both `calibration.occurrence` **and** `calibration.regression` are exposed; item 9 struck in the inventory |
+| 6 | §5.1: `prepared-path` / `checkpoint-path` / `search-space` | The aru stages use `input-path` / `model-path` / `model-config`, and `run.py` **special-cases `model-config` and `metrics-config` to log them as MLflow artifacts** | Kept aru's names — renaming would lose the artifact logging for nothing |
+| 7 | §5.3/§5.4 both titled `*_local.yaml` with contradictory values | Two tiers, one name | Renamed to **`*_smoke_cpu.yaml`** and **`*_smoke_gpu.yaml`** ("local" described a machine, not a tier) |
+
+### Decisions taken beyond this spec
+
+1. **`distr_regression` → `deterministic_unet`** (§0 below asked for `deterministic_module`; `_module` is a
+   code-layer suffix, wrong for a pipeline/directory/`model-family` token).
+2. **Selection score is PR-AUC driven**, one name `valid_regression_score` for all families:
+   `0.40 average_precision_occurrence + 0.30 mae_cond_ss_climatology + 0.30 psd_full_fidelity`.
+3. **`selection-metric`/`selection-mode` stage parameters dropped.** They duplicated the search space's
+   `selection:` block, which was the *only* reason a "MUST match the sweep's" warning existed. `tune` now reads the
+   block from `model-config` and records it into `best_trial.json`; `retrain_best` reads it back. The mismatch is
+   now unrepresentable rather than merely warned about.
+4. **MC-dropout warm-starts from the deterministic U-net** (`UPSTREAM_MODEL` on **`tune`**), running the finetuning
+   phase alone; unset ⇒ two-phase fit from scratch. ⚠️ Deliberately *not* the diffusion mechanism: MC-dropout takes
+   the upstream's **weights**, diffusion takes its **predictions** via `prepare_regression`.
+5. **`deterministic_unet.unet.normalization` fixed to `group`** — a batch-norm upstream cannot be warm-started into
+   an MC-dropout model (MC inference re-enables dropout, which would unfreeze batch-norm running statistics), so
+   leaving the choice open would let a 40-trial sweep return a best model no downstream family can consume.
+6. **`min_hours: 0` alongside `max_hours: 24`** in every search space — the target is bounded on both sides.
+   ⚠️ `softplus` only guarantees `>= 0`, so it would silently violate a non-zero `min_hours`.
+7. **No `persistence` baseline.** A diagnostic parameterization never sees a past observation.
+8. **Five new names added, with inventory rows written for each** (§6 verification rule 2 required them):
+   `wmse_psd` (loss), `roc_auc` + `explained_deviance` (scores), `roc_pr_curves` + `confusion_matrix` (figures).
+
+---
+
 ## 0. change distr_regression name and 
 
 This naming is confusing. The job of this network is to provide a deterministic U-Net which is then used to compute the residuals that are the targets of the diffusion (flow-matching) model. 
@@ -21,27 +76,31 @@ Change everywhere that applies (also the README and other steps plans for exampl
 
 ## 1. File inventory
 
+> ⚠️ **SUPERSEDED** — the flat tree below was the plan; the built layout is the per-concern one in the OUTCOME
+> section above (`config/split/`, `config/eval/`, `config/<family>/`), and the smoke tiers are
+> `*_smoke_cpu.yaml` / `*_smoke_gpu.yaml`, not `*_local.yaml`. Kept for the rename record only.
+
 ```
 config/
-├── split.yaml                        # shared: year-based train/valid/test
-├── metrics.yaml                      # shared: the one metric suite, all families
-├── distr_regression.yaml             # pipeline: U-net baseline (also the residual upstream)
+├── split.yaml                        # shared: year-based train/valid/test   -> config/split/split.yaml
+├── metrics.yaml                      # shared: the one metric suite          -> config/eval/metrics.yaml
+├── distr_regression.yaml             # -> config/deterministic_unet/deterministic_unet.yaml
 ├── distr_regression/
-│   └── search_space.yaml
-├── mc_dropout.yaml                   # pipeline: MC-dropout
+│   └── search_space.yaml             # -> config/deterministic_unet/search_space.yaml
+├── mc_dropout.yaml                   # -> config/mc_dropout/mc_dropout.yaml
 ├── mc_dropout/
 │   └── search_space.yaml
-├── diffusion.yaml                    # pipeline: flow matching (incl. residual mode)
+├── diffusion.yaml                    # -> config/diffusion/diffusion.yaml
 ├── diffusion/
 │   └── search_space.yaml
-├── probabilistic_eval.yaml           # cross-model: evaluate + tabulate + combine
-└── *_local.yaml                      # CPU smoke variant of each of the four above
+├── probabilistic_eval.yaml           # -> config/eval/probabilistic_eval.yaml
+└── *_local.yaml                      # -> *_smoke_cpu.yaml, plus a *_smoke_gpu.yaml tier
 ```
 
-**Renames from the source branches:** aru's `config/distr_regression/split.yaml` → top-level `config/split.yaml`
+**Renames from the source branches:** aru's `config/distr_regression/split.yaml` → `config/split/split.yaml`
 (it is shared, not family-specific); aru's `config/diffusion_model*.yaml` → `diffusion*` for consistency; adrien's
 `config/{distr_regression,mc_dropout}/metrics.yaml` and `metrics_old*.yaml` collapse into the single shared
-`config/metrics.yaml`. Aru's `*_fast_retrain.yaml` variants are **dropped** — `retrain_best_*` is a stage in the
+`config/eval/metrics.yaml`. Aru's `*_fast_retrain.yaml` variants are **dropped** — `retrain_best` is a stage in the
 main pipeline, not a separate config.
 
 ---
@@ -334,47 +393,68 @@ stages:
 This is the **proof the merge worked**: `tabulate_metrics` must emit one CSV whose metric-key columns are
 *identical* across families.
 
-### 5.3 `*_local.yaml` — CPU smoke variants
+### 5.3 / 5.4 The two smoke tiers — `*_smoke_cpu.yaml` and `*_smoke_gpu.yaml`
 
-Override only what makes the run tiny; inherit everything else by copy:
+*(Both sections were titled `*_local.yaml` with contradictory values; renamed so each tier has its own name.)*
+Each tier is its parent by copy, overriding only what makes the run small:
 
-| Parameter | Smoke value | Why |
-|---|---|---|
-| `n-trials` | `1` | one trial |
-| `max-epochs` | `1` | one epoch |
-| split | 2-day slice | via a `max-days: 2` parameter on `prepare_regression`, or a dedicated `split_local.yaml` |
-| `ensemble-size` | **`2`** | ⚠️ **not `1`** — `spread_skill_sums` uses `ddof=1`, so `M=1` silently yields `NaN` |
-| `lazy` | `false` | never cache a smoke run |
-| `n-trials` sampler | `random` | TPE is pointless at one trial |
+| Parameter | `*_smoke_cpu` | `*_smoke_gpu` | Why |
+|---|---|---|---|
+| `split-config` | `config/split/split_smoke_cpu.yaml` (8 days: 4/2/2) | `config/split/split_smoke_gpu.yaml` (18 days: 10/4/4) | `by_sample_id`, mid-July — **not** a `max-days` parameter, which does not exist (see correction 3) |
+| `output-path` prefixes | `outputs/<family>_smoke_cpu/…` | `outputs/<family>_smoke_gpu/…` | a smoke run must never clobber a real one |
+| `n-trials` | `1` | `2` | GPU tier runs two so the sampler / trial-comparison path is exercised |
+| `sampler` | `random` | `tpe` | TPE is pointless at one trial |
+| `max-epochs` | `1` | `1` | |
+| `pruning` | `false` | `false` | a 1-epoch trial has nothing to prune |
+| `accelerator` / `num-workers` | `cpu` / `0` | `gpu` / `8` | in-process loading avoids worker start-up dominating an 8-day run |
+| `precision` | (omitted) | `bf16-mixed` | the CPU tier cannot exercise mixed precision |
+| `feature-stats-days` | `4` | `10` | cannot exceed the train days available |
+| `ensemble-size` | **`2`** | **`5`** | ⚠️ **never `1`** — `spread_skill_sums` uses `ddof=1`, so `M=1` silently yields `NaN` |
+| `sampling-steps` (diffusion) | `8` | `16` | ODE integration dominates a CPU diffusion eval |
+| `lazy` | `false` | `false` | never cache a smoke run |
 
----
+Both tiers point at the **full** search spaces: `n-trials: 1` + `max-epochs: 1` is what makes them tiny, and three
+more search-space files would only drift out of sync.
 
-### 5.4 `*_local.yaml` — GPU smoke variants
+⚠️ With 8 days the rarest threshold (`h12`) may see zero events, so its categorical scores can come back `NaN`.
+That is expected at this size and is not a failed run.
 
-Override only what makes the run tiny; inherit everything else by copy:
+## 6. Step 2 verification — ✅ all gates pass
 
-| Parameter | Smoke value | Why |
-|---|---|---|
-| `n-trials` | `2` | one trial |
-| `max-epochs` | `1` | one epoch |
-| split | 10-day slice | via a `max-days: 10` parameter on `prepare_regression`, or a dedicated `split_local.yaml` |
-| `ensemble-size` | **`5`** | ⚠️ **not `1`** — `spread_skill_sums` uses `ddof=1`, so `M=1` silently yields `NaN` |
-| `lazy` | `false` | never cache a smoke run |
-| `n-trials` sampler | `TPE` | TPE is pointless at one trial |
-
-## 6. Step 2 verification
-
-1. `parse_config` on **every** YAML under `config/` — exits 0.
-2. Cross-check: every metric name in `metrics.yaml` and every loss name in every `search_space.yaml` appears as a
-   `keep`/`modify` row in [`inventory-scores.md`](inventory-scores.md) / [`inventory-losses.md`](inventory-losses.md).
-3. Grep for regressions: **no** occurrence of `target_transform`, `gamma_shape`, `gamma_scale`, `pit_histogram`,
-   `tweedie`, `poisson` (subject to conflict resolution), `qq_plot`, or `train_positive_quantile` anywhere in
-   `config/`.
-4. `DATA_ROOT` is referenced, and no absolute machine-specific path is hardcoded, in any config.
-5. Assert every `thresholds:` reference resolves to a name defined in `metrics.yaml`'s `thresholds` block.
+1. ✅ `parse_config` on every YAML under `config/` — 19/19 (18 + the template's `hello_world`).
+2. ✅ Every loss name in every `search_space.yaml`, every metric key in `metrics.yaml`, and every
+   `reporting.figures` entry resolves to a `keep`/`modify` row in
+   [`inventory-losses.md`](inventory-losses.md) / [`inventory-scores.md`](inventory-scores.md) /
+   [`inventory-figures.md`](inventory-figures.md) — the five new names got rows written for them.
+3. ✅ No forbidden name (`target_transform`, `gamma_shape`, `gamma_scale`, `pit_histogram`, `tweedie`, `poisson`,
+   `qq_plot`, `quantile_ratio`, `train_positive_quantile`, `persistence`, `log_warp`, `occurrence_threshold`,
+   `distr_regression`) survives in **active YAML** or in any **parsed** config. ⚠️ A naive whole-file grep *does*
+   hit several of these — every hit is comment prose *explaining the absence*, so the gate must strip comments or
+   inspect the parsed structure. Removed "subject to conflict resolution" from `tweedie`/`poisson`: Step 1 settled
+   both as remove.
+4. ✅ `DATA_ROOT` is referenced as `{{$DATA_ROOT}}` and interpolates to `''` when unset; no absolute path anywhere.
+5. ✅ Every `thresholds:` / `bins:` reference resolves to a declared threshold, and every `*_fidelity` key names a
+   declared PSD band.
+6. ✅ All three `selection` blocks name the same metric, sum to 1.00, and reference only emittable keys.
+7. ✅ Every smoke-split sample id maps to a real, lightning-active, year-disjoint mid-July day in `metadata.csv`.
+8. ✅ `upstream-model-path` is on `tune` for mc_dropout and on `prepare_regression` for diffusion, nowhere else;
+   `selection-metric`/`selection-mode` are gone; `min_hours`+`max_hours` in all three search spaces.
 
 ## 7. Deliberately deferred to Step 3
 
-- `evaluation.resolve_threshold` needs its new `kind: absolute` branch before the hour-band thresholds work.
+- ~~`evaluation.resolve_threshold` needs its new `kind: absolute` branch~~ — **not needed**, it already supports it
+  (correction 1).
 - `psd_full_fidelity` as a *metric key* backed by `psd_band_ratios` + `psd_fidelity` rather than its own function.
 - `fss_useful_scale` reusing precomputed per-scale FSS instead of recomputing (annotated `modify`).
+- Implementations for the five new names: `wmse_psd`, `roc_auc`, `explained_deviance`, `roc_pr_curves`,
+  `confusion_matrix`.
+- **`MCDropoutRegressionModule` init-from-checkpoint** plus a load-time architecture-compatibility check that
+  *raises*, naming the offending field, rather than silently partial-loading. The module has
+  `set_phase('train'|'finetune')` and a `finetuning_enabled` gate but nothing that loads foreign weights, so this is
+  new code, not wiring.
+- `search.apply_constraints`: force `finetuning.enabled = true` and ignore the `unet:` block when `tune` gets an
+  `upstream-model-path`; force `intensity_weight_gamma = 0` when `occurrence_head.loss == focal_bce`.
+- `build_output_activation` reading the `min_hours`/`max_hours` pair; decide whether `softplus` with a non-zero
+  `min_hours` is constrained out or clamped after the activation.
+- `tune` records the resolved `selection` block into `best_trial.json`; `retrain_best` reads it back and drops
+  `model-config` entirely.

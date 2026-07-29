@@ -13,9 +13,13 @@ Three model families share one pipeline and report **the same metrics through on
 
 | Family | Nature |
 |---|---|
-| `distr_regression` | Deterministic U-net — the baseline, and the *upstream* model for residual mode |
-| `mc_dropout` | Stochastic via MC-dropout at inference; two-phase fit (train → finetune) |
-| `diffusion` | Flow matching; optionally **residual** (predicts a correction on top of the upstream) |
+| `deterministic_unet` | Deterministic U-net — the baseline, and the *upstream* model for the other two |
+| `mc_dropout` | Stochastic via MC-dropout at inference. **Warm-starts** from the upstream's *weights* (`UPSTREAM_MODEL` set on `tune`) and runs the finetuning phase alone; unset ⇒ two-phase fit from scratch (train → finetune) |
+| `diffusion` | Flow matching. Optionally **residual**: conditions on the upstream's *prediction* (`UPSTREAM_MODEL` set on `prepare_regression`) and predicts a correction on top of it |
+
+⚠️ Both stochastic families read `UPSTREAM_MODEL`, but at **different stages and for different things** —
+MC-dropout wants the upstream's *weights* (a warm start, read by `tune`), diffusion wants its *predictions* (an
+extra conditioning channel, materialised by `prepare_regression`).
 
 ## Current scope: classification-first, no target transform
 
@@ -86,9 +90,23 @@ The repo is built on the `plumber` MLflow pipeline template. See [README.md](REA
 
 - **Stages are standalone CLI scripts** under `src/stages/`, wrapped with `fire`. Each must begin with
   `from __init__ import root_path` **before** any `src.` import — stages run from within `src/stages/`.
-- **Pipelines are YAML** under `config/`, run via `python run_project.py config/<pipeline>.yaml <EXPERIMENT>`.
+- **Pipelines are YAML** under `config/`, grouped one directory per concern and run via
+  `python run_project.py config/<family>/<pipeline>.yaml <EXPERIMENT>`:
+
+  | Directory | Holds |
+  |---|---|
+  | `config/split/` | `split.yaml` (the year split) + `split_smoke_cpu.yaml` / `split_smoke_gpu.yaml` subsets |
+  | `config/eval/` | `metrics.yaml` (**the** shared suite) + the cross-family `probabilistic_eval*.yaml` |
+  | `config/<family>/` | that family's pipeline, its two smoke tiers, and its `search_space.yaml` |
+
+  Each family has three tiers: `<family>.yaml` (full), `<family>_smoke_cpu.yaml` and `<family>_smoke_gpu.yaml`.
+- **Env vars in config use `{{$VAR}}`, not `${VAR}`.** `parse_config` substitutes textually *before* the YAML parse,
+  and an **unset variable becomes the empty string** rather than an error — so quote interpolated scalars
+  (`data-path: '{{$DATA_ROOT}}'`) and expect a missing variable to fail inside the stage, not at parse time.
 - **`OUTPUT_PARAM_KEYS`** (`output-path`, `metrics-path`, `report-path`) are treated as a stage's outputs by the
-  lazy cache; any other parameter resolving to an existing path is an input. Use those names.
+  lazy cache; any other parameter resolving to an existing path is an input. Use those names. Corollary: a *stale*
+  path silently degrades to a plain scalar, so the cache stops invalidating on that input — keep
+  `metrics-config` / `split-config` / `model-config` pointing at files that exist.
 - **Seeding is automatic** — the orchestrator exports `PIPELINE_SEED` and `src/stages/__init__.py` applies it. Do
   not re-seed globally inside a stage.
 - **Commit before running a pipeline.** The lazy cache keys on the whole-repo dirty diff, so any uncommitted edit

@@ -17,9 +17,15 @@ diagnostic ERA5 → lightning mapping — **not** a temporal forecast; there is 
 
 Several model families were built in parallel on separate branches and have drifted apart (re-implemented ideas,
 stale vendored copies, diverged infra). The goal is one clean repo, rebuilt from the
-`lightning-stochastic-modeling` template, where the **MC-dropout**, **flow-matching**, and **distr_regression
-(U-net)** pipelines are merged, share as much code as possible, and report the **same metrics through one common
+`lightning-stochastic-modeling` template, where the **MC-dropout**, **flow-matching**, and **deterministic_unet**
+pipelines are merged, share as much code as possible, and report the **same metrics through one common
 evaluation**. We rebuild block by block, verifying each block with a real CPU smoke run.
+
+> **Naming (Step 2):** the family formerly called `distr_regression` is now **`deterministic_unet`** everywhere in
+> the target repo — the old name described a distributional regression this family does not do. Source-branch
+> filenames, stage names and class names (`tune_distr_regression`, `distr_regression_aru.py`,
+> `docs/distr_regression_pipeline.md`) keep the old spelling throughout the inventories, because those are records
+> of what literally exists on the branches we read from.
 
 ### Branch findings (exploration result)
 
@@ -58,9 +64,16 @@ superset of aru's infrastructure, so the template already provides the orchestra
 > All four `inventory-*.md` files are flagged 🔢 `COUNT-REG` / 🔀 `TRANSFORM` / ✅ `CLASSIF` accordingly, and
 > [`inventory-architecture.md`](inventory-architecture.md) §6 holds a **15-item transform-removal checklist**.
 
-- Scope: **all three families** — MC-dropout, flow-matching (incl. residual/knowledge-guided mode), and
-  distr_regression U-net (baseline **and** the upstream model for the residual mode). We do not do the regression on the counts of flashes. The residual mode is done on the 0 to 24 daily occurence regression.
+- Scope: **all three families** — MC-dropout, flow-matching (incl. residual/knowledge-guided mode), and the
+  `deterministic_unet` (baseline **and** the upstream model for *both* stochastic families). We do not do the
+  regression on the counts of flashes. The residual mode is done on the 0 to 24 daily occurence regression.
 - MC-dropout's two-phase (train → finetune) fit is folded into the **shared** tuning harness.
+- **Both stochastic families build on the upstream, via the same `UPSTREAM_MODEL` variable but different
+  mechanisms** (Step 2): MC-dropout takes the upstream's **weights** — read by `tune`, which then warm-starts and
+  runs the finetuning phase alone — while diffusion takes its **predictions**, materialised by
+  `prepare_regression` as an extra conditioning channel it learns a residual on top of. Unset ⇒ each family trains
+  standalone. This is why `deterministic_unet`'s search space fixes `unet.normalization: group`: a batch-norm
+  upstream cannot be warm-started into an MC-dropout model, whose inference re-enables dropout.
 - Verification: **real CPU smoke runs — 1 epoch, 2 days of data** (full data is local, machine is CPU-only) at
   each block, plus unit tests + import/parse checks.
 - **Plotting:** no notebooks are ported. Plotting functions live in `src/utils`, **inspired by notebook 02a**
@@ -95,17 +108,18 @@ One repo, one orchestrator, one evaluation. Code splits into **shared** (family-
 - **Shared pipeline surface:** `io/data.py`; a merged `dataset.py`; `unet.py` (backbone + `enable_mc_dropout`);
   a unified `losses.py`; `search.py`; a two-phase-capable `tuning.py`; `validation.py` (single selection score);
   `registry.py`; the `metrics/` package (`scores`, `evaluation`, `reporting`, `diagnostics`);
-  `config/split.yaml`, `config/metrics.yaml`; the stages `prepare_regression.py`,
+  `config/split/split.yaml`, `config/eval/metrics.yaml`; the stages `prepare_regression.py`,
   **`evaluate_regression.py` (the common eval)**, `tabulate_metrics.py`, `combine_curves.py`.
   *(`transforms.py` is **dropped** — see the scope change.)*
 - **Model-specific:** flow-matching (`diffusion.py`, `diffusion_module.py`);
   MC-dropout (`mc_dropout_module.py` from adrien + `mc_dropout_eval.py` adapter);
-  distr_regression (`module.py`); plus each family's config + search space.
+  `deterministic_unet` (`module.py`, `DeterministicUnetModule`); plus each family's config + search space.
   *(Per-family `tune_*` stages are being **unified** — see [Step 4](step-4-stages.md).)*
 
 The common eval already unifies families: `registry.load_regression_module` dispatches by checkpoint marker and
 wraps MC-dropout in `MCDropoutEnsembleModule`, which re-expresses MC forward passes in the ensemble contract and
-feeds the **shared** `scores.ensemble_partials`. distr_regression supplies the upstream for residual mode.
+feeds the **shared** `scores.ensemble_partials`. The `deterministic_unet` supplies the upstream for both stochastic
+families — its *weights* for MC-dropout's warm start, its *predictions* for diffusion's residual mode.
 
 ### The ensemble contract
 

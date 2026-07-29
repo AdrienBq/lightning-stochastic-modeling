@@ -1,0 +1,101 @@
+project_uri: 'src/stages'                                                           # the path of the directory where each stage script is saved
+log_artifacts: false                                                                # whether to log the output file/directory as artifact
+log_models: false                                                                   # whether to log the output model
+lazy: false                                                                         # NEVER cache a smoke run: the point is to execute every stage
+ensure_determinism: false
+banner: true
+description: 'Cross-family comparison -- CPU smoke tier (the merge gate)'
+
+# =====================================================================================================================
+# CPU SMOKE TIER of config/eval/probabilistic_eval.yaml -- and THE FINAL VERIFICATION GATE of the rebuild.
+#
+# Prerequisite: run all three CPU smoke pipelines first, so their checkpoints exist:
+#     python run_project.py config/deterministic_unet/deterministic_unet_smoke_cpu.yaml <EXPERIMENT>
+#     python run_project.py config/mc_dropout/mc_dropout_smoke_cpu.yaml        <EXPERIMENT>
+#     python run_project.py config/diffusion/diffusion_smoke_cpu.yaml         <EXPERIMENT>
+#     python run_project.py config/eval/probabilistic_eval_smoke_cpu.yaml <EXPERIMENT>
+#
+# THE ASSERTION: tabulate_metrics must emit ONE CSV whose metric-key COLUMNS ARE IDENTICAL across the three families,
+# and combine_curves must emit the overlaid figures. That is the proof the three pipelines are genuinely merged and
+# report the same metrics through one evaluation -- not three evaluations that happen to agree on some names.
+#
+# Expected and correct: the deterministic U-net's ensemble scalars are NaN and it contributes no rank histogram.
+# Identical COLUMNS is the requirement; identical VALUES is not.
+#
+# Environment: export DATA_ROOT before running.
+# =====================================================================================================================
+
+stages:
+    - setup:
+        outputs: outputs
+        comparison: outputs/comparison_smoke_cpu
+        curves: outputs/comparison_smoke_cpu/curves
+
+    # 1a) Deterministic U-net -- the baseline
+    - evaluate_regression:
+        input-path: outputs/deterministic_unet_smoke_cpu/prepared/daily_lightning_hours
+        model-path: outputs/deterministic_unet_smoke_cpu/best/best_model.ckpt
+        output-path: outputs/comparison_smoke_cpu/evaluation/deterministic_unet
+        metrics-config: config/eval/metrics.yaml
+        metrics-path: outputs/comparison_smoke_cpu/evaluation/deterministic_unet/test_metrics.json
+        report-path: outputs/comparison_smoke_cpu/reports/deterministic_unet
+        split: test
+        baselines: zero,climatology
+        ensemble-size: 2                    # NEVER 1: spread_skill_sums uses ddof=1
+        accelerator: cpu
+        devices: 1
+        num-workers: 0
+        batch-size: 2
+        progress-bar: true
+
+    # 1b) MC-dropout
+    - evaluate_regression:
+        input-path: outputs/mc_dropout_smoke_cpu/prepared/daily_lightning_hours
+        model-path: outputs/mc_dropout_smoke_cpu/best/best_model.ckpt
+        output-path: outputs/comparison_smoke_cpu/evaluation/mc_dropout
+        metrics-config: config/eval/metrics.yaml
+        metrics-path: outputs/comparison_smoke_cpu/evaluation/mc_dropout/test_metrics.json
+        report-path: outputs/comparison_smoke_cpu/reports/mc_dropout
+        split: test
+        baselines: zero,climatology
+        ensemble-size: 2
+        accelerator: cpu
+        devices: 1
+        num-workers: 0
+        batch-size: 2
+        progress-bar: true
+
+    # 1c) Flow-matching diffusion
+    - evaluate_regression:
+        input-path: outputs/diffusion_smoke_cpu/prepared/daily_lightning_hours
+        model-path: outputs/diffusion_smoke_cpu/best/best_model.ckpt
+        output-path: outputs/comparison_smoke_cpu/evaluation/diffusion
+        metrics-config: config/eval/metrics.yaml
+        metrics-path: outputs/comparison_smoke_cpu/evaluation/diffusion/test_metrics.json
+        report-path: outputs/comparison_smoke_cpu/reports/diffusion
+        split: test
+        baselines: zero,climatology
+        sampling-steps: 8
+        ensemble-size: 2
+        accelerator: cpu
+        devices: 1
+        num-workers: 0
+        batch-size: 2
+        progress-bar: true
+
+    # 2) The comparison layer -- the gate itself
+    - tabulate_metrics:
+        output-path: outputs/comparison_smoke_cpu/metrics_comparison_test.csv
+        Deterministic-UNet: outputs/comparison_smoke_cpu/evaluation/deterministic_unet/test_metrics.json
+        MC-Dropout:         outputs/comparison_smoke_cpu/evaluation/mc_dropout/test_metrics.json
+        Diffusion:          outputs/comparison_smoke_cpu/evaluation/diffusion/test_metrics.json
+
+    - combine_curves:
+        output-path: outputs/comparison_smoke_cpu/curves
+        Deterministic-UNet: outputs/comparison_smoke_cpu/reports/deterministic_unet
+        MC-Dropout:         outputs/comparison_smoke_cpu/reports/mc_dropout
+        Diffusion:          outputs/comparison_smoke_cpu/reports/diffusion
+
+tags:                                                                               # tags to be applied to the run
+    version: 1.0
+    experiment: probabilistic_eval_smoke_cpu

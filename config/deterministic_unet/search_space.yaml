@@ -1,0 +1,164 @@
+# =====================================================================================================================
+# Search space + training options for the `tune` stage with `model-family: deterministic_unet` (referenced as
+# model-config in config/deterministic_unet/deterministic_unet.yaml, and logged as a run artifact by the orchestrator).
+#
+# This family is the deterministic U-net: the baseline, AND the upstream model whose prediction the residual
+# diffusion corrects. It carries the SHARED SKELETON only — no ensemble knobs (it is deterministic, so
+# evaluate_regression emits no ensemble_members) and no flow-matching knobs.
+#
+# Conventions:
+#   * categorical hyperparameters:  {type: categorical, choices: [...]}
+#   * integer ranges:               {type: int, low: ..., high: ...}
+#   * float ranges:                 {type: float, low: ..., high: ..., log: true|false}
+#   * plain values (not tuned):     given directly
+# Conditional parameters (e.g. everything under `occurrence_head` when occurrence_head.enabled samples false) are
+# simply ignored by the trial when their parent switch is off.
+#
+# There is deliberately NO `target_transform:` block. The gamma F-transform is gone: training space == target space
+# (see config/eval/metrics.yaml). Do not reintroduce it.
+# =====================================================================================================================
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Regression loss on the bounded 0-24 daily lightning-hours target. Every option is designed against the extreme
+# imbalance, pulling gradients towards active cells and preferring conservative (over-predicting) errors over misses.
+#
+# Note what is ABSENT: `tweedie` and `poisson_nll`. Both are unbounded count likelihoods — Poisson in particular puts
+# probability mass above 24 hours/day, which is not merely imprecise but wrong for this target.
+#
+# Note also that plain `mae` / `rmse` are absent BY CONSTRUCTION, not by omission: intensity weighting is
+# w(y) = (1 + y)^gamma, so gamma = 0 makes weighted_mae identically mae and weighted_rmse identically rmse. This is
+# why intensity_weight_gamma's lower bound MUST stay at 0.0 — raising it makes the unweighted losses unreachable.
+# ---------------------------------------------------------------------------------------------------------------------
+loss:
+    name: {type: categorical, choices: [weighted_mae, weighted_rmse, weighted_mse, asymmetric_huber, wmae_psd, wmse_psd]}
+
+    # intensity weighting w(y) = (1 + y)^gamma, computed from the RAW target and applied samplewise.
+    # 0.0 = unweighted (recovers mae / rmse / mse); higher gamma increasingly up-weights high-hour cells.
+    intensity_weight_gamma: {type: float, low: 0.0, high: 1.0}
+
+    # asymmetric_huber only: under-prediction is penalized tau/(1-tau) times more than over-prediction, so
+    # tau > 0.5 encodes the preference for conservative models
+    asymmetry_tau: {type: float, low: 0.5, high: 0.9}
+    huber_delta:   {type: float, low: 0.5, high: 3.0}
+
+    # wmae_psd / wmse_psd only: composite = alpha * <pointwise term> + (1 - alpha) * psd_penalty, where
+    # psd_penalty (in [0, 1]) radially bins the predicted and observed power spectra, forms a per-bin power ratio ->
+    # fidelity clip(1 - |1 - ratio|, 0, 1) and penalizes 1 - mean fidelity, directly discouraging over-smoothing at
+    # every spatial scale. Kept >= 0.5 so the pointwise (magnitude-aware) term stays dominant: the PSD penalty is a
+    # scale-invariant power ratio carrying no signal about prediction magnitude, so a PSD-dominated loss would admit
+    # degenerate count-blind solutions.
+    alpha: {type: float, low: 0.5, high: 1.0}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Optional occurrence head: a per-cell P(lightning) classifier trained alongside the regressor. It is what makes
+# brier_skill_score, explained_deviance, reliability_diagram and the ROC/PR curves computable, so it is the natural
+# companion of the classification-first scope.
+#
+# Config alias -> loss function (losses.py), since the short names below are dispatch keys, not function names:
+#   focal_bce   -> focal_bce_with_logits
+#   dice        -> dice_loss
+#   brier       -> brier_loss
+#   crps_binary -> crps_binary
+#
+# !! Step 3 constraint for search.apply_constraints: when occurrence_head.loss == focal_bce, force
+# !! loss.intensity_weight_gamma to 0.0. focal_bce already carries positive_class_weight, and on a BINARY target
+# !! (1 + y)^gamma collapses to {1, 2^gamma} — i.e. a plain positive-class weight — so the two mechanisms duplicate
+# !! each other and their product is uninterpretable.
+# ---------------------------------------------------------------------------------------------------------------------
+occurrence_head:
+    enabled: {type: categorical, choices: [true, false]}
+    loss: {type: categorical, choices: [focal_bce, dice, brier, crps_binary]}
+    focal_gamma: {type: float, low: 1.0, high: 3.0}
+    positive_class_weight: {type: float, low: 1.0, high: 50.0}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# U-net backbone.
+#
+# `normalization` is a FIXED value, not a searched choice, for two reasons:
+#   1. EVERY checkpoint of this family must be a valid UPSTREAM -- for MC-dropout's warm start (which loads these
+#      weights directly) and for diffusion's residual conditioning. MC inference re-enables dropout while the rest
+#      of the model runs in eval(); batch norm keeps running mean/var statistics that would unfreeze and shift under
+#      that, so a batch-norm upstream is unusable. Leaving the choice open would let a 40-trial sweep hand back a
+#      best model that no downstream family can consume.
+#   2. Batch sizes here are 4-32, where batch-norm statistics are noisy anyway.
+# ---------------------------------------------------------------------------------------------------------------------
+unet:
+    base_channels: {type: categorical, choices: [16, 32, 64]}
+    depth: {type: int, low: 3, high: 5}                 # number of down/upsampling levels
+    normalization: group                                # FIXED -- see the two reasons above
+    activation: {type: categorical, choices: [relu, gelu, silu]}
+    bottleneck_attention: {type: categorical, choices: [true, false]}
+
+# The target is BOUNDED on BOTH sides, so every family's head must respect both bounds.
+#   clamped_sigmoid : min_hours + (max_hours - min_hours) * sigmoid(z) -- bounded by construction
+#   softplus        : non-negative but unbounded above; relies on the loss to keep predictions in range.
+#                     NOTE it only guarantees >= 0, which coincides with min_hours: 0 today but would SILENTLY
+#                     violate a non-zero min_hours. Step 3 must either constrain that combination out or clamp
+#                     after the activation.
+output_activation: {type: categorical, choices: [softplus, clamped_sigmoid]}
+min_hours: 0                                            # the bounded-target floor, in hours per day
+max_hours: 24                                           # the bounded-target ceiling, in hours per day
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Calibration of the model heads, each fitted in a dedicated FINAL phase with the backbone frozen. Treated as
+# hyperparameters (on/off), identity-initialised so that "disabled" is an exact no-op.
+#   * occurrence: classical Platt scaling of the occurrence logit, p = sigmoid(a * z + b), fitted with PLAIN BCE on
+#     the raw 0-vs-positive labels — independent of how the head was trained. Rank-preserving, so it recalibrates
+#     the probabilities (Brier / reliability / explained deviance) without moving a hard decision mask.
+#   * regression: a MONOTONE, zero-preserving recalibration of the predicted hours, fitted with a plain symmetric
+#     log1p-Huber loss on observed-positive cells. Deliberately decoupled from the backbone's weighted loss
+#     (otherwise the calibrator just relearns the identity), and both extremes-robust (Huber) and scale-robust
+#     (log1p). `structure` is itself a hyperparameter:
+#       - power_law       : g(p) = s * ((1 + p)^a - 1), s, a > 0           (2 parameters, rigid, robust)
+#       - monotone_smooth : g(p) = expm1(m(log1p(p))), m monotone, m(0)=0  (base slope + num_sigmoids bumps)
+#     `objective` fits the SAME map either per-cell (`pointwise`, corrects the conditional mean) or on the SORTED
+#     marginals (`quantile`, classical quantile-mapping bias correction).
+#     log1p space is valid here BECAUSE the target is non-negative and there is no signed transformed space any
+#     more — the earlier count-regression objection to this block no longer applies.
+# ---------------------------------------------------------------------------------------------------------------------
+calibration:
+    occurrence: {type: categorical, choices: [none, platt]}
+    regression:
+        structure: {type: categorical, choices: [none, power_law, monotone_smooth]}
+        objective: {type: categorical, choices: [pointwise, quantile]}
+        num_sigmoids: 4                                 # bumps of the monotone_smooth structure (unused otherwise)
+        huber_delta: 1.0                                # Huber transition in log1p space (~factor e at delta=1)
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Optimization
+# ---------------------------------------------------------------------------------------------------------------------
+optimizer:
+    name: adamw
+    lr: {type: float, low: 1.0e-4, high: 1.0e-2, log: true}
+    weight_decay: {type: float, low: 1.0e-6, high: 1.0e-3, log: true}
+    scheduler: {type: categorical, choices: [cosine, reduce_on_plateau]}
+    gradient_clip_val: 1.0
+
+batch_size: {type: int, low: 4, high: 32}
+max_epochs: 50
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Trial selection: ONE composite score, ONE name, shared by all three families so their trials tables are directly
+# comparable (this retires the old valid_tail_score / valid_regression_score split). Computed on the validation
+# split, in the target space, on the ensemble MEAN for stochastic families. Component definitions are exactly the
+# metric keys emitted by config/eval/metrics.yaml.
+#
+#   valid_regression_score = 0.40 * average_precision_occurrence  (PR-AUC on the occurrence event: threshold-free,
+#                                                                  base-rate-robust discrimination on the headline
+#                                                                  task; preferred over ROC-AUC, which is
+#                                                                  optimistic when negatives dominate)
+#                          + 0.30 * mae_cond_ss_climatology       (conditional-MAE skill vs the climatology
+#                                                                  baseline on occurrence cells; anti-trivial — an
+#                                                                  all-zero model scores <= 0)
+#                          + 0.30 * psd_full_fidelity             (1 - |1 - full-band PSD ratio|, clipped to
+#                                                                  [0, 1]; anti-smoothing)
+# Deliberately anti-degenerate on all three axes: a model cannot win by discriminating without magnitude, by being
+# conservative-in-the-mean without structure, or by being sharp without skill.
+# ---------------------------------------------------------------------------------------------------------------------
+selection:
+    metric: valid_regression_score
+    mode: max
+    components:
+        average_precision_occurrence: 0.40
+        mae_cond_ss_climatology:      0.30
+        psd_full_fidelity:            0.30

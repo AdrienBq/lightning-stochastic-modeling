@@ -1,0 +1,155 @@
+# =====================================================================================================================
+# Search space + training options for the `tune` stage with `model-family: mc_dropout` (referenced as model-config in
+# config/mc_dropout/mc_dropout.yaml, and logged as a run artifact by the orchestrator).
+#
+# Same shared skeleton as config/deterministic_unet/search_space.yaml (read that file for the loss / occurrence-head /
+# calibration / selection rationale, which is identical), plus the three things that make this family stochastic:
+# a mandatory dropout rate, a group-norm-only backbone, and a FINETUNING phase that calibrates the MC ensemble.
+#
+# ---------------------------------------------------------------------------------------------------------------------
+# TWO MODES, selected by whether `tune` is given an `upstream-model-path` (i.e. whether UPSTREAM_MODEL is exported).
+# Both are folded into the SHARED tuning harness; there is no separate tune_mc_dropout stage any more.
+#
+#   FROM SCRATCH (UPSTREAM_MODEL unset) -- the full two-phase fit:
+#     phase 1 (train)    : deterministic single forward pass, `loss` below; dropout acts as a plain regularizer.
+#     phase 2 (finetune) : MC-dropout active during forward passes, switch to the probabilistic `finetuning.loss` so
+#                          that the ensemble DISTRIBUTION is calibrated, at a reduced LR to avoid forgetting.
+#
+#   WARM START (UPSTREAM_MODEL set) -- phase 1 is REPLACED by the deterministic U-net:
+#     the upstream checkpoint's weights are loaded into an identically-shaped MC-dropout U-net and ONLY the
+#     finetuning phase runs. This is a WEIGHT initialization, not a conditioning channel -- the crucial difference
+#     from the diffusion family, whose residual mode needs the upstream PREDICTION materialized by
+#     prepare_regression. MC-dropout needs the upstream WEIGHTS, so its switch sits on `tune` and its
+#     prepare_regression call is the plain full-target one.
+#
+#   Two consequences for THIS file in warm-start mode:
+#     * the `unet:` block below is NOT searched -- base_channels, depth, activation, bottleneck_attention,
+#       normalization and the input channel count are all inherited from the upstream checkpoint. The block stays in
+#       the file because from-scratch mode still needs it.
+#     * `finetuning.enabled` is FORCED true -- there is no phase 1 to fall back on, so sampling false would make
+#       half the trials no-ops. Recorded below as an apply_constraints rule for Step 3.
+#   `dropout_p` IS still searched in both modes: the upstream is deterministic, so the dropout rate is precisely
+#   what the finetuning phase has to calibrate.
+# ---------------------------------------------------------------------------------------------------------------------
+#
+# `finetuning` is a NESTED block of the loss configuration, not a separate builder — build_finetune_loss is removed
+# and the option folds into build_regression_loss / build_binary_loss.
+#
+# There is deliberately NO `target_transform:` block. See config/eval/metrics.yaml.
+# =====================================================================================================================
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Phase-1 regression loss — identical set and identical rationale to the deterministic family, so the two are
+# comparable at equal loss. intensity_weight_gamma's lower bound MUST stay 0.0 (that is what makes plain mae/rmse
+# reachable at all).
+# ---------------------------------------------------------------------------------------------------------------------
+loss:
+    name: {type: categorical, choices: [weighted_mae, weighted_rmse, weighted_mse, asymmetric_huber, wmae_psd, wmse_psd]}
+    intensity_weight_gamma: {type: float, low: 0.0, high: 1.0}   # 0.0 => unweighted
+    asymmetry_tau: {type: float, low: 0.5, high: 0.9}            # asymmetric_huber only
+    huber_delta:   {type: float, low: 0.5, high: 3.0}
+    alpha:         {type: float, low: 0.5, high: 1.0}            # wmae_psd / wmse_psd: pointwise weight;
+                                                                 # (1 - alpha) -> psd_penalty
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Phase-2 fine-tuning: calibrate the MC-dropout ensemble while preserving spatial structure.
+#   crps             : continuous ranked probability score over the MC members.
+#   almost_fair_crps : the bias-corrected estimator (Ferro 2014). It removes the finite-sample bias from reusing the
+#                      same ensemble for the error and the spread terms, so it is the right choice when `samples`
+#                      is small. Preferred default.
+#   afcrps_psd       : beta * almost_fair_crps + (1 - beta) * psd_penalty — the CRPS spread calibration plus the
+#                      whole-spectrum structure penalty, so fine-tuning cannot buy calibration with blur.
+# The CRPS implementations in losses.py and scores.py MUST agree; scores.crps_ensemble is the reference contract
+# (returns a float, accepts condition=).
+# ---------------------------------------------------------------------------------------------------------------------
+finetuning:
+    enabled: {type: categorical, choices: [true, false]}
+                                                        # !! Step 3 constraint for search.apply_constraints: FORCE
+                                                        # !! true when tune is given an upstream-model-path -- in
+                                                        # !! warm-start mode there is no phase 1 to fall back on.
+    loss: {type: categorical, choices: [crps, almost_fair_crps, afcrps_psd]}
+    loss_weight: {type: float, low: 0.1, high: 1.0}     # ramp-up weight on the fine-tuning loss during the
+                                                        # transition epochs
+    beta: {type: float, low: 0.5, high: 1.0}            # afcrps_psd only: CRPS weight; (1 - beta) -> psd_penalty.
+                                                        # Kept >= 0.5 for the same reason as phase-1 alpha.
+    samples: {type: int, low: 8, high: 32}              # MC samples per step for the CRPS spread term; more =
+                                                        # less biased CRPS, more memory and compute
+    max_epochs: 10
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Occurrence head — identical to the deterministic family. See that file for the alias -> function map and the
+# focal_bce / intensity_weights mutual-exclusion constraint.
+# ---------------------------------------------------------------------------------------------------------------------
+occurrence_head:
+    enabled: {type: categorical, choices: [true, false]}
+    loss: {type: categorical, choices: [focal_bce, dice, brier, crps_binary]}
+    focal_gamma: {type: float, low: 1.0, high: 3.0}
+    positive_class_weight: {type: float, low: 1.0, high: 50.0}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# U-net backbone. IGNORED ENTIRELY IN WARM-START MODE -- the architecture is then inherited from the upstream
+# checkpoint (see the two-modes note in the file header). Used only for a from-scratch fit.
+#
+# Two constraints are HARD for this family and are why `normalization` is a fixed value here rather than the shared
+# skeleton's three-way choice (config/deterministic_unet/search_space.yaml now fixes it to `group` too, precisely so
+# that its checkpoints are warm-start compatible):
+#
+#   1. GROUP NORM ONLY. Batch norm keeps running mean/var statistics that are updated in train() mode and frozen in
+#      eval(). MC inference re-enables dropout while the rest of the model runs in eval(); doing that by putting the
+#      model back into train() would also unfreeze the batch-norm statistics, shifting them at test time. Group norm
+#      is invariant to the train/eval switch, so it is the only safe choice.
+#   2. dropout > 0 IS ENFORCED. MC inference needs stochastic units — a zero-dropout model degenerates to a
+#      deterministic predictor and cannot produce an ensemble at all (and with ensemble-size >= 2 every member would
+#      be identical, giving zero spread and a NaN spread-skill ratio).
+# ---------------------------------------------------------------------------------------------------------------------
+unet:
+    base_channels: {type: categorical, choices: [16, 32, 64]}
+    depth: {type: int, low: 3, high: 5}
+    normalization: group                                # FIXED — see constraint 1 above
+    activation: {type: categorical, choices: [relu, gelu, silu]}
+    bottleneck_attention: {type: categorical, choices: [true, false]}
+
+dropout_p: {type: float, low: 0.05, high: 0.3}          # MC-dropout rate; strictly > 0 — see constraint 2 above
+
+# Bounded on BOTH sides -- see config/deterministic_unet/search_space.yaml for the softplus caveat.
+output_activation: {type: categorical, choices: [softplus, clamped_sigmoid]}
+min_hours: 0                                            # the bounded-target floor, in hours per day
+max_hours: 24                                           # the bounded-target ceiling, in hours per day
+
+calibration:
+    occurrence: {type: categorical, choices: [none, platt]}
+    regression:
+        structure: {type: categorical, choices: [none, power_law, monotone_smooth]}
+        objective: {type: categorical, choices: [pointwise, quantile]}
+        num_sigmoids: 4
+        huber_delta: 1.0
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Optimization
+# ---------------------------------------------------------------------------------------------------------------------
+optimizer:
+    name: adamw
+    lr: {type: float, low: 1.0e-4, high: 1.0e-2, log: true}
+    weight_decay: {type: float, low: 1.0e-6, high: 1.0e-3, log: true}
+    scheduler: {type: categorical, choices: [cosine, reduce_on_plateau]}
+    gradient_clip_val: 1.0
+    # Phase 2 runs at a reduced LR to avoid catastrophically forgetting the phase-1 fit;
+    # effective fine-tuning LR = lr * finetune_lr_factor
+    finetune_lr_factor: {type: float, low: 0.01, high: 0.2, log: true}
+
+batch_size: {type: int, low: 4, high: 32}
+max_epochs: 50                                          # phase 1; phase 2 uses finetuning.max_epochs
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Trial selection — the SAME composite and the SAME name as every other family (see
+# config/deterministic_unet/search_space.yaml for the full derivation). For this family the pointwise and
+# categorical components are computed on the MC ensemble MEAN, while psd_full_fidelity is POOLED over members, which
+# is the same mean-vs-pooled split the evaluation stage uses.
+# ---------------------------------------------------------------------------------------------------------------------
+selection:
+    metric: valid_regression_score
+    mode: max
+    components:
+        average_precision_occurrence: 0.40
+        mae_cond_ss_climatology:      0.30
+        psd_full_fidelity:            0.30

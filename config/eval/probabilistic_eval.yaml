@@ -1,0 +1,120 @@
+project_uri: 'src/stages'                                                           # the path of the directory where each stage script is saved
+log_artifacts: false                                                                # whether to log the output file/directory as artifact
+log_models: false                                                                   # whether to log the output model
+lazy: true                                                                          # skip a stage whose code state + parameters + input checksums match a
+                                                                                    # previously recorded successful run whose outputs are still present and
+                                                                                    # byte-identical on disk. Overridable per stage with a `lazy:` key.
+                                                                                    # NOTE: the cache keys on the whole-repo dirty diff, so COMMIT before
+                                                                                    # running -- any uncommitted edit busts every entry.
+ensure_determinism: false                                                           # when a stage is executed with unchanged code+inputs+params but produces a
+                                                                                    # different output, that non-determinism is warned about; set true to raise.
+banner: true                                                                        # set false to disable the start-up welcome banner entirely
+description: 'Cross-family comparison: one evaluation, one metric table, one set of overlaid curves'
+
+# =====================================================================================================================
+# CROSS-FAMILY PROBABILISTIC EVALUATION -- and the PROOF the merge worked.
+#
+# Scores the three already-trained families with EXACTLY the same metric suite, the same baselines and the same
+# report, then puts them side by side. No training and no preparation happens here: run
+# config/deterministic_unet/deterministic_unet.yaml, config/mc_dropout/mc_dropout.yaml and config/diffusion/diffusion.yaml first, then this.
+#
+# What makes it a proof: every `evaluate_regression` call below is the SAME stage with the SAME metrics-config.
+# registry.load_regression_module dispatches the family from the checkpoint marker (with _sniff_family as the legacy
+# fallback) and wraps MC-dropout in MCDropoutEnsembleModule so it satisfies the shared ensemble contract. Therefore
+# tabulate_metrics MUST emit one CSV whose metric-key COLUMNS ARE IDENTICAL across the three families. If they are
+# not, the pipelines are not actually merged.
+#
+# Model display names are the flag names below (Fire binds --MC-Dropout -> kwargs MC_Dropout; the stage maps it back
+# to the readable label). Under lazy, the per-family metrics JSONs and report directories are fingerprinted as
+# INPUTS, so these comparison stages re-run whenever an upstream evaluation changes.
+#
+# Expected asymmetries, which are correct and not bugs: the deterministic U-net contributes no rank histogram (it is
+# skipped in combine_curves) and no ensemble scalars (NaN in the table); the residual_* curves appear only for a
+# residual diffusion run.
+#
+# Each family is evaluated on ITS OWN prepared directory. That is deliberate: a residual diffusion checkpoint needs
+# the upstream conditioning channel and would fail the input-channel check on a full-target directory. Each
+# checkpoint also carries its own feature normalization, so this is self-consistent.
+# =====================================================================================================================
+
+stages:
+    - setup:
+        outputs: outputs
+        comparison: outputs/comparison
+        curves: outputs/comparison/curves
+
+    # ------------------------------------------------------------------------------------------------------------
+    # 1) The common evaluation, once per family. Identical parameters apart from the paths, the family-specific
+    # sampling/ensemble knobs, and nothing else.
+    # ------------------------------------------------------------------------------------------------------------
+    # 1a) Deterministic U-net -- the baseline
+    - evaluate_regression:
+        input-path: outputs/deterministic_unet/prepared/daily_lightning_hours
+        model-path: outputs/deterministic_unet/best/best_model.ckpt
+        output-path: outputs/comparison/evaluation/deterministic_unet
+        metrics-config: config/eval/metrics.yaml
+        metrics-path: outputs/comparison/evaluation/deterministic_unet/test_metrics.json
+        report-path: outputs/comparison/reports/deterministic_unet
+        split: test
+        baselines: zero,climatology
+        ensemble-size: 2                    # deterministic: no members emitted; never 1 (ddof=1)
+        accelerator: auto
+        devices: 1
+        num-workers: 8
+        batch-size: 16
+        progress-bar: true
+
+    # 1b) MC-dropout
+    - evaluate_regression:
+        input-path: outputs/mc_dropout/prepared/daily_lightning_hours
+        model-path: outputs/mc_dropout/best/best_model.ckpt
+        output-path: outputs/comparison/evaluation/mc_dropout
+        metrics-config: config/eval/metrics.yaml
+        metrics-path: outputs/comparison/evaluation/mc_dropout/test_metrics.json
+        report-path: outputs/comparison/reports/mc_dropout
+        split: test
+        baselines: zero,climatology
+        ensemble-size: 32
+        accelerator: auto
+        devices: 1
+        num-workers: 8
+        batch-size: 16
+        progress-bar: true
+
+    # 1c) Flow-matching diffusion
+    - evaluate_regression:
+        input-path: outputs/diffusion/prepared/daily_lightning_hours
+        model-path: outputs/diffusion/best/best_model.ckpt
+        output-path: outputs/comparison/evaluation/diffusion
+        metrics-config: config/eval/metrics.yaml
+        metrics-path: outputs/comparison/evaluation/diffusion/test_metrics.json
+        report-path: outputs/comparison/reports/diffusion
+        split: test
+        baselines: zero,climatology
+        sampling-steps: 50
+        ensemble-size: 32
+        accelerator: auto
+        devices: 1
+        num-workers: 8
+        batch-size: 16
+        progress-bar: true
+
+    # ------------------------------------------------------------------------------------------------------------
+    # 2) The comparison layer: one table, one set of overlaid curves.
+    # ------------------------------------------------------------------------------------------------------------
+    - tabulate_metrics:
+        output-path: outputs/comparison/metrics_comparison_test.csv
+        Deterministic-UNet: outputs/comparison/evaluation/deterministic_unet/test_metrics.json
+        MC-Dropout:         outputs/comparison/evaluation/mc_dropout/test_metrics.json
+        Diffusion:          outputs/comparison/evaluation/diffusion/test_metrics.json
+        # selected-metrics: average_precision_occurrence,ets_occurrence,sedi_occurrence,mae_cond_pos,crps,crps_occ,spread_skill_ratio,rank_histogram_reliability
+
+    - combine_curves:
+        output-path: outputs/comparison/curves
+        Deterministic-UNet: outputs/comparison/reports/deterministic_unet
+        MC-Dropout:         outputs/comparison/reports/mc_dropout
+        Diffusion:          outputs/comparison/reports/diffusion
+
+tags:                                                                               # tags to be applied to the run
+    version: 1.0
+    experiment: probabilistic_eval

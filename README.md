@@ -30,11 +30,20 @@ The three families are:
 
 | Family | Nature |
 |---|---|
-| `distr_regression` | deterministic U-net — baseline, and the *upstream* model for residual mode |
-| `diffusion` | flow matching; optionally **residual** (predicts a correction on top of the upstream) |
-| `mc_dropout` | stochastic via MC-dropout at inference; two-phase fit (train → finetune) |
+| `deterministic_unet` | deterministic U-net — the baseline, and the *upstream* model for the other two |
+| `diffusion` | flow matching; optionally **residual** — conditions on the upstream's *prediction* and predicts a correction on top of it |
+| `mc_dropout` | stochastic via MC-dropout at inference; **warm-starts** from the upstream's *weights* and finetunes, or fits from scratch in two phases (train → finetune) |
 
-Because ~99.93 % of cells (hourly) are zero, evaluation leads with base-rate-robust categorical scores (ETS, SEDI), skill against trivial baselines (all-zero, climatology, persistence), and spectral/neighbourhood scores that detect the over-smoothing U-nets are prone to.
+Both stochastic families are driven by the same `UPSTREAM_MODEL` environment variable, but read it at different
+stages and for different things: MC-dropout takes the upstream's **weights** (in `tune`), diffusion takes its
+**predictions** as an extra conditioning channel (in `prepare_regression`). Leave it unset and each family trains
+standalone.
+
+Because ~99.93 % of cells (hourly) are zero, evaluation leads with base-rate-robust categorical scores (ETS, SEDI)
+and threshold-free discrimination (PR-AUC, ROC-AUC), skill against trivial baselines (all-zero, climatology), and
+spectral/neighbourhood scores that detect the over-smoothing U-nets are prone to. There is deliberately **no
+persistence baseline**: a diagnostic parameterization never sees a past observation, so persistence is not an
+admissible competitor.
 
 ## Installation
 
@@ -77,7 +86,8 @@ alongside the dataset; the upstream yearly ERA5 netCDFs are not read by the pipe
 | Domain | 0.25°, 35–60 °N / −12–25 °E |
 | Zero fraction | ~99.93 % of cells |
 
-The train/validation/test split is **by year**:
+The train/validation/test split is **by year** — interspersed rather than a single chronological cut, so each part
+spans different climatological regimes:
 
 | Split | Years |
 |---|---|
@@ -85,9 +95,56 @@ The train/validation/test split is **by year**:
 | Validation | 2009, 2016, 2022 |
 | Train | 2010–2014, 2017–2021 |
 
-Smoke runs use a 2-day slice on CPU; see the `*_local.yaml` pipeline variants. Note `ensemble-size` must be **≥ 2**
-in any run that reports ensemble metrics — the spread-skill ratio uses an unbiased (`ddof=1`) variance, so a
-single-member ensemble yields `NaN` rather than an error.
+It is defined once in [`config/split/split.yaml`](config/split/split.yaml) and read by every family, so the
+partition is identical across all of them.
+
+## Configuration and running
+
+`config/` is grouped one directory per concern:
+
+```
+config/
+├── split/               split.yaml · split_smoke_cpu.yaml · split_smoke_gpu.yaml
+├── eval/                metrics.yaml · probabilistic_eval.yaml · probabilistic_eval_smoke_cpu.yaml
+├── deterministic_unet/  deterministic_unet.yaml · …_smoke_cpu.yaml · …_smoke_gpu.yaml · search_space.yaml
+├── mc_dropout/          mc_dropout.yaml          · …_smoke_cpu.yaml · …_smoke_gpu.yaml · search_space.yaml
+└── diffusion/           diffusion.yaml           · …_smoke_cpu.yaml · …_smoke_gpu.yaml · search_space.yaml
+```
+
+Each family has three tiers, differing only in scale: the full pipeline, plus a **`_smoke_cpu`** tier (8 mid-July
+days, 1 trial, 1 epoch, CPU) and a **`_smoke_gpu`** tier (18 days, 2 trials, mixed precision). The smoke tiers exist
+to prove every stage executes and every metric key is emitted; they say nothing about model quality. They pick their
+days by explicit sample-id ranges in `config/split/split_smoke_*.yaml`, deliberately in **mid-July** so the
+occurrence base rate is non-zero — a winter slice would make every categorical and skill score degenerate.
+
+```shell
+export DATA_ROOT=/path/to/batta_torch
+
+# the deterministic baseline first: it is also the upstream for the other two
+python run_project.py config/deterministic_unet/deterministic_unet_smoke_cpu.yaml MY_EXPERIMENT
+
+# then either stochastic family, standalone…
+python run_project.py config/mc_dropout/mc_dropout_smoke_cpu.yaml MY_EXPERIMENT
+
+# …or built on the upstream (weights for mc_dropout, predictions for diffusion)
+export UPSTREAM_MODEL=outputs/deterministic_unet_smoke_cpu/best/best_model.ckpt
+python run_project.py config/diffusion/diffusion_smoke_cpu.yaml MY_EXPERIMENT
+
+# finally the cross-family comparison — the proof all three report the same metrics
+python run_project.py config/eval/probabilistic_eval_smoke_cpu.yaml MY_EXPERIMENT
+```
+
+Environment variables are interpolated into config as **`{{$VAR}}`** (not `${VAR}`), textually, before the YAML is
+parsed. An unset variable becomes the **empty string** rather than an error, which is how `UPSTREAM_MODEL` doubles
+as the standalone/upstream switch — but it also means a missing `DATA_ROOT` fails inside the stage rather than at
+parse time.
+
+Two constraints worth knowing before editing a config:
+
+- **`ensemble-size` must be ≥ 2** in any run reporting ensemble metrics. The spread-skill ratio uses an unbiased
+  (`ddof=1`) variance, so a single-member ensemble yields a silent `NaN` rather than an error.
+- **Commit before running.** The lazy cache keys on the whole-repo dirty diff, so any uncommitted edit busts every
+  cache entry.
 
 ## Usage *(template)*
 

@@ -153,12 +153,14 @@ pipeline concerns for Step 3/4, and A's existing machinery (`_select_plot_indice
 
 | Figure | A | in `metrics.yaml` | What it shows | Decision |
 |---|---|---|---|---|
-| `maps_worst_best_days` | `_maps_per_day` (413) | ✅ | Observed vs predicted day maps → **restyle to §1** | |
-| `psd_curves` | 481 | ✅ | Radially-averaged PSD vs obs and baselines → **restyle to §1's PSD figure** | |
-| `fss_vs_scale` | 514 | ✅ | FSS curve per threshold | |
-| `reliability_and_pit` | 540 | ✅ | Reliability diagram + PIT histogram — ⚠️ **split, see §4** | |
-| `error_by_intensity_bin` | 598 | ✅ | Stratified error across intensity bins | |
-| `rank_histogram` | 615 | ✅ | Talagrand diagram (ensemble runs only) | |
+| `maps_worst_best_days` | `_maps_per_day` (413) | ✅ | Observed vs predicted day maps → **restyle to §1** | keep — **renamed `maps_most_extreme_days`** in Step 2's `metrics.yaml`: "worst/best" reads as a judgement of the *model*, when what the figure actually selects is the most extreme *observed* day (plus the median) |
+| `psd_curves` | 481 | ✅ | Radially-averaged PSD vs obs and baselines → **restyle to §1's PSD figure** | keep |
+| `fss_vs_scale` | 514 | ✅ | FSS curve per threshold | keep |
+| `reliability_and_pit` | 540 | ✅ | Reliability diagram + PIT histogram — ⚠️ **split, see §4** | **renamed `reliability`** in Step 2's `metrics.yaml` — the reliability half is kept and promoted to a headline diagnostic; the PIT half is dropped with the transform that fitted its CDF |
+| `error_by_intensity_bin` | 598 | ✅ | Stratified error across intensity bins | keep — bins become the explicit hour bands (`occurrence`/`h3`/`h6`/`h12`) |
+| `rank_histogram` | 615 | ✅ | Talagrand diagram (ensemble runs only) | keep |
+| `roc_pr_curves` | — | **NEW (Step 2)** | ROC **and** precision-recall curves, one pair per event threshold. PR is backed by the existing `average_precision`; ROC by the new `roc_auc`. Plotting them together is the point: on a 0.07 % base rate the ROC curve looks flattering while the PR curve exposes the real operating trade-off | keep — **new code in Step 3** |
+| `confusion_matrix` | — | **NEW (Step 2)** | 2×2 contingency counts per threshold — the raw hits/misses/false-alarms/correct-negatives *behind* `pod`/`far`/`csi`/`ets`, which are otherwise only visible as ratios | keep — **new code in Step 3** |
 | `residual_bias_map` | 694 | ✅ | Mean predicted discrepancy (diverging) | |
 | `residual_surprise` | 710 | ✅ | Magnitude + direction surprise vs true discrepancy | |
 | `residual_histograms` | 737 | ✅ | `D_pred` vs `D_true` distributions | |

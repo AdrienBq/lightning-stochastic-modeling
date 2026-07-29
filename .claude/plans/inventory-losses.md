@@ -57,8 +57,8 @@ machinery specific to **unbounded, heavy-tailed stroke counts** and to the trans
 
 | Loss | A | V | D | Status | What it does | Decision |
 |---|---|---|---|---|---|---|
-| `intensity_weights` | 26 | 27 | 27 | `IDENTICAL` | Per-cell weight `∝ y_raw^gamma`; up-weights intense cells against the zero mass | |
-| `_weighted_masked_mean` | 31 | 32 | 32 | `IDENTICAL` | Private reduction: weighted mean over valid (masked) cells; shared denominator for all pointwise losses | |
+| `intensity_weights` | 26 | 27 | 27 | `IDENTICAL` | Per-cell weight `∝ y_raw^gamma`; up-weights intense cells against the zero mass | keep — **and `gamma: 0.0` must stay reachable in every search space**: `gamma = 0` is what makes `weighted_mae ≡ mae` and `weighted_rmse ≡ rmse`, i.e. what licenses removing the unweighted variants below (Step 2) |
+| `_weighted_masked_mean` | 31 | 32 | 32 | `IDENTICAL` | Private reduction: weighted mean over valid (masked) cells; shared denominator for all pointwise losses | keep — every pointwise loss must reduce through it; it normalises by the **sum of effective weights**, not the cell count, so inlining it would put one loss on a different scale from its siblings and make tuning results incomparable |
 
 ## 2. Pointwise regression losses
 
@@ -68,7 +68,7 @@ machinery specific to **unbounded, heavy-tailed stroke counts** and to the trans
 | `mae` | — | 41 | 41 | `D-ONLY` | Masked mean absolute error | remove : we can take w=1 with the weighted_mae. Need to extend the search space for gamma to reach 0 |
 | `weighted_mae` | — | 45 | 45 | `D-ONLY` | Intensity-weighted MAE | keep |
 | `rmse` | — | 49 | 49 | `D-ONLY` | Root of masked MSE | remove : same reason as mae |
-| `weighted_rmse` | — | 54 | 54 | `D-ONLY` | Root of intensity-weighted MSE | |
+| `weighted_rmse` | — | 54 | 54 | `D-ONLY` | Root of intensity-weighted MSE | keep — it *absorbs* the removed `rmse` at `gamma = 0`, so removing `rmse` above is only valid if this one stays (Step 2) |
 | `asymmetric_huber` | 40 | 58 | 58 | `IDENTICAL` | Huber with different slopes for over- vs under-prediction — encodes the *conservativeness* preference (penalise misses harder than false alarms) | keep |
 
 > **Note:** A carries only `weighted_mse` + `asymmetric_huber`. The four plain/weighted MAE/RMSE variants exist
@@ -86,7 +86,8 @@ machinery specific to **unbounded, heavy-tailed stroke counts** and to the trans
 | Loss | A | V | D | Status | What it does | Decision |
 |---|---|---|---|---|---|---|
 | `psd_penalty` | — | — | 105 | `D-ONLY` | Penalises mismatch between predicted and observed radially-averaged power spectra — a **differentiable anti-over-smoothing term**. Directly attacks challenge (B) in `metrics.yaml` | keep |
-| `wmae_psd` | — | — | 163 | `D-ONLY` | Composite: weighted MAE + `psd_penalty` | keep |
+| `wmae_psd` | — | — | 163 | `D-ONLY` | Composite: `alpha * weighted_mae + (1 - alpha) * psd_penalty` | keep |
+| `wmse_psd` | — | — | — | **NEW (Step 2)** | Composite: `alpha * weighted_mse + (1 - alpha) * psd_penalty` — the exact `weighted_mse` sibling of `wmae_psd`. Added so the *squared-error* branch of the pointwise family can also carry the anti-over-smoothing term, instead of forcing a choice between MSE-shaped gradients and spectral fidelity | keep — **new code in Step 3**, a few lines reusing `psd_penalty` and `weighted_mse` |
 | `afcrps_psd` | — | — | 270 | `D-ONLY` | Composite: almost-fair CRPS + `psd_penalty`, `beta=0.7` | keep |
 
 > These three are the **highest-risk items in this inventory**. They are absent from A *and* from A's vendored

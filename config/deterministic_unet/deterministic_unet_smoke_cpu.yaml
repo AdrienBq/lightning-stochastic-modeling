@@ -1,0 +1,109 @@
+project_uri: 'src/stages'                                                           # the path of the directory where each stage script is saved
+log_artifacts: false                                                                # whether to log the output file/directory as artifact
+log_models: false                                                                   # whether to log the output model
+lazy: false                                                                         # NEVER cache a smoke run: the point is to execute every stage
+ensure_determinism: false
+banner: true
+description: 'Deterministic U-net -- CPU smoke tier'
+
+# =====================================================================================================================
+# CPU SMOKE TIER of config/deterministic_unet/deterministic_unet.yaml. Read that file for what the pipeline does and why.
+#
+# Purpose: run the whole pipeline end to end on a CPU-only host in minutes, to prove every stage executes, every
+# declared artifact appears and every expected metric key is emitted. It proves NOTHING about model quality.
+#
+# Everything is inherited by copy; the only differences from the parent are:
+#   split-config      -> config/split/split_smoke_cpu.yaml (8 mid-July days: 4 train / 2 valid / 2 test)
+#   output paths      -> outputs/deterministic_unet_smoke_cpu/... so a smoke run never clobbers a real one
+#   n-trials 1        -> a single trial
+#   sampler random    -> TPE is pointless at one trial
+#   max-epochs 1      -> one epoch, no early stopping, no pruning
+#   accelerator cpu   -> this tier is CPU-only by definition
+#   num-workers 0     -> in-process loading; avoids worker start-up cost dominating an 8-day run
+#   feature-dtype float32 -> float16 buys nothing at this size
+#   lazy false        -> above
+#
+# The FULL search space is used on purpose: n-trials 1 + max-epochs 1 is what makes the run tiny, and a separate
+# smoke search space would be one more file to drift out of sync.
+#
+# Note: with only 8 days, the rarest thresholds (h12) may see zero events, so their categorical scores can come back
+# NaN. That is expected at this size and is not a failure of the run.
+#
+# Environment: export DATA_ROOT before running.
+# =====================================================================================================================
+
+stages:
+    - setup:
+        outputs: outputs
+        prepared: outputs/deterministic_unet_smoke_cpu/prepared
+        tuning: outputs/deterministic_unet_smoke_cpu/tuning
+        best: outputs/deterministic_unet_smoke_cpu/best
+        evaluation: outputs/deterministic_unet_smoke_cpu/evaluation
+        reports: outputs/deterministic_unet_smoke_cpu/reports
+
+    - prepare_regression:
+        data-path: '{{$DATA_ROOT}}'
+        split-config: config/split/split_smoke_cpu.yaml
+        output-path: outputs/deterministic_unet_smoke_cpu/prepared/daily_lightning_hours
+        mode: daily
+        feature-aggregation: hourly_stack
+        target-variable: daily_lightning_hours
+        features: MU_LI,MU_MIXR,RH_500850,cp,lsm
+        hourly-threshold: 2
+        overwrite: false
+        materialize-features: true
+        feature-dtype: float32
+
+    - tune:
+        model-family: deterministic_unet
+        model-type: deterministic_unet
+        input-path: outputs/deterministic_unet_smoke_cpu/prepared/daily_lightning_hours
+        model-config: config/deterministic_unet/search_space.yaml
+        metrics-config: config/eval/metrics.yaml
+        output-path: outputs/deterministic_unet_smoke_cpu/tuning
+        metrics-path: outputs/deterministic_unet_smoke_cpu/tuning/best_trial_metrics.json
+        n-trials: 1
+        sampler: random
+        max-epochs: 1
+        early-stopping-patience: 1
+        pruning: false
+        accelerator: cpu
+        devices: 1
+        num-workers: 0
+        progress-bar: true
+        feature-stats-days: 4               # cannot exceed the 4 train days of the smoke split
+
+    - retrain_best:
+        model-family: deterministic_unet
+        model-type: deterministic_unet
+        source-path: outputs/deterministic_unet_smoke_cpu/tuning
+        input-path: outputs/deterministic_unet_smoke_cpu/prepared/daily_lightning_hours
+        metrics-config: config/eval/metrics.yaml
+        output-path: outputs/deterministic_unet_smoke_cpu/best
+        metrics-path: outputs/deterministic_unet_smoke_cpu/best/best_trial_metrics.json
+        max-epochs: 1
+        early-stopping-patience: 1
+        accelerator: cpu
+        devices: 1
+        num-workers: 0
+        progress-bar: true
+
+    - evaluate_regression:
+        input-path: outputs/deterministic_unet_smoke_cpu/prepared/daily_lightning_hours
+        model-path: outputs/deterministic_unet_smoke_cpu/best/best_model.ckpt
+        output-path: outputs/deterministic_unet_smoke_cpu/evaluation
+        metrics-config: config/eval/metrics.yaml
+        metrics-path: outputs/deterministic_unet_smoke_cpu/evaluation/test_metrics.json
+        report-path: outputs/deterministic_unet_smoke_cpu/reports
+        split: test
+        baselines: zero,climatology
+        ensemble-size: 2                    # NEVER 1: spread_skill_sums uses ddof=1, so M=1 yields a silent NaN
+        accelerator: cpu
+        devices: 1
+        num-workers: 0
+        batch-size: 2
+        progress-bar: true
+
+tags:                                                                               # tags to be applied to the run
+    version: 1.0
+    experiment: deterministic_unet_smoke_cpu

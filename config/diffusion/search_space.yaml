@@ -1,0 +1,114 @@
+# =====================================================================================================================
+# Search space + training options for the `tune` stage with `model-family: diffusion` (referenced as model-config in
+# config/diffusion/diffusion.yaml, and logged as a run artifact by the orchestrator).
+#
+# The model is a conditional FLOW-MATCHING velocity field: a conv stem fuses the conditioning channels (standardized
+# ERA5 predictors, plus the upstream-prediction channel in residual mode) with the noisy-target channel and patch-
+# embeds them onto a token grid; DiT-style blocks (adaLN-Zero time conditioning) process the tokens; a conv decoder
+# emits the velocity map. The path is the straight (rectified-flow) interpolant and the loss is the plain velocity
+# MSE, so `loss:` below governs the TARGET-SPACE selection/auxiliary terms, not the flow objective itself.
+#
+# Same shared skeleton as config/deterministic_unet/search_space.yaml (read that file for the loss / occurrence-head /
+# calibration / selection rationale), plus the residual switch and the flow block.
+#
+# There is deliberately NO `target_transform:` block, and — unlike the source branch — no `flow.log_warp` knob: it
+# selected between a log1p-standardized and a raw generation space, i.e. it WAS the target transform under another
+# name. It is removed with the rest of it, so generation happens in one fixed space and valid_regression_score is
+# comparable across every trial.
+# =====================================================================================================================
+
+# ---------------------------------------------------------------------------------------------------------------------
+# RESIDUAL (knowledge-guided) mode. When true, the model does not learn the target: it learns the DISCREPANCY between
+# the observation and an upstream deterministic_unet prediction, and returns
+# clamp(upstream + residual, min_hours, max_hours).
+#
+# Requirements, all checked at load time:
+#   * the prepared directory must have been built WITH `upstream-model-path` set (config/diffusion/diffusion.yaml), so that
+#     upstream/<date>.npy maps exist and the directory is flagged residual;
+#   * the upstream prediction is appended as the LAST conditioning channel and passed as a third batch item,
+#     (x_cond, y, upstream); the channel count is validated against feature_mean.shape[0].
+# Toggling this changes the input channel count, so switch output directories (or set overwrite: true on prepare)
+# rather than reusing a directory prepared for the other setting.
+# ---------------------------------------------------------------------------------------------------------------------
+residual_target: {type: categorical, choices: [true, false]}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Flow-matching backbone + ODE sampling.
+# Constraints satisfied by construction below: hidden_dim is divisible by the head count and by 4 (2-D positional
+# embedding), and patch_size is a power of two.
+# ---------------------------------------------------------------------------------------------------------------------
+flow:
+    n_steps: {type: int, low: 8, high: 32}              # Euler ODE integration steps during validation scoring;
+                                                        # evaluate_regression overrides with `sampling-steps`
+    hidden_dim: {type: categorical, choices: [128, 256]} # token (model) width
+    n_blocks: {type: int, low: 2, high: 6}              # DiTBlock count
+    patch_size: {type: categorical, choices: [1, 2]}    # stem stride / token-grid coarsening (power of two).
+                                                        # 1 = full resolution: the 101 x 149 grid is small enough
+                                                        # that this is affordable, and coarse patches are exactly
+                                                        # what destroys the high-frequency fidelity the PSD scores
+                                                        # measure.
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Target-space loss terms. Identical set and rationale to the deterministic family (see that file); on the residual
+# path they apply to clamp(upstream + residual), i.e. always in the target space, never to the raw discrepancy.
+# intensity_weight_gamma's lower bound MUST stay 0.0.
+# ---------------------------------------------------------------------------------------------------------------------
+loss:
+    name: {type: categorical, choices: [weighted_mae, weighted_rmse, weighted_mse, asymmetric_huber, wmae_psd, wmse_psd]}
+    intensity_weight_gamma: {type: float, low: 0.0, high: 1.0}   # 0.0 => unweighted
+    asymmetry_tau: {type: float, low: 0.5, high: 0.9}            # asymmetric_huber only
+    huber_delta:   {type: float, low: 0.5, high: 3.0}
+    alpha:         {type: float, low: 0.5, high: 1.0}            # wmae_psd / wmse_psd: pointwise weight;
+                                                                 # (1 - alpha) -> psd_penalty
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Occurrence head — identical to the deterministic family. See that file for the alias -> function map and the
+# focal_bce / intensity_weights mutual-exclusion constraint.
+# ---------------------------------------------------------------------------------------------------------------------
+occurrence_head:
+    enabled: {type: categorical, choices: [true, false]}
+    loss: {type: categorical, choices: [focal_bce, dice, brier, crps_binary]}
+    focal_gamma: {type: float, low: 1.0, high: 3.0}
+    positive_class_weight: {type: float, low: 1.0, high: 50.0}
+
+# Bounded on BOTH sides -- see config/deterministic_unet/search_space.yaml for the softplus caveat. In residual
+# mode the pair is ALSO the clamp applied to the reconstruction: clamp(upstream + residual, min_hours, max_hours).
+output_activation: {type: categorical, choices: [softplus, clamped_sigmoid]}
+min_hours: 0                                            # the bounded-target floor, in hours per day
+max_hours: 24                                           # the bounded-target ceiling, in hours per day
+
+calibration:
+    occurrence: {type: categorical, choices: [none, platt]}
+    regression:
+        structure: {type: categorical, choices: [none, power_law, monotone_smooth]}
+        objective: {type: categorical, choices: [pointwise, quantile]}
+        num_sigmoids: 4
+        huber_delta: 1.0
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Optimization
+# ---------------------------------------------------------------------------------------------------------------------
+optimizer:
+    name: adamw
+    lr: {type: float, low: 1.0e-4, high: 1.0e-2, log: true}
+    weight_decay: {type: float, low: 1.0e-6, high: 1.0e-3, log: true}
+    scheduler: {type: categorical, choices: [cosine, reduce_on_plateau]}
+    gradient_clip_val: 1.0
+
+batch_size: {type: int, low: 4, high: 32}
+max_epochs: 50
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Trial selection — the SAME composite and the SAME name as every other family (see
+# config/deterministic_unet/search_space.yaml for the full derivation). Ranking on this target-space composite rather
+# than on the validation flow-matching loss is deliberate: the flow loss lives in the generation space and says
+# nothing about occurrence skill or structure fidelity. The pointwise and categorical components score the ensemble
+# MEAN of the validation draws; psd_full_fidelity is POOLED over members.
+# ---------------------------------------------------------------------------------------------------------------------
+selection:
+    metric: valid_regression_score
+    mode: max
+    components:
+        average_precision_occurrence: 0.40
+        mae_cond_ss_climatology:      0.30
+        psd_full_fidelity:            0.30

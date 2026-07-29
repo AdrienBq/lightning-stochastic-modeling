@@ -10,8 +10,8 @@ to no single step.
 | [`00-context.md`](00-context.md) | Project framing, branch findings, locked-in decisions incl. the **scope change**, environment & data, target architecture, the ensemble contract | reference |
 | [`step-0-bootstrap.md`](step-0-bootstrap.md) | Bootstrap & hygiene | ✅ **done** (2026-07-27) |
 | [`step-1-design.md`](step-1-design.md) | Design decisions via the inventories; global `CLAUDE.md` + `README.md` | ✅ **done** (2026-07-28) |
-| [`step-2-config.md`](step-2-config.md) | Every config file and its contents | 🔵 **next** — detailed, unblocked |
-| [`step-3-utils.md`](step-3-utils.md) | Shared `src/utils` | ⚪ provisional |
+| [`step-2-config.md`](step-2-config.md) | Every config file and its contents | ✅ **done** (2026-07-29) |
+| [`step-3-utils.md`](step-3-utils.md) | Shared `src/utils` | 🔵 **next** — see its "obliged by Step 2" list |
 | [`step-4-stages.md`](step-4-stages.md) | Stages + common evaluation | ⚪ provisional |
 | [`step-5-portability.md`](step-5-portability.md) | User- and machine-agnostic | ⚪ provisional |
 
@@ -26,7 +26,8 @@ to no single step.
 
 **Block order** a → b → c → d → e. Each step ends with the verification gate below and a plan update.
 
-> **▶ To resume work:** read the RESUME block at the top of [`step-1-design.md`](step-1-design.md).
+> **▶ To resume work:** read the OUTCOME block at the top of [`step-2-config.md`](step-2-config.md) — it records
+> what Step 2 built, the seven corrections it made to its own spec, and the list Step 3 is now obliged to implement.
 
 ---
 
@@ -41,10 +42,17 @@ to no single step.
    `ensemble_partials`; retire adrien's `EnsembleProbabilisticAccumulator` and `regression_metric_suite`;
    MC validation uses the shared `selection_score`.
 4. **Two-phase `run_sweep`:** generalize adrien's `_fit_phase` train→finetune fit into the shared harness without
-   regressing single-phase families (verify monitor / best-weight restore parity).
+   regressing single-phase families (verify monitor / best-weight restore parity). **Plus, per Step 2:** a
+   *warm-start* path where `tune` is handed an `upstream-model-path` and runs the finetuning phase **alone**,
+   loading the upstream U-net's weights. That path does not exist on any branch — `MCDropoutRegressionModule` has
+   `set_phase()` and a `finetuning_enabled` gate but nothing that loads foreign weights — and it needs a load-time
+   architecture check that *raises* rather than silently partial-loading.
 5. **Merge `dataset.py`** (`hourly_stack` aggregation + residual/upstream channel) and **`prepare_regression`**
    (full-target / residual / `daily_lightning_hours` target).
-6. **Selection-score unification** (`valid_regression_score` ≡ `valid_tail_score` — one name).
+6. **Selection-score unification** — one name, `valid_regression_score` (retires `valid_tail_score`), and per Step 2
+   **one source of truth**: the search space's `selection:` block. `tune` reads it from `model-config` and records it
+   into `best_trial.json`; `retrain_best` reads it back. The `selection-metric`/`selection-mode` stage parameters are
+   gone, so a retrain can no longer disagree with the sweep that chose the configuration.
 7. **Registry markers + `_sniff_family`** so legacy checkpoints still load.
 8. **Drop dead/superseded code:** `mc_dropout_module_deprecated.py`, adrien's inference ports, `hello_world`
    (pending a usefulness check). **`compute_high_lightning_days` is kept** — it is "the extremes".
@@ -55,12 +63,16 @@ to no single step.
 
 1. Import/parse: `python -c "import ..."` for touched modules; `parse_config` on every YAML.
 2. Unit tests: `pytest` on the relevant ported tests.
-3. Smoke run: the affected `*_local.yaml` via `python run_project.py config/<family>_local.yaml <EXPERIMENT>`
-   (CPU, `n-trials 1`, `max-epochs 1`, 2-day split, **`ensemble-size 2`** — never 1, see below); assert declared
-   artifacts + expected metric keys.
-4. Phase/final gate: run all three family `*_local` pipelines + `probabilistic_eval_local` end-to-end; assert
-   `tabulate_metrics` emits one comparison CSV with **identical metric-key columns across families** and
-   `combine_curves` emits the overlaid figures — proof the pipelines are merged and report the same metrics.
+3. Smoke run: the affected `*_smoke_cpu.yaml` via
+   `python run_project.py config/<family>/<family>_smoke_cpu.yaml <EXPERIMENT>` (CPU, `n-trials 1`,
+   `max-epochs 1`, the 8-day mid-July split, **`ensemble-size 2`** — never 1, see below); assert declared
+   artifacts + expected metric keys. A `*_smoke_gpu.yaml` tier exists for GPU hosts (18 days, 2 trials,
+   `bf16-mixed`, `ensemble-size 5`) but cannot be run here.
+4. Phase/final gate: run all three family `*_smoke_cpu` pipelines + `config/eval/probabilistic_eval_smoke_cpu.yaml`
+   end-to-end; assert `tabulate_metrics` emits one comparison CSV with **identical metric-key columns across
+   families** and `combine_curves` emits the overlaid figures — proof the pipelines are merged and report the same
+   metrics. (The deterministic family's ensemble scalars are `NaN` and it contributes no rank histogram: identical
+   *columns* is the requirement, not identical values.)
 5. **After each step: update the relevant step file** (decisions made, next step refined).
 
 > ⚠️ **`ensemble-size` must be ≥ 2 in smoke configs.** `scores.spread_skill_sums` computes variance with `ddof=1`,

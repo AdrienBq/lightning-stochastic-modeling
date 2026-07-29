@@ -1,0 +1,40 @@
+# =====================================================================================================================
+# Train / validation / test split — SHARED by every model family.
+#
+# This is the single source of truth for the split, loaded by prepare_regression so that every downstream stage
+# (tuning, retraining, evaluation) and every family reproduces the SAME partition. It transcribes the split
+# documented in CLAUDE.md ("Data" section).
+#
+# The split is by CALENDAR YEAR (interspersed, NOT a single chronological cut), so that each of train/valid/test
+# spans different climatological regimes:
+#   - test:  2008, 2015, 2023
+#   - valid: 2009, 2016, 2022
+#   - train: 2010-2014 and 2017-2021
+#
+# Two equivalent specifications are given; `method` selects which one is enforced:
+#   - by_year:      assign each sample to a split by the calendar year of its date. This is the semantic
+#                   definition and is robust to missing/extra/re-numbered samples — RECOMMENDED.
+#   - by_sample_id: assign by inclusive ranges of the integer sample id embedded in each .pt filename
+#                   (sample_<id>.pt). Exact reproduction of the reference ranges in CLAUDE.md; use only if the
+#                   sample numbering is guaranteed stable.
+# The two are cross-checked at preparation time: a mismatch raises, guarding against silent dataset drift.
+#
+# The smoke tiers use their own subset files, config/split/split_smoke_cpu.yaml and config/split/split_smoke_gpu.yaml.
+# =====================================================================================================================
+
+method: by_year
+
+by_year:
+    test:  [2008, 2015, 2023]
+    valid: [2009, 2016, 2022]
+    train: [2010, 2011, 2012, 2013, 2014, 2017, 2018, 2019, 2020, 2021]
+
+# inclusive [first, last] sample-id ranges (sample_<id>.pt); equivalent to the by_year ranges above
+by_sample_id:
+    test:  [[0, 364], [2556, 2920], [5478, 5842]]
+    valid: [[365, 729], [2921, 3286], [5113, 5477]]
+    train: [[730, 2555], [3287, 5112]]
+
+# whether to raise if by_year and by_sample_id disagree on any sample (set false to skip the cross-check, e.g.
+# when intentionally running on a subset or a re-numbered dataset)
+cross_check: true

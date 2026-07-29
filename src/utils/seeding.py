@@ -6,8 +6,8 @@ stage that does not depend on (say) ``torch`` pays no extra import cost. The orc
 hands it to the stage subprocess via the ``PIPELINE_SEED`` environment variable; the auto-hook in
 ``src/stages/__init__.py`` reads that variable and calls this function before the stage body runs.
 
-This is a *baseline* seed: a stage that manages its own seeding (e.g. ``tune_distr_regression`` re-seeds per
-trial with its own ``seed`` parameter) simply runs after it and overrides it where needed.
+This is a *baseline* seed: a stage that manages its own seeding (e.g. ``tune`` re-seeds per trial with its own
+``seed`` parameter) simply runs after it and overrides it where needed.
 """
 import os
 import random

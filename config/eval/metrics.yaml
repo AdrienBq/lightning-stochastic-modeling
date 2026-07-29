@@ -1,0 +1,235 @@
+# =====================================================================================================================
+# THE metric suite — ONE file, ALL model families.
+#
+# Referenced as `metrics-config` by the `tune`, `retrain_best` and `evaluate_regression` stages of every pipeline
+# (deterministic_unet, mc_dropout, diffusion), and logged as a run artifact by the orchestrator. That every family
+# reports the SAME keys through the SAME evaluation is the whole point of the merged repo: never add a
+# family-specific evaluation path.
+#
+# ---------------------------------------------------------------------------------------------------------------------
+# Metric space: TRAINING SPACE == EVALUATION SPACE.
+# There is no target transform and no back-transform anywhere in this project. Every metric below is computed
+# directly on the model output and the observation, in the target's own units (lightning-hours per cell per day for
+# the daily target, 0/1 for the hourly binary target). If you ever find yourself asking "which space is this tensor
+# in?", the answer is always: the target space.
+#
+# Occurrence: a cell counts as having lightning when its target is POSITIVE (`target > 0`). Single-stroke
+# observational-noise denoising lives ENTIRELY in the preparation stage — `prepare_regression`'s `hourly-threshold: 2`
+# filters the hourly stroke counts (an hour counts only with >= 2 strokes) BEFORE the daily target is assembled, so
+# the denoising is baked into the target itself. There is deliberately NO eval-side `occurrence_threshold` knob: it
+# conflated hourly-count denoising with the target-space occurrence event and could not be honoured on an aggregated
+# target. `resolve_occurrence_event` returns `target > 0` unconditionally and HARD-ASSERTS that no stray
+# `occurrence_threshold` reappears in this file.
+#
+# ---------------------------------------------------------------------------------------------------------------------
+# The suite is organized around the two evaluation challenges of this project:
+#   (A) EXTREME IMBALANCE (~99.93% of cells are zero) — metrics must separate a trivially-zero or climatological
+#       predictor from a model with genuine skill on rare events: conditional errors on observed-positive cells,
+#       base-rate-robust categorical scores (ETS, SEDI) and threshold-free discrimination (ROC-AUC, PR-AUC),
+#       explicit skill scores against trivial baselines, a frequency-bias check encoding the preference for
+#       conservative (over- rather than under-predicting) models, R^2 and rank agreement within each observed
+#       exceedance subgroup, and the under-/over-estimation mass behind the signed bias.
+#   (B) HIGH-FREQUENCY FIDELITY — U-net-style models over-smooth. The spectral and neighbourhood scores are
+#       family-agnostic (they need only predicted/observed maps), so they compare uniformly across all three
+#       families.
+#
+# ---------------------------------------------------------------------------------------------------------------------
+# HOURLY BINARY TARGET (`mode: hourly`): only `occurrence` is a meaningful event — the hour bands h3/h6/h12 are
+# defined on a 0-24 daily count and do not exist on a 0/1 target. When running an hourly pipeline, trim the three
+# threshold lists (`metrics.categorical.thresholds`, `metrics.spatial.fss.thresholds`, and the `thresholds`/`bins`
+# lists under `metrics.continuous` and `metrics.calibration.rank_correlation`) to `[occurrence]`. The continuous
+# group also degenerates on a binary target (use brier_skill_score / the AUCs / reliability instead of r2).
+# =====================================================================================================================
+
+# Trivial baselines evaluated alongside the model; every skill score below references them.
+#
+# There is deliberately NO `persistence` baseline. Persistence ("the previous time step's observation") presumes a
+# forecasting task with access to past observations. This project is a diagnostic ERA5 -> lightning
+# parameterization: at inference the model sees reanalysis predictors only and no lightning observation of any
+# time, so persistence is not an admissible competitor.
+baselines:
+    zero: {}                                            # all-zero predictor: the imbalance-exploiting cheat, and
+                                                        # the floor every model must clear
+    climatology:
+        window_days: 90                                 # per-cell day-of-year climatological mean, +/- 45 days
+
+# Named exceedance levels, reused across metric groups. `absolute` levels are plain values in target units
+# (lightning-hours per cell per day) — explicit, interpretable, and stable across splits.
+#
+# They replace the former quantile-of-the-positive-marginal levels (p90/p99/p99_9), which collapse on a BOUNDED
+# INTEGER target: on 0-24 the 0.999 quantile of the positive marginal lands on a single hour value, so p99 and
+# p99_9 stop being distinct events.
+thresholds:
+    occurrence: {kind: occurrence}                      # target > 0 — THE primary event under the
+                                                        # classification-first scope (denoising is in prepare)
+    h3:  {kind: absolute, value: 3}                     # >= 3 hours with lightning that day
+    h6:  {kind: absolute, value: 6}                     # >= 6 hours: an active convective day
+    h12: {kind: absolute, value: 12}                    # >= 12 hours: the rare, all-day event
+
+metrics:
+    # -----------------------------------------------------------------------------------------------------------
+    # Continuous errors — overall and conditional. The conditional/stratified entries are where an all-zero
+    # predictor collapses, while overall RMSE alone would flatter it.
+    #
+    # These stay in scope under the scope change: the 0-24 daily target is still a REGRESSION, just a bounded one,
+    # so ordinary distance errors apply. What is gone is machinery specific to unbounded heavy-tailed counts —
+    # `tweedie_deviance` is removed with the rest of the count-regression apparatus (it is parameterized for a
+    # zero-inflated UNBOUNDED non-negative target and misstates error on a capped one).
+    # -----------------------------------------------------------------------------------------------------------
+    continuous:
+        rmse: {}
+        mae: {}
+        bias: {}                                        # mean(pred - obs); >= 0 preferred (conservativeness)
+        rmse_conditional_positive: {condition: obs_positive}    # error restricted to observed-positive cells
+        mae_conditional_positive: {condition: obs_positive}     # `mae_cond_pos`; the base of the selection score's
+                                                                # climatology skill term
+        mae_stratified:                                 # error within observed-intensity bins (the profile across
+            bins: [occurrence, h3, h6, h12]             # hour bands); also feeds error_by_intensity_bin
+        r2:                                             # coefficient of determination; overall (`r2`) and within
+            thresholds: [occurrence, h3, h6, h12]       # each observed-exceedance subgroup (`r2_<threshold>`).
+                                                        # Goes negative on a subgroup for models worse than its
+                                                        # conditional mean (the imbalance-exploiting regime).
+        estimation_tendency:                            # proportions of under-/over-estimated cells per event set
+            thresholds: [occurrence, h3, h6, h12]       # (`under_frac_<t>` / `over_frac_<t>`); the direction of
+            tolerance: 0.0                              # the error mass behind `bias` (over > under =
+                                                        # conservative). tolerance: dead-band around zero error,
+                                                        # in target units.
+
+    # -----------------------------------------------------------------------------------------------------------
+    # Categorical scores on the exceedance events — THE HEADLINE GROUP under the classification-first scope.
+    # Emits `<score>_<threshold>` for every combination.
+    #
+    #   * ETS is chance-corrected: random and constant forecasts score 0.
+    #   * SEDI stays non-degenerate as the base rate -> 0, which is what makes thresholds and families comparable
+    #     on a target that is 99.93% zero.
+    #   * frequency_bias > 1 flags conservative over-forecasting (preferred here), < 1 flags misses.
+    #   * roc_auc and average_precision (PR-AUC) are THRESHOLD-FREE: they score the ranking of the predicted field
+    #     rather than one decision cut, so they cannot be gamed by a lucky operating point. PR-AUC is the more
+    #     informative of the two at this base rate (ROC-AUC is optimistic when negatives dominate), which is why
+    #     `average_precision_occurrence` — not ROC-AUC — is the discrimination term of the selection score.
+    # -----------------------------------------------------------------------------------------------------------
+    categorical:
+        thresholds: [occurrence, h3, h6, h12]
+        scores: [pod, far, csi, ets, hss, sedi, frequency_bias, roc_auc, average_precision]
+
+    # -----------------------------------------------------------------------------------------------------------
+    # Skill vs the trivial baselines: positive values mean the model beats the baseline. An imbalance-exploiting
+    # model scores <= 0 against `zero` on the conditional error and against `climatology` overall.
+    # -----------------------------------------------------------------------------------------------------------
+    skill:
+        mse_skill_score: {baselines: [zero, climatology]}                       # 1 - MSE_model / MSE_baseline
+        mae_conditional_skill_score: {baselines: [zero, climatology], condition: obs_positive}
+                                                                                # `mae_cond_ss_climatology` is the
+                                                                                # anti-trivial term of the
+                                                                                # selection score
+        brier_skill_score: {baselines: [climatology], target: occurrence}        # occurrence head, when enabled
+        explained_deviance: {baseline: climatology, target: occurrence}          # BERNOULLI explained deviance on
+                                                                                # the occurrence head:
+                                                                                # 1 - logloss(model)/logloss(clim).
+                                                                                # Deliberately scoped to the binary
+                                                                                # head — with Tweedie/Poisson gone
+                                                                                # the bounded 0-24 target has no
+                                                                                # likelihood to take a deviance of.
+
+    # -----------------------------------------------------------------------------------------------------------
+    # Calibration. Reduced to what is meaningful on a bounded target with a probabilistic occurrence head.
+    #
+    # Removed, and why (do not reintroduce):
+    #   * pit_histogram — PIT was built by pushing targets through a FITTED gamma CDF (`target_stats['gamma_shape']`
+    #     / `['gamma_scale']`). Those statistics no longer exist: there is no target transform.
+    #   * quantile_ratio, qq_plot — quantiles of the positive marginal collapse on a 0-24 integer target (see the
+    #     `thresholds` note). qq_plot was additionally declared here for a figure that was never implemented.
+    # -----------------------------------------------------------------------------------------------------------
+    calibration:
+        rank_correlation:                               # ordering agreement (`rank_corr_<threshold>`) within each
+            method: spearman                            # observed subgroup — the zero mass makes the all-cells
+            thresholds: [occurrence, h3, h6, h12]       # coefficient degenerate. spearman | kendall
+        reliability_diagram: {target: occurrence, bins: 10}     # occurrence head only; promoted to a HEADLINE
+                                                                # calibration diagnostic under the new scope, and
+                                                                # drawn by the `reliability` figure
+
+    # -----------------------------------------------------------------------------------------------------------
+    # Spatial structure / high-frequency fidelity (challenge B).
+    #   * psd_band_ratio: radially-averaged power spectral density of predicted vs observed maps, averaged over
+    #     time; the per-band ratio -> 1 for a structure-faithful model, -> 0 in the high band for an over-smoothed
+    #     one. Bands are in pixel wavelengths (0.25 deg/px, ~28 km meridional). The `full` band [2, inf] is all
+    #     wavelengths >= 2 px, i.e. low+mid+high combined (the DC component and the sub-2 px diagonal-corner
+    #     coefficients are excluded).
+    #   * psd_full_fidelity / psd_high_fidelity: scalar summaries 1 - |1 - psd_band_ratio(band)| clipped to [0, 1].
+    #     `full` is the structure component of the selection score; being a ratio of MEAN in-band power it is
+    #     dominated by the large scales of the red lightning spectrum, so it penalizes over-smoothing more weakly
+    #     than `high` — keep `high` as the sharper diagnostic. Both keys are served by ONE `psd_fidelity(band=...)`
+    #     function reading the `band:` argument below.
+    #   * fss: fractions skill score over thresholds x neighbourhood scales; useful_scale is the smallest scale
+    #     where FSS > 0.5 + base_rate/2 (the standard "useful skill" criterion). h12 is omitted: at that rarity the
+    #     per-scale fractions are too sparse to be informative.
+    #   * sharpness_ratio / variance_ratio: cheap blur detectors, comparable across all families.
+    # For an ENSEMBLE run (evaluate_regression with ensemble-size > 1) these are POOLED over all N x M members
+    # (every item-member pair treated as one map, obs replicated per member): they then measure the typical
+    # SINGLE-MEMBER structure fidelity with no over-smoothing — the pooled estimators average the per-map spectra /
+    # FSS fractions, never the maps. Deterministic runs compute them on the single prediction.
+    # -----------------------------------------------------------------------------------------------------------
+    spatial:
+        psd_band_ratio:
+            bands:                                      # wavelengths in pixels
+                full: [2, .inf]
+                low: [32, .inf]
+                mid: [8, 32]
+                high: [2, 8]
+        psd_full_fidelity: {band: full}                 # selection-score structure term
+        psd_high_fidelity: {band: high}                 # sharper over-smoothing detector, diagnostic only
+        log_spectral_distance: {}
+        fss:
+            thresholds: [occurrence, h3, h6]
+            scales: [1, 3, 5, 9, 17]                    # square neighbourhood side, in pixels
+            report_useful_scale: true
+        sharpness_ratio: {}                             # std of spatial gradient magnitude, pred / obs
+        variance_ratio: {}                              # spatial variance, pred / obs
+
+    # -----------------------------------------------------------------------------------------------------------
+    # Ensemble / probabilistic scores. Computed ONLY for a family that produces a predictive ensemble (mc_dropout,
+    # diffusion) when the evaluation stage runs with ensemble-size > 1; silently skipped for the deterministic
+    # U-net. Each key below is a presence-keyed toggle (empty value):
+    #   * crps / almost_fair_crps: continuous ranked probability score (Ferro 2014 order-statistic estimator; the
+    #     almost-fair variant removes the small-ensemble spread bias). Reported over all cells AND restricted to
+    #     the occurrence event (`_occ`), the latter being the meaningful one on this sparse target.
+    #   * spread_skill_ratio: sqrt(mean ensemble variance) / RMSE of the ensemble mean; ~1 well-calibrated,
+    #     < 1 under-dispersed (over-confident), > 1 over-dispersed.
+    #   * rank_histogram: Talagrand diagram at the occurrence cells (randomized tie-breaking); the JSON logs the
+    #     scalar flatness `rank_histogram_reliability` (0 = flat / calibrated) and the report draws the diagram.
+    #
+    # !! The ensemble size is the `ensemble-size` parameter of the evaluate_regression STAGE, never set here, and
+    # !! it MUST BE >= 2: spread_skill_sums computes the member variance with ddof=1, so a single-member ensemble
+    # !! divides by zero and yields a silent NaN rather than an error.
+    # -----------------------------------------------------------------------------------------------------------
+    ensemble:
+        crps: {}
+        almost_fair_crps: {}
+        spread_skill_ratio: {}
+        rank_histogram: {}                              # conditioned on the occurrence event; M+1 bins
+
+# Figures and tables written to the stage's `report-path`. Styled to the spec in
+# .claude/plans/inventory-figures.md section 1: cartopy EuroPP axes with a PlateCarree data transform,
+# origin='upper' (array row 0 is the NORTH edge), integer unit bins in lightning-hours, and the warm/cool
+# over/under encoding for difference maps.
+reporting:
+    figures:
+        - maps_most_extreme_days      # observed vs predicted maps for the most extreme day of the split (and the
+                                      # median day) — Extremeness is defined by the total flash count over the day and over the domain.
+        - roc_pr_curves               # ROC + precision-recall curves per threshold (PR backed by
+                                      # average_precision); the occurrence task's primary discrimination figure
+        - confusion_matrix            # 2x2 contingency counts per threshold, behind pod/far/csi/ets
+        - reliability                 # reliability diagram of the occurrence head (the PIT half is gone)
+        - psd_curves                  # radially-averaged PSD, model vs obs vs baselines
+        - fss_vs_scale                # one curve per threshold
+        - error_by_intensity_bin      # mae_stratified over the hour bands
+        - rank_histogram              # Talagrand diagram (ensemble runs only; skipped otherwise)
+        # Residual-mode diffusion diagnostics — the learnt-discrepancy sanity check. They self-skip unless a
+        # residual run populated curves['residual']. Lower priority than the occurrence task, but kept.
+        - residual_bias_map           # mean predicted discrepancy D_pred (diverging)
+        - residual_surprise           # magnitude + direction surprise vs the true discrepancy
+        - residual_histograms         # D_pred vs D_true distributions (pixel + per-image)
+        - residual_qq                 # residual QQ
+        - residual_scatters           # D_pred vs target / discrepancy / upstream
+        - residual_heteroscedasticity # correction-error spread vs upstream / target
+    formats: [png, csv]

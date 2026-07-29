@@ -1,0 +1,34 @@
+# =====================================================================================================================
+# CPU SMOKE-TIER split — 8 days total. Used by config/*_smoke_cpu.yaml only.
+#
+# Purpose: make a real end-to-end pipeline run (prepare -> tune -> retrain -> evaluate) finish on a CPU-only host in
+# minutes, while still exercising every code path. It is NOT a scientifically meaningful partition.
+#
+# Two deliberate choices:
+#   1. method: by_sample_id — the only way to slice below one year. `prepare_regression` caps days with a GLOBAL
+#      `max_samples` (index.head(N)), which on the year split would keep only the earliest days, i.e. test-only, and
+#      the stage RAISES when any split is empty. Naming explicit id ranges avoids that entirely.
+#   2. MID-JULY days — the peak of the convective season. Winter days are all-zero, which drives the occurrence base
+#      rate to zero and makes every categorical score, skill score and climatology baseline degenerate (NaN), so a
+#      winter smoke run would silently exercise nothing.
+#
+# Sample ids map to dates via $DATA_ROOT/metadata.csv (id 0 = 2008-01-02, one row per day, contiguous):
+#   train: 924-927  ->  2010-07-14 .. 2010-07-17   (4 days)
+#   valid: 559-560  ->  2009-07-14 .. 2009-07-15   (2 days)
+#   test:  194-195  ->  2008-07-14 .. 2008-07-15   (2 days)
+# Years are kept disjoint across splits, so the smoke run still honours the real split's no-leakage property.
+#
+# `by_year` is deliberately absent: with cross_check false it would be dead weight, and no year-based spec can
+# express an 8-day subset.
+# =====================================================================================================================
+
+method: by_sample_id
+
+# inclusive [first, last] sample-id ranges (sample_<id>.pt)
+by_sample_id:
+    test:  [[194, 195]]
+    valid: [[559, 560]]
+    train: [[924, 927]]
+
+# must be false: a subset cannot agree with the year-based specification by construction
+cross_check: false

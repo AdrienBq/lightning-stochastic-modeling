@@ -1,0 +1,24 @@
+# =====================================================================================================================
+# GPU SMOKE-TIER split — 18 days total. Used by config/*_smoke_gpu.yaml only.
+#
+# Same intent and same two design choices as config/split/split_smoke_cpu.yaml (read its header for the reasoning behind
+# `by_sample_id` and the mid-July window); this tier is simply wider, since a GPU host affords more days per epoch
+# and the wider valid/test slices make the ensemble metrics (CRPS, spread-skill, rank histogram) less noisy.
+#
+# Sample ids map to dates via $DATA_ROOT/metadata.csv (id 0 = 2008-01-02, one row per day, contiguous):
+#   train: 924-933  ->  2010-07-14 .. 2010-07-23   (10 days)
+#   valid: 559-562  ->  2009-07-14 .. 2009-07-17   (4 days)
+#   test:  194-197  ->  2008-07-14 .. 2008-07-17   (4 days)
+# Years are kept disjoint across splits, so the smoke run still honours the real split's no-leakage property.
+# =====================================================================================================================
+
+method: by_sample_id
+
+# inclusive [first, last] sample-id ranges (sample_<id>.pt)
+by_sample_id:
+    test:  [[194, 197]]
+    valid: [[559, 562]]
+    train: [[924, 933]]
+
+# must be false: a subset cannot agree with the year-based specification by construction
+cross_check: false
