@@ -34,7 +34,7 @@ loss:
 
     # intensity weighting w(y) = (1 + y)^gamma, computed from the RAW target and applied samplewise.
     # 0.0 = unweighted (recovers mae / rmse / mse); higher gamma increasingly up-weights high-hour cells.
-    intensity_weight_gamma: {type: float, low: 0.0, high: 1.0}
+    intensity_weight_gamma: {type: float, low: 0.0, high: 5.0}
 
     # asymmetric_huber only: under-prediction is penalized tau/(1-tau) times more than over-prediction, so
     # tau > 0.5 encodes the preference for conservative models
@@ -95,8 +95,7 @@ unet:
 #                     NOTE it only guarantees >= 0, which coincides with min_hours: 0 today but would SILENTLY
 #                     violate a non-zero min_hours. Step 3 must either constrain that combination out or clamp
 #                     after the activation.
-output_activation: {type: categorical, choices: [softplus, clamped_sigmoid]}
-min_hours: 0                                            # the bounded-target floor, in hours per day
+output_activation: {type: categorical, choices: [softplus]}
 max_hours: 24                                           # the bounded-target ceiling, in hours per day
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -159,6 +158,7 @@ selection:
     metric: valid_regression_score
     mode: max
     components:
-        average_precision_occurrence: 0.40
-        mae_cond_ss_climatology:      0.30
-        psd_full_fidelity:            0.30
+        mae_cond_ss_climatology:      0.50
+        psd_full_fidelity:            0.50
+
+# average_precision_occurrence: 0.40

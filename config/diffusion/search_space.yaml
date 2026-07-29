@@ -55,7 +55,7 @@ flow:
 # ---------------------------------------------------------------------------------------------------------------------
 loss:
     name: {type: categorical, choices: [weighted_mae, weighted_rmse, weighted_mse, asymmetric_huber, wmae_psd, wmse_psd]}
-    intensity_weight_gamma: {type: float, low: 0.0, high: 1.0}   # 0.0 => unweighted
+    intensity_weight_gamma: {type: float, low: 0.0, high: 5.0}   # 0.0 => unweighted
     asymmetry_tau: {type: float, low: 0.5, high: 0.9}            # asymmetric_huber only
     huber_delta:   {type: float, low: 0.5, high: 3.0}
     alpha:         {type: float, low: 0.5, high: 1.0}            # wmae_psd / wmse_psd: pointwise weight;
@@ -73,8 +73,7 @@ occurrence_head:
 
 # Bounded on BOTH sides -- see config/deterministic_unet/search_space.yaml for the softplus caveat. In residual
 # mode the pair is ALSO the clamp applied to the reconstruction: clamp(upstream + residual, min_hours, max_hours).
-output_activation: {type: categorical, choices: [softplus, clamped_sigmoid]}
-min_hours: 0                                            # the bounded-target floor, in hours per day
+output_activation: {type: categorical, choices: [softplus]}
 max_hours: 24                                           # the bounded-target ceiling, in hours per day
 
 calibration:
@@ -109,6 +108,7 @@ selection:
     metric: valid_regression_score
     mode: max
     components:
-        average_precision_occurrence: 0.40
-        mae_cond_ss_climatology:      0.30
-        psd_full_fidelity:            0.30
+        mae_cond_ss_climatology:      0.50
+        psd_full_fidelity:            0.50
+
+# average_precision_occurrence: 0.40
