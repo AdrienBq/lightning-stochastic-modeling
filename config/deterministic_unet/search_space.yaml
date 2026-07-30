@@ -89,12 +89,13 @@ unet:
     activation: {type: categorical, choices: [relu, gelu, silu]}
     bottleneck_attention: {type: categorical, choices: [true, false]}
 
-# The target is BOUNDED on BOTH sides, so every family's head must respect both bounds.
-#   clamped_sigmoid : min_hours + (max_hours - min_hours) * sigmoid(z) -- bounded by construction
-#   softplus        : non-negative but unbounded above; relies on the loss to keep predictions in range.
-#                     NOTE it only guarantees >= 0, which coincides with min_hours: 0 today but would SILENTLY
-#                     violate a non-zero min_hours. Step 3 must either constrain that combination out or clamp
-#                     after the activation.
+# Output head. `softplus` guarantees a non-negative prediction, which IS the target's lower bound (0 hours), so no
+# separate `min_hours` knob is needed -- the floor is structural. It is left as a single-choice categorical rather
+# than a plain scalar so the search space keeps one shape across families and adding an alternative later needs no
+# restructuring.
+#
+# ⚠️ softplus is UNBOUNDED ABOVE, so `max_hours` is NOT enforced by the activation. Step 3 must decide where the
+#    ceiling is applied -- see step-3-utils.md ("open question: where max_hours is enforced").
 output_activation: {type: categorical, choices: [softplus]}
 max_hours: 24                                           # the bounded-target ceiling, in hours per day
 

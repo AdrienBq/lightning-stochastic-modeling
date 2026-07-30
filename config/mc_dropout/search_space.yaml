@@ -111,7 +111,8 @@ unet:
 
 dropout_p: {type: float, low: 0.05, high: 0.3}          # MC-dropout rate; strictly > 0 — see constraint 2 above
 
-# Bounded on BOTH sides -- see config/deterministic_unet/search_space.yaml for the softplus caveat.
+# Output head -- see config/deterministic_unet/search_space.yaml. softplus gives the 0-hour floor structurally;
+# ⚠️ it is unbounded above, so `max_hours` is not enforced by the activation (Step 3 decides where).
 output_activation: {type: categorical, choices: [softplus]}
 max_hours: 24                                           # the bounded-target ceiling, in hours per day
 
