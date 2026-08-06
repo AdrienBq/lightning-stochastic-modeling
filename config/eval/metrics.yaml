@@ -36,10 +36,26 @@
 # ---------------------------------------------------------------------------------------------------------------------
 # HOURLY BINARY TARGET (`mode: hourly`) — what an hourly pipeline must change here.
 #
+# In hourly mode the OBSERVATION is the 0/1 event and the PREDICTION is a probability in [0, 1] — never a 0/1 field.
+# Nothing binarizes the prediction except where a score structurally needs a discrete event (the contingency cut
+# below, and the thresholded form of FSS), so most of the suite carries over unchanged.
+#
 # The hour bands h3/h6/h12 are defined on a 0-24 daily count and do not exist on a 0/1 target, so trim the
-# `thresholds`/`bins` lists under `metrics.continuous` and `metrics.calibration.rank_correlation` to `[occurrence]`.
-# The continuous group also degenerates on a binary target (read brier_skill_score / the AUCs / reliability instead
-# of r2 and the MAEs).
+# `thresholds` lists under `metrics.continuous` and `metrics.categorical` to the single hourly event.
+#
+# The continuous group is READ, on the probability field — it does not degenerate. Two of its entries are exact
+# restatements of probabilistic scores there: `rmse ** 2` IS the Brier score, and unconditioned `r2` IS the Brier
+# skill score against a constant base-rate reference (compare it with `brier_skill_score`, whose reference is the
+# stronger per-cell climatology). `bias` becomes calibration-in-the-large, `mean(p) - base_rate`. What to change:
+#   * ⚠️ `mae` is IMPROPER against a 0/1 observation — minimized by a sharp forecast, so the all-zero prediction wins
+#     (0.0007 vs 0.0014 for a calibrated one at this base rate). Keep reporting it, but the selection score must
+#     never use it in this mode.
+#   * drop `mae_stratified` — its bins partition OBSERVED intensity, and a 0/1 target has one non-empty band.
+#   * drop `estimation_tendency` — conditioned on `obs > 0`, `pred - obs = p - 1 <= 0` always, so `under` ~ 1 and
+#     `over` = 0 for every model.
+#   * drop `metrics.calibration.rank_correlation` — Spearman against a dichotomous observation is exactly
+#     `(2*AUC - 1) * sqrt(3*n1*n0/n^2)`: no information beyond `roc_auc`, and scaled by ~sqrt(base_rate) it MISREADS
+#     (an AUC of 0.998 shows as 0.049). Its `obs > 0` subgroups are constant anyway, so every key would be NaN.
 #
 # ⚠️ `metrics.categorical.thresholds` needs MORE than a trim: it must use `kind: probability` entries, e.g.
 #
@@ -53,6 +69,11 @@
 #
 # `metrics.spatial.fss` needs NO change: the suite detects a probability field and switches to the threshold-free
 # form automatically, where FSS is the fractions Brier skill score and the keys become `fss_s<scale>`.
+#
+# ⚠️ The rest of `metrics.spatial` is BIASED in this mode, against correctness. A calibrated probability field is
+# intrinsically smoother than the 0/1 field it is compared with, so `psd_band_ratio` (high band), `sharpness_ratio`
+# and `spatial_variance_ratio` read low for a well-calibrated model. `psd_full_fidelity` carries 0.30 of
+# `valid_classification_score`, so read those against the reliability diagram before calling a model over-smoothed.
 # =====================================================================================================================
 
 # Trivial baselines evaluated alongside the model; every skill score below references them.
@@ -121,10 +142,14 @@ metrics:
     #     rather than one decision cut, so they cannot be gamed by a lucky operating point. PR-AUC is the more
     #     informative of the two at this base rate (ROC-AUC is optimistic when negatives dominate), which is why
     #     `average_precision_occurrence` — not ROC-AUC — is the discrimination term of the selection score.
+    #   * dice is THRESHOLD-FREE too, and is SOFT: computed on the probability with no cut, it is the eval-time
+    #     complement of the `dice` training loss, so the reported number measures what that loss optimized. Emitted
+    #     only where the field is a genuine probability — `dice_occurrence` with an occurrence head, and nothing on
+    #     the hour bands of a plain regression run (a deliberate absence, not a NaN).
     # -----------------------------------------------------------------------------------------------------------
     categorical:
         thresholds: [occurrence, h3, h6, h12]
-        scores: [pod, far, csi, ets, hss, sedi, frequency_bias, roc_auc, average_precision]
+        scores: [pod, far, csi, ets, hss, sedi, frequency_bias, roc_auc, average_precision, dice]
 
     # -----------------------------------------------------------------------------------------------------------
     # Skill vs the trivial baselines: positive values mean the model beats the baseline. An imbalance-exploiting

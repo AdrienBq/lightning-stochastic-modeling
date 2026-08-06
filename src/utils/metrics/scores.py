@@ -18,6 +18,19 @@ Structure-aware (challenge B):
 Every score is computed in the TARGET SPACE. There is no target transform and no back-transform anywhere in this
 project, so there is never a question of which space a tensor is in.
 
+WHAT THE PREDICTION IS, IN EACH TASK — the ``Task:`` line on every score below is read against this:
+- REGRESSION (`mode: daily`): prediction and observation are both lightning-hours in [0, 24].
+- CLASSIFICATION (`mode: hourly`): the observation is the 0/1 event, and the prediction is a PROBABILITY in [0, 1].
+  It is never a 0/1 field. Binarizing the prediction is done only where a score structurally requires a discrete
+  event — the decision cut of a contingency table, and the thresholded form of FSS — and nowhere else: not for the
+  probabilistic scores, not for the ranking metrics, not for Dice (which is its own soft form on probabilities),
+  and never for plotting.
+
+That is why most of the continuous group is tagged ``both``: MAE/RMSE/bias/R^2 of a probability against a 0/1 label
+are well-defined, and two of them are exact identities (``rmse ** 2 == brier_score``; unconditioned ``r2_score`` is
+the Brier skill score against a constant base-rate reference). The three that stay ``regression`` are limited by
+their BINS or CONDITIONS, not by the prediction — see each one.
+
 Deliberately absent (do not reintroduce):
 - ``tweedie_deviance_score`` — parameterized for an unbounded zero-inflated target, so it misstates error on the
   bounded 0-24 one. The likelihood-based score for this project is ``explained_deviance``, on the binary head.
@@ -138,15 +151,22 @@ def categorical_scores(hits: float, misses: float, false_alarms: float, correct_
 # ----------------------------------------------------------------------------------------------------------------
 # continuous errors
 #
-# Task: REGRESSION throughout this section. Every one of these is defined on a 0/1 target but degenerate there: MAE
-# becomes a rescaled error rate, RMSE its square root, and r2 has almost no variance to explain. metrics.yaml says
-# the same in prose ("the continuous group also degenerates on a binary target"); an hourly run should read the
-# probabilistic scores (Brier, explained deviance, the ranking metrics) instead.
+# Task: BOTH for most of this section. The classification prediction is a probability, not a 0/1 field (see the
+# module docstring), so these are well-defined against a binary observation — and `rmse` / `r2_score` are then exact
+# restatements of the Brier score and its skill against a base-rate reference. `run_metric_suite` computes this whole
+# group from whatever `prediction` it is handed, in either task, by design.
+#
+# The exceptions are `rank_correlation`, `estimation_tendency` and `stratified_mae`, which stay REGRESSION because of
+# the observed-intensity bins and `obs > 0` conditions they are evaluated under, not because of the prediction.
+#
+# One caveat that applies to the whole group on the classification task: `mae` is IMPROPER there (it is minimized by
+# a sharp 0/1 forecast, so the all-zero prediction wins), while `rmse` is proper. Never select on `mae` in that task.
 # ----------------------------------------------------------------------------------------------------------------
 def rmse(pred: np.ndarray, obs: np.ndarray) -> float:
     """Root mean squared error.
 
-    Task: regression (degenerate on a 0/1 target).
+    Task: both. On the classification task (a probability against a 0/1 observation) ``rmse ** 2`` is EXACTLY the
+    Brier score, so this is a proper score there — minimized by the calibrated probability, unlike ``mae``.
     """
     return float(np.sqrt(np.mean((pred - obs) ** 2)))
 
@@ -154,7 +174,10 @@ def rmse(pred: np.ndarray, obs: np.ndarray) -> float:
 def mae(pred: np.ndarray, obs: np.ndarray) -> float:
     """Mean absolute error.
 
-    Task: regression (on a 0/1 target this collapses to a rescaled error rate).
+    Task: both, but IMPROPER on the classification task — report it there, never select on it. Against a 0/1
+    observation ``E|p - y| = pi*(1 - p) + (1 - pi)*p`` is linear in p, hence minimized at ``p = 0`` for any base rate
+    ``pi < 0.5``: at this project's 0.07 % base rate the all-zero forecast scores 0.0007 while an honest calibrated
+    one scores 0.0014, twice as bad. Use ``rmse`` (= sqrt Brier) or ``brier_score`` to rank probability forecasts.
     """
     return float(np.mean(np.abs(pred - obs)))
 
@@ -162,7 +185,8 @@ def mae(pred: np.ndarray, obs: np.ndarray) -> float:
 def bias(pred: np.ndarray, obs: np.ndarray) -> float:
     """Mean error (pred - obs); >= 0 indicates the preferred conservative behavior.
 
-    Task: regression (degenerate on a 0/1 target).
+    Task: both. On the classification task this is ``mean(p) - base_rate``, i.e. calibration-in-the-large: the
+    continuous counterpart of ``frequency_bias``, needing no decision cut.
     """
     return float(np.mean(pred - obs))
 
@@ -170,7 +194,11 @@ def bias(pred: np.ndarray, obs: np.ndarray) -> float:
 def r2_score(pred: np.ndarray, obs: np.ndarray, condition: Optional[np.ndarray] = None) -> float:
     """Coefficient of determination ``1 - SS_res / SS_tot`` on the conditioning cells (default: all cells).
 
-    Task: regression (degenerate on a 0/1 target).
+    Task: both. Unconditioned on a 0/1 observation it is EXACTLY the Brier skill score against a constant base-rate
+    reference, since ``SS_tot = N * var(y) = N * base_rate * (1 - base_rate)`` is that reference's Brier score. Read
+    it against the suite's own ``brier_skill_score``, whose reference is the stronger per-cell day-of-year
+    climatology: ``r2 > 0`` with ``brier_skill_score < 0`` means the model beats the base rate but not the
+    climatology.
 
     SS_tot is the observed variance over the conditioning cells, so the score is the fraction of that variance
     explained by the predictions (it can go negative for predictions worse than the conditional mean — exactly
@@ -199,7 +227,9 @@ def estimation_tendency(
 ) -> Dict[str, float]:
     """Proportions of under- and over-estimated cells among the conditioning cells (default: observed-positive).
 
-    Task: regression.
+    Task: regression — limited by the CONDITION, not the prediction. Under the suite's observed-exceedance subgroups
+    a 0/1 observation gives ``pred - obs = p - 1 <= 0`` on every conditioning cell, so ``under`` ~ 1 and ``over`` = 0
+    for any model whatsoever. Use ``bias`` for the classification task's directional information.
 
     A cell is under-estimated when ``pred - obs < -tolerance`` and over-estimated when ``pred - obs > tolerance``;
     cells within +/- tolerance are counted as on-target. Complements the signed ``bias`` with the *direction*
@@ -231,7 +261,11 @@ def rank_correlation(
 ) -> float:
     """Rank (ordering) agreement between predictions and observations on the conditioning cells.
 
-    Task: regression (ties from the zero mass make it degenerate on a 0/1 target).
+    Task: regression, for two independent reasons — both about how it is EVALUATED, not about the prediction. Against
+    a dichotomous observation Spearman is the rank-biserial correlation, exactly ``(2*AUC - 1) * sqrt(3*n1*n0/n^2)``:
+    affine in ROC-AUC, so it adds nothing over ``roc_auc``, but scaled by ~sqrt(base_rate), so it MISREADS — a
+    near-perfect AUC of 0.998 shows up as a Spearman of 0.049. And under the suite's ``obs > 0`` subgroups the
+    observation is constant, so it returns NaN outright.
 
     Measures whether the model orders cells the same way the observations do — robust to tail outliers. Evaluate
     it within obs subgroups (the zero mass makes the all-cells coefficient near-degenerate through ties). NaN on
@@ -266,7 +300,9 @@ def conditional_error(
 ) -> float:
     """RMSE/MAE restricted to the conditioning cells (where a trivially-zero predictor collapses).
 
-    Task: regression.
+    Task: both. On the classification task, ``kind='mae'`` over the observed positives is ``1 - mean(p | y = 1)``, the
+    complement of the mean probability the model assigns to actual events — and it is anti-trivial in the same way it
+    is for regression: the all-zero forecast scores 1.0.
 
     Args:
         condition: Boolean mask of the cells to score (e.g. the evaluation-side occurrence event);
@@ -281,7 +317,8 @@ def conditional_error(
 def stratified_mae(pred: np.ndarray, obs: np.ndarray, bin_edges: Sequence[Tuple[str, float]]) -> Dict[str, float]:
     """MAE within observed-intensity bins delimited by named ascending edges (last bin is open above).
 
-    Task: regression (the hour bands do not exist on a 0/1 target).
+    Task: regression — limited by the BINS, not the prediction: they partition OBSERVED intensity, and a 0/1
+    observation has exactly one non-empty band (every positive lands in the first one), so the rest are NaN.
 
     Args:
         bin_edges: Sequence of (name, value) pairs. Under the current metric suite these are the ABSOLUTE hour
@@ -317,6 +354,13 @@ def skill_score(model_error: float, baseline_error: float) -> float:
 
 # ----------------------------------------------------------------------------------------------------------------
 # neighborhood and spectral structure scores
+#
+# ⚠️ These are BIASED on the classification task, in a direction that penalizes correctness. A calibrated probability
+# field is intrinsically smoother than the 0/1 observation it is compared against — spreading probability mass is what
+# calibration MEANS at a 0.07 % base rate — so the high-band PSD ratio, the sharpness ratio and the spatial-variance
+# ratio all read low for a well-calibrated model. This is not cosmetic: `psd_full_fidelity` carries 0.30 of
+# `valid_classification_score`, so the classification composite partly charges a model for being calibrated. Weigh
+# these against the reliability diagram before concluding a probability forecast is over-smoothed.
 # ----------------------------------------------------------------------------------------------------------------
 def _fractions_skill(
         pred_field: np.ndarray,
@@ -734,21 +778,28 @@ def explained_deviance(
     )
 
 
-def dice_coefficient(pred_binary: np.ndarray, obs_binary: np.ndarray, smooth: float = 1.0) -> float:
-    """Dice / F1 coefficient: 2*TP / (2*TP + FP + FN), pooled over all pixels and time steps.
+def dice_coefficient(pred: np.ndarray, obs: np.ndarray, smooth: float = 1.0) -> float:
+    """Dice / F1 coefficient ``2*sum(p*o) / (sum(p) + sum(o))``, pooled over all pixels and time steps.
 
-    Task: classification.
+    Task: classification (and the occurrence head of a regression run). Needs NO binarization of the prediction: on a
+    probability field the formula IS soft Dice, the eval-time complement of the ``dice`` training loss
+    (``losses.dice_loss``), so the reported score measures the same quantity that was optimized. Fed a 0/1 prediction
+    it reduces to the hard ``2*TP / (2*TP + FP + FN)``.
+
+    The observation must be the 0/1 event either way. The prediction must be in [0, 1] for the score to mean anything
+    — on an unnormalized field (lightning-hours, say) the ratio mixes units, which is why ``run_metric_suite`` emits
+    this key only where the continuous field it scores is a probability.
 
     Args:
-        pred_binary: Predicted binary map(s), any shape.
-        obs_binary: Observed binary map(s), same shape.
+        pred: Predicted probabilities (soft) or 0/1 field (hard), any shape.
+        obs: Observed 0/1 event map(s), same shape.
         smooth: Laplace smoothing to avoid 0/0 on empty batches.
 
     Returns:
-        Dice coefficient in [0, 1]; NaN if both pred and obs are all-zero (undefined overlap).
+        Dice coefficient in [0, 1]; NaN if both pred and obs are all-zero with ``smooth=0`` (undefined overlap).
     """
-    p = pred_binary.ravel().astype(np.float64)
-    o = obs_binary.ravel().astype(np.float64)
+    p = pred.ravel().astype(np.float64)
+    o = obs.ravel().astype(np.float64)
     intersection = (p * o).sum()
     denominator = p.sum() + o.sum()
     if denominator == 0 and smooth == 0.0:

@@ -33,9 +33,14 @@ from src.utils.metrics import scores
 
 logger = logging.getLogger(__name__)
 
-# Categorical entries that are NOT read off a contingency table: they score the RANKING of the predicted field over
-# all cells rather than one decision cut, so they are computed from a continuous score and the observed event.
+# Categorical entries that are NOT read off a contingency table: they need the observed EVENT but no cut on the
+# prediction, so they are computed from the continuous field directly.
+#   * RANKING_SCORES score the ordering of that field over all cells rather than at one decision cut.
+#   * `dice` is soft Dice — the same formula as the hard coefficient, evaluated on the probability (see
+#     scores.dice_coefficient). It is the eval-time complement of the `dice` training loss.
 RANKING_SCORES = ('roc_auc', 'average_precision')
+SOFT_SCORES = ('dice',)
+THRESHOLD_FREE_SCORES = RANKING_SCORES + SOFT_SCORES
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -479,15 +484,16 @@ def run_metric_suite(
 
     # --- categorical ------------------------------------------------------------------------------------------
     # Two kinds of entry share the `<score>_<threshold>` grammar. The contingency scores (pod/far/csi/ets/hss/sedi/
-    # frequency_bias) come off a 2x2 table at one decision cut. The RANKING scores (roc_auc, average_precision) are
-    # threshold-free: they score the ordering of a continuous field against the observed event, so they need a
-    # ranking score rather than a table. For the `occurrence` event that ranking score is the occurrence
-    # PROBABILITY when the model emits one, and the regression prediction otherwise; for the hour bands it is
-    # always the prediction, since the occurrence head says nothing about intensity.
+    # frequency_bias) come off a 2x2 table at one decision cut. The THRESHOLD-FREE scores (roc_auc,
+    # average_precision, dice) cut only the OBSERVATION and read the prediction as a continuous field: the ordering
+    # of it for the ranking metrics, the overlap ratio for soft Dice. For the `occurrence` event that field is the
+    # occurrence PROBABILITY when the model emits one, and the regression prediction otherwise; for the hour bands it
+    # is always the prediction, since the occurrence head says nothing about intensity.
     categorical = config.get('categorical', {})
     requested_scores = list(categorical.get('scores', []))
-    table_scores = [name for name in requested_scores if name not in RANKING_SCORES]
+    table_scores = [name for name in requested_scores if name not in THRESHOLD_FREE_SCORES]
     ranking_scores = [name for name in requested_scores if name in RANKING_SCORES]
+    soft_scores = [name for name in requested_scores if name in SOFT_SCORES]
     ranking_edges = scores.ranking_bin_edges()
     curves['roc_pr'] = {}
     curves['confusion'] = {}
@@ -516,30 +522,39 @@ def run_metric_suite(
             'false_alarms': false_alarms, 'correct_negatives': correct_negatives
         }
 
-        if not ranking_scores:
+        if not (ranking_scores or soft_scores):
             continue
-        # The ranking metrics score an ORDERING, so they need a continuous field: the occurrence probability where
-        # the model emits one, the regression prediction otherwise (the occurrence head says nothing about
-        # intensity, so the hour bands always rank on the prediction). score_max maps hours into [0, 1] for the
-        # binning; being a fixed monotone map it leaves both metrics exactly invariant.
+        # The threshold-free scores need a continuous field: the occurrence probability where the model emits one,
+        # the regression prediction otherwise (the occurrence head says nothing about intensity, so the hour bands
+        # always read the prediction). score_max maps hours into [0, 1] for the ranking binning; being a fixed
+        # monotone map it leaves the ranking metrics exactly invariant.
         is_occurrence = spec.obs_event == (occurrence_value, occurrence_strict) and spec.is_symmetric
         use_probability = (probability is not None) and (is_occurrence or prediction_is_probability)
-        ranking_field = probability if use_probability else prediction
+        continuous_field = probability if use_probability else prediction
         score_max = 1.0 if (use_probability or prediction_is_probability) else max(float(np.nanmax(prediction)), 1.0)
         event = observed_subgroup(threshold_name)
-        ranking = scores.finalize_ranking_metrics(
-            scores.ranking_partials(ranking_field, event, ranking_edges, score_max=score_max), ranking_edges
-        )
-        for score_name in ranking_scores:
-            flat[f'{score_name}_{threshold_name}'] = float(ranking[score_name])
-        curves['roc_pr'][threshold_name] = {
-            'fpr': ranking['fpr'], 'tpr': ranking['tpr'],
-            'recall': ranking['recall'], 'precision': ranking['precision'],
-            'base_rate': float(np.mean(event)),
-            'roc_auc': ranking['roc_auc'],
-            'average_precision': ranking['average_precision'],
-            'from_probability': bool(use_probability)
-        }
+
+        # Soft Dice is a RATIO of the field to the event, not an ordering of it, so unlike the ranking metrics it is
+        # not invariant to score_max: on a lightning-hours field 2*sum(p*o)/(sum(p)+sum(o)) mixes units and means
+        # nothing. Emitted only where the field is a genuine probability — absent on the hour bands of a regression
+        # run, which is a deliberate absence rather than a NaN.
+        if 'dice' in soft_scores and use_probability:
+            flat[f'dice_{threshold_name}'] = scores.dice_coefficient(continuous_field, event)
+
+        if ranking_scores:
+            ranking = scores.finalize_ranking_metrics(
+                scores.ranking_partials(continuous_field, event, ranking_edges, score_max=score_max), ranking_edges
+            )
+            for score_name in ranking_scores:
+                flat[f'{score_name}_{threshold_name}'] = float(ranking[score_name])
+            curves['roc_pr'][threshold_name] = {
+                'fpr': ranking['fpr'], 'tpr': ranking['tpr'],
+                'recall': ranking['recall'], 'precision': ranking['precision'],
+                'base_rate': float(np.mean(event)),
+                'roc_auc': ranking['roc_auc'],
+                'average_precision': ranking['average_precision'],
+                'from_probability': bool(use_probability)
+            }
 
     # --- skill vs trivial baselines ---------------------------------------------------------------------------
     skill = config.get('skill', {})
