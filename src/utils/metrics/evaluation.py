@@ -23,7 +23,7 @@ is baked into the stored target and any positive value has already survived it. 
 and ``resolve_occurrence_event`` hard-asserts that none has reappeared.
 """
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Dict, NamedTuple, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -41,6 +41,32 @@ RANKING_SCORES = ('roc_auc', 'average_precision')
 # ----------------------------------------------------------------------------------------------------------------
 # threshold resolution
 # ----------------------------------------------------------------------------------------------------------------
+class EventThreshold(NamedTuple):
+    """A resolved threshold, carrying the OBSERVATION side and the PREDICTION side separately.
+
+    They are separate because the two tasks cut different sides. In the daily REGRESSION task prediction and
+    observation are the same quantity in the same units, so both sides hold the same hour band — that is the
+    symmetric case every ``kind: absolute`` entry produces. In the hourly CLASSIFICATION task the observation is
+    already a 0/1 event while the prediction is a probability, so a shared level is meaningless: the prediction side
+    is a DECISION threshold on the probability and the observation side just reads the labels.
+
+    Every metric that conditions on *observed* intensity (the stratified MAE bins, the r2 and rank-correlation
+    subgroups, FSS) uses the obs side. Only the contingency table uses both.
+    """
+    obs_value: float
+    obs_strict: bool
+    pred_value: float
+    pred_strict: bool
+
+    @property
+    def obs_event(self) -> Tuple[float, bool]:
+        return self.obs_value, self.obs_strict
+
+    @property
+    def is_symmetric(self) -> bool:
+        return (self.obs_value, self.obs_strict) == (self.pred_value, self.pred_strict)
+
+
 def resolve_occurrence_event(metrics_config: dict, target_stats: dict) -> Tuple[float, bool]:
     """Resolve the evaluation-side occurrence event into an exceedance spec ``(value, strict)``.
 
@@ -60,41 +86,54 @@ def resolve_occurrence_event(metrics_config: dict, target_stats: dict) -> Tuple[
     return 0.0, True
 
 
-def resolve_threshold(spec: dict, target_stats: dict) -> Tuple[float, bool]:
-    """Resolve a named threshold spec from metrics.yaml into (value, strict).
+def resolve_threshold(spec: dict, target_stats: dict, occurrence_event: Tuple[float, bool]) -> EventThreshold:
+    """Resolve one named threshold spec from metrics.yaml into an :class:`EventThreshold`.
 
-    Supported kinds: ``absolute`` (a plain value in target units — the DEFAULT, and what the metric suite uses:
-    the hour bands h3/h6/h12) and ``train_positive_quantile`` (a quantile of the positive train target marginal,
-    looked up in ``target_stats['positive_quantiles']``). The ``occurrence`` kind is resolved by
-    :func:`resolve_thresholds` through :func:`resolve_occurrence_event`.
+    Supported kinds:
 
-    Note that quantile levels of the positive marginal COLLAPSE on the bounded 0-24 integer target (the 0.99 and
-    0.999 quantiles land on the same hour value), which is why the suite names absolute levels instead. The kind is
-    kept because the resolver is generic, not because the suite uses it.
+    * ``absolute`` (the DEFAULT, and what the daily suite uses: the hour bands h3/h6/h12) — a plain value in target
+      units, applied SYMMETRICALLY to both sides.
+    * ``occurrence`` — the evaluation-side occurrence event, also symmetric.
+    * ``probability`` — for the HOURLY CLASSIFICATION task: the prediction side is a decision threshold on the
+      predicted probability (``value``, e.g. 0.5) and the observation side is the occurrence event, so the 0/1
+      labels are read as they are rather than re-thresholded. An hourly pipeline's ``metrics.categorical.thresholds``
+      must use this kind — see the warning in :func:`run_metric_suite` for what an ``occurrence`` entry would do to
+      a probability field.
+    * ``train_positive_quantile`` — a quantile of the positive train target marginal, symmetric. Kept because the
+      resolver is generic, NOT because the suite uses it: quantile levels of the positive marginal collapse on the
+      bounded 0-24 integer target (the 0.99 and 0.999 quantiles land on the same hour value), which is exactly why
+      the suite names absolute levels instead.
     """
     kind = spec.get('kind', 'absolute')
     strict = bool(spec.get('strict', False))
+
+    def symmetric(value: float) -> EventThreshold:
+        return EventThreshold(obs_value=value, obs_strict=strict, pred_value=value, pred_strict=strict)
+
+    if kind == 'occurrence':
+        return EventThreshold(occurrence_event[0], occurrence_event[1], occurrence_event[0], occurrence_event[1])
     if kind == 'absolute':
-        return float(spec['value']), strict
+        return symmetric(float(spec['value']))
+    if kind == 'probability':
+        return EventThreshold(
+            obs_value=occurrence_event[0], obs_strict=occurrence_event[1],
+            pred_value=float(spec['value']), pred_strict=strict
+        )
     if kind == 'train_positive_quantile':
         quantiles = target_stats['positive_quantiles']
         key = str(spec['value'])
         if key not in quantiles:
             # tolerate float-formatting differences between YAML and JSON keys (0.9 vs 0.90)
             key = str(float(spec['value']))
-        return float(quantiles[key]), strict
+        return symmetric(float(quantiles[key]))
     raise ValueError(f'Unknown threshold kind "{kind}".')
 
 
-def resolve_thresholds(metrics_config: dict, target_stats: dict) -> Dict[str, Tuple[float, bool]]:
-    """Resolve every named threshold of the metric suite into (value, strict) pairs.
-
-    A spec with ``kind: occurrence`` resolves to the evaluation-side occurrence event (see
-    :func:`resolve_occurrence_event`).
-    """
+def resolve_thresholds(metrics_config: dict, target_stats: dict) -> Dict[str, EventThreshold]:
+    """Resolve every named threshold of the metric suite into an :class:`EventThreshold`."""
     occurrence_event = resolve_occurrence_event(metrics_config, target_stats)
     return {
-        name: occurrence_event if spec.get('kind') == 'occurrence' else resolve_threshold(spec, target_stats)
+        name: resolve_threshold(spec, target_stats, occurrence_event)
         for name, spec in metrics_config.get('thresholds', {}).items()
     }
 
@@ -364,7 +403,15 @@ def run_metric_suite(
     config = metrics_config.get('metrics', {})
     thresholds = resolve_thresholds(metrics_config, target_stats)
     flat: Dict[str, float] = {}
-    curves: dict = {'thresholds': {name: value for name, (value, _) in thresholds.items()}}
+    curves: dict = {'thresholds': {name: spec.obs_value for name, spec in thresholds.items()}}
+
+    # A probability field is detected structurally rather than passed in, because run_metric_suite is deliberately
+    # mode-agnostic: it decides what to do from the arrays it is handed. Used for two things below — choosing the
+    # probabilistic FSS form, and warning about a decision threshold that would fire everywhere.
+    prediction_is_probability = bool(
+        prediction.size and np.nanmin(prediction) >= 0.0 and np.nanmax(prediction) <= 1.0
+        and np.all(np.isin(observation, (0.0, 1.0)))
+    )
 
     # spatial-structure scores read from a (possibly) distinct prediction/observation pair: the POOLED
     # ``[N*M, H, W]`` ensemble stack (obs replicated per member) for an ensemble run, the point
@@ -398,7 +445,7 @@ def run_metric_suite(
         flat['mae_cond_pos'] = scores.conditional_error(prediction, observation, kind='mae',
                                                         condition=occurrence)
     if 'mae_stratified' in continuous:
-        bin_edges = [(name, thresholds[name][0]) for name in continuous['mae_stratified']['bins']]
+        bin_edges = [(name, thresholds[name].obs_value) for name in continuous['mae_stratified']['bins']]
         stratified = scores.stratified_mae(prediction, observation, bin_edges)
         flat.update(stratified)
         curves['error_by_bin'] = {
@@ -412,8 +459,8 @@ def run_metric_suite(
     # observed-exceedance subgroups reused by the threshold-conditioned metrics below (the `occurrence` name
     # resolves to the evaluation occurrence event, identical to the `occurrence` mask computed above)
     def observed_subgroup(threshold_name: str) -> np.ndarray:
-        value, strict = thresholds[threshold_name]
-        return scores.exceedance(observation, value, strict)
+        spec = thresholds[threshold_name]
+        return scores.exceedance(observation, spec.obs_value, spec.obs_strict)
 
     if 'r2' in continuous:                              # overall and within each observed-exceedance subgroup
         flat['r2'] = scores.r2_score(prediction, observation)
@@ -441,11 +488,25 @@ def run_metric_suite(
     requested_scores = list(categorical.get('scores', []))
     table_scores = [name for name in requested_scores if name not in RANKING_SCORES]
     ranking_scores = [name for name in requested_scores if name in RANKING_SCORES]
+    ranking_edges = scores.ranking_bin_edges()
     curves['roc_pr'] = {}
     curves['confusion'] = {}
     for threshold_name in categorical.get('thresholds', []):
-        value, strict = thresholds[threshold_name]
-        counts = scores.contingency_counts(prediction, observation, value, strict)
+        spec = thresholds[threshold_name]
+        # obs and pred sides are cut SEPARATELY: symmetric for the daily hour bands, and for the hourly task a
+        # decision threshold on the probability against labels that are read as they are (see EventThreshold).
+        counts = scores.contingency_counts(
+            prediction, observation, spec.pred_value, spec.pred_strict,
+            obs_threshold=spec.obs_value, obs_strict=spec.obs_strict
+        )
+        if prediction_is_probability and spec.pred_value <= 0.0 and spec.pred_strict:
+            logger.warning(
+                f'Threshold "{threshold_name}" cuts the PREDICTION at > 0, but the prediction looks like a '
+                f'probability field. Every cell with any non-zero probability then counts as a predicted event, so '
+                f'pod ~ 1 and far ~ 1 - base_rate: the contingency scores for this threshold are meaningless. An '
+                f'hourly (classification) pipeline must use `kind: probability` thresholds in '
+                f'metrics.categorical.thresholds, e.g. `p50: {{kind: probability, value: 0.5}}`.'
+            )
         table = scores.categorical_scores(*counts)
         for score_name in table_scores:
             flat[f'{score_name}_{threshold_name}'] = table[score_name]
@@ -457,21 +518,27 @@ def run_metric_suite(
 
         if not ranking_scores:
             continue
-        is_occurrence = (value, strict) == (occurrence_value, occurrence_strict)
-        ranking_field = probability if (is_occurrence and probability is not None) else prediction
+        # The ranking metrics score an ORDERING, so they need a continuous field: the occurrence probability where
+        # the model emits one, the regression prediction otherwise (the occurrence head says nothing about
+        # intensity, so the hour bands always rank on the prediction). score_max maps hours into [0, 1] for the
+        # binning; being a fixed monotone map it leaves both metrics exactly invariant.
+        is_occurrence = spec.obs_event == (occurrence_value, occurrence_strict) and spec.is_symmetric
+        use_probability = (probability is not None) and (is_occurrence or prediction_is_probability)
+        ranking_field = probability if use_probability else prediction
+        score_max = 1.0 if (use_probability or prediction_is_probability) else max(float(np.nanmax(prediction)), 1.0)
         event = observed_subgroup(threshold_name)
+        ranking = scores.finalize_ranking_metrics(
+            scores.ranking_partials(ranking_field, event, ranking_edges, score_max=score_max), ranking_edges
+        )
         for score_name in ranking_scores:
-            scorer = scores.roc_auc if score_name == 'roc_auc' else scores.average_precision
-            flat[f'{score_name}_{threshold_name}'] = scorer(ranking_field, event)
-        false_positive_rate, true_positive_rate = scores.roc_curve_points(ranking_field, event)
-        recall, precision = scores.precision_recall_curve_points(ranking_field, event)
+            flat[f'{score_name}_{threshold_name}'] = float(ranking[score_name])
         curves['roc_pr'][threshold_name] = {
-            'fpr': false_positive_rate, 'tpr': true_positive_rate,
-            'recall': recall, 'precision': precision,
+            'fpr': ranking['fpr'], 'tpr': ranking['tpr'],
+            'recall': ranking['recall'], 'precision': ranking['precision'],
             'base_rate': float(np.mean(event)),
-            'roc_auc': flat.get(f'roc_auc_{threshold_name}', float('nan')),
-            'average_precision': flat.get(f'average_precision_{threshold_name}', float('nan')),
-            'from_probability': bool(is_occurrence and probability is not None)
+            'roc_auc': ranking['roc_auc'],
+            'average_precision': ranking['average_precision'],
+            'from_probability': bool(use_probability)
         }
 
     # --- skill vs trivial baselines ---------------------------------------------------------------------------
@@ -536,7 +603,9 @@ def run_metric_suite(
     if progress and spatial and structure.shape[0]:
         passes = 2                                                          # the structure + obs power spectra
         if 'fss' in spatial:
-            passes += len(spatial['fss']['thresholds']) * len(spatial['fss']['scales'])
+            # one FSS evaluation per threshold, or a single threshold-free one in the probabilistic form
+            n_fss_events = 1 if prediction_is_probability else len(spatial['fss']['thresholds'])
+            passes += n_fss_events * len(spatial['fss']['scales'])
         try:
             from tqdm import tqdm
             spatial_bar = tqdm(total=passes * structure.shape[0], unit='map',
@@ -584,15 +653,32 @@ def run_metric_suite(
         fss_config = spatial['fss']
         scales = [int(scale) for scale in fss_config['scales']]
         curves['fss'] = {}
-        for threshold_name in fss_config['thresholds']:
-            value, strict = thresholds[threshold_name]
-            useful_scale, by_scale = scores.fss_useful_scale(structure, structure_obs, value, scales, strict,
-                                                             progress=spatial_progress)
+        if prediction_is_probability:
+            # CLASSIFICATION: prediction and observation are already fractions (a probability and a 0/1 event), so
+            # FSS needs no threshold and IS the fractions Brier skill score at each scale. Which form applies
+            # follows from the data, not from a config switch — a thresholded FSS on a probability field would just
+            # be one arbitrary decision cut, and the threshold-free version strictly dominates it.
+            useful_scale, by_scale = scores.fss_useful_scale(structure, structure_obs, None, scales,
+                                                            progress=spatial_progress)
             for scale, fss_value in by_scale.items():
-                flat[f'fss_{threshold_name}_s{scale}'] = fss_value
+                flat[f'fss_s{scale}'] = fss_value
             if fss_config.get('report_useful_scale', False):
-                flat[f'fss_useful_scale_{threshold_name}'] = useful_scale
-            curves['fss'][threshold_name] = by_scale
+                flat['fss_useful_scale'] = useful_scale
+            curves['fss']['probabilistic'] = by_scale
+        else:
+            # REGRESSION: neither side is a probability, so the fractions have to come from an hour band. The
+            # threshold-free form would compare neighbourhood means of HOURS, a scale-dependent MSE skill score
+            # rather than a Brier one.
+            for threshold_name in fss_config['thresholds']:
+                spec = thresholds[threshold_name]
+                useful_scale, by_scale = scores.fss_useful_scale(
+                    structure, structure_obs, spec.obs_value, scales, spec.obs_strict, progress=spatial_progress
+                )
+                for scale, fss_value in by_scale.items():
+                    flat[f'fss_{threshold_name}_s{scale}'] = fss_value
+                if fss_config.get('report_useful_scale', False):
+                    flat[f'fss_useful_scale_{threshold_name}'] = useful_scale
+                curves['fss'][threshold_name] = by_scale
     if 'sharpness_ratio' in spatial:
         flat['sharpness_ratio'] = scores.sharpness_ratio(structure, structure_obs)
     if 'variance_ratio' in spatial:

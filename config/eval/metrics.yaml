@@ -34,11 +34,25 @@
 #       families.
 #
 # ---------------------------------------------------------------------------------------------------------------------
-# HOURLY BINARY TARGET (`mode: hourly`): only `occurrence` is a meaningful event — the hour bands h3/h6/h12 are
-# defined on a 0-24 daily count and do not exist on a 0/1 target. When running an hourly pipeline, trim the three
-# threshold lists (`metrics.categorical.thresholds`, `metrics.spatial.fss.thresholds`, and the `thresholds`/`bins`
-# lists under `metrics.continuous` and `metrics.calibration.rank_correlation`) to `[occurrence]`. The continuous
-# group also degenerates on a binary target (use brier_skill_score / the AUCs / reliability instead of r2).
+# HOURLY BINARY TARGET (`mode: hourly`) — what an hourly pipeline must change here.
+#
+# The hour bands h3/h6/h12 are defined on a 0-24 daily count and do not exist on a 0/1 target, so trim the
+# `thresholds`/`bins` lists under `metrics.continuous` and `metrics.calibration.rank_correlation` to `[occurrence]`.
+# The continuous group also degenerates on a binary target (read brier_skill_score / the AUCs / reliability instead
+# of r2 and the MAEs).
+#
+# ⚠️ `metrics.categorical.thresholds` needs MORE than a trim: it must use `kind: probability` entries, e.g.
+#
+#     p50: {kind: probability, value: 0.5}     # obs side: the 0/1 label; pred side: p >= 0.5
+#
+# In hourly mode the observation is already the event and the prediction is a PROBABILITY, so one shared level makes
+# no sense. `kind: occurrence` cuts BOTH sides at `> 0`, which on a probability field marks every cell carrying any
+# non-zero probability as a predicted event — pod ~ 1, far ~ 1 - base_rate, an entire contingency table of nonsense.
+# `kind: probability` puts the decision threshold on the prediction and leaves the labels alone. `run_metric_suite`
+# warns when it detects the degenerate combination, but the config is what has to be right.
+#
+# `metrics.spatial.fss` needs NO change: the suite detects a probability field and switches to the threshold-free
+# form automatically, where FSS is the fractions Brier skill score and the keys become `fss_s<scale>`.
 # =====================================================================================================================
 
 # Trivial baselines evaluated alongside the model; every skill score below references them.

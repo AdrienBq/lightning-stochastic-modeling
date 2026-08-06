@@ -41,7 +41,10 @@ _EPS = 1e-12
 # events and contingency tables
 # ----------------------------------------------------------------------------------------------------------------
 def exceedance(values: np.ndarray, threshold: float, strict: bool = False) -> np.ndarray:
-    """Binary exceedance field: ``values > threshold`` if strict else ``values >= threshold``."""
+    """Binary exceedance field: ``values > threshold`` if strict else ``values >= threshold``.
+
+    Task: both.
+    """
     return values > threshold if strict else values >= threshold
 
 
@@ -49,11 +52,41 @@ def contingency_counts(
         pred: np.ndarray,
         obs: np.ndarray,
         threshold: float,
-        strict: bool = False
+        strict: bool = False,
+        obs_threshold: Optional[float] = None,
+        obs_strict: Optional[bool] = None
 ) -> Tuple[float, float, float, float]:
-    """Pooled (hits, misses, false alarms, correct negatives) at an exceedance threshold."""
+    """Pooled (hits, misses, false alarms, correct negatives).
+
+    Task: both — but the two tasks threshold DIFFERENT SIDES, which is what the ``obs_*`` arguments exist for.
+
+    **REGRESSION (daily 0-24 lightning-hours).** Prediction and observation are the same quantity in the same units,
+    so ONE level applies to both: "did the model and the observation each reach >= 6 lightning-hours?". Leave
+    ``obs_threshold`` unset and the observation side mirrors the prediction side.
+
+    **CLASSIFICATION (hourly 0/1).** The observation is ALREADY the event (0 or 1) and the prediction is a
+    probability in [0, 1]. The two are not commensurable, so a shared level is meaningless: ``threshold`` is then a
+    DECISION threshold on the probability (e.g. 0.5) and the observation must not be re-thresholded at all — pass
+    ``obs_threshold=0.0, obs_strict=True`` to read the labels as they are.
+
+    ⚠️ Getting this wrong is silent, not loud. Applying the daily ``occurrence`` level (``> 0``) to a probability
+    field makes ``pred_event`` true wherever the model assigns ANY non-zero probability, i.e. essentially everywhere,
+    giving POD ≈ 1 and FAR ≈ 1 - base_rate. A complete contingency table of nonsense, with no error raised.
+
+    Args:
+        pred: Predicted field — hours in the regression task, probabilities in the classification one.
+        obs: Observed field, same shape.
+        threshold: Level applied to ``pred``.
+        strict: Strict (>) vs non-strict (>=) exceedance on ``pred``.
+        obs_threshold: Level applied to ``obs``; ``None`` reuses ``threshold`` (the symmetric regression case).
+        obs_strict: Strictness on ``obs``; ``None`` reuses ``strict``.
+    """
     pred_event = exceedance(pred, threshold, strict)
-    obs_event = exceedance(obs, threshold, strict)
+    obs_event = exceedance(
+        obs,
+        threshold if obs_threshold is None else obs_threshold,
+        strict if obs_strict is None else obs_strict
+    )
     hits = float(np.sum(pred_event & obs_event))
     misses = float(np.sum(~pred_event & obs_event))
     false_alarms = float(np.sum(pred_event & ~obs_event))
@@ -63,6 +96,8 @@ def contingency_counts(
 
 def categorical_scores(hits: float, misses: float, false_alarms: float, correct_negatives: float) -> Dict[str, float]:
     """Categorical verification scores from a pooled contingency table.
+
+    Task: both.
 
     Returns:
         Dict with pod, far, csi, ets, hss, sedi and frequency_bias (NaN where undefined).
@@ -102,22 +137,40 @@ def categorical_scores(hits: float, misses: float, false_alarms: float, correct_
 
 # ----------------------------------------------------------------------------------------------------------------
 # continuous errors
+#
+# Task: REGRESSION throughout this section. Every one of these is defined on a 0/1 target but degenerate there: MAE
+# becomes a rescaled error rate, RMSE its square root, and r2 has almost no variance to explain. metrics.yaml says
+# the same in prose ("the continuous group also degenerates on a binary target"); an hourly run should read the
+# probabilistic scores (Brier, explained deviance, the ranking metrics) instead.
 # ----------------------------------------------------------------------------------------------------------------
 def rmse(pred: np.ndarray, obs: np.ndarray) -> float:
+    """Root mean squared error.
+
+    Task: regression (degenerate on a 0/1 target).
+    """
     return float(np.sqrt(np.mean((pred - obs) ** 2)))
 
 
 def mae(pred: np.ndarray, obs: np.ndarray) -> float:
+    """Mean absolute error.
+
+    Task: regression (on a 0/1 target this collapses to a rescaled error rate).
+    """
     return float(np.mean(np.abs(pred - obs)))
 
 
 def bias(pred: np.ndarray, obs: np.ndarray) -> float:
-    """Mean error (pred - obs); >= 0 indicates the preferred conservative behavior."""
+    """Mean error (pred - obs); >= 0 indicates the preferred conservative behavior.
+
+    Task: regression (degenerate on a 0/1 target).
+    """
     return float(np.mean(pred - obs))
 
 
 def r2_score(pred: np.ndarray, obs: np.ndarray, condition: Optional[np.ndarray] = None) -> float:
     """Coefficient of determination ``1 - SS_res / SS_tot`` on the conditioning cells (default: all cells).
+
+    Task: regression (degenerate on a 0/1 target).
 
     SS_tot is the observed variance over the conditioning cells, so the score is the fraction of that variance
     explained by the predictions (it can go negative for predictions worse than the conditional mean — exactly
@@ -145,6 +198,8 @@ def estimation_tendency(
         tolerance: float = 0.0
 ) -> Dict[str, float]:
     """Proportions of under- and over-estimated cells among the conditioning cells (default: observed-positive).
+
+    Task: regression.
 
     A cell is under-estimated when ``pred - obs < -tolerance`` and over-estimated when ``pred - obs > tolerance``;
     cells within +/- tolerance are counted as on-target. Complements the signed ``bias`` with the *direction*
@@ -175,6 +230,8 @@ def rank_correlation(
         max_samples: int = 2_000_000
 ) -> float:
     """Rank (ordering) agreement between predictions and observations on the conditioning cells.
+
+    Task: regression (ties from the zero mass make it degenerate on a 0/1 target).
 
     Measures whether the model orders cells the same way the observations do — robust to tail outliers. Evaluate
     it within obs subgroups (the zero mass makes the all-cells coefficient near-degenerate through ties). NaN on
@@ -209,6 +266,8 @@ def conditional_error(
 ) -> float:
     """RMSE/MAE restricted to the conditioning cells (where a trivially-zero predictor collapses).
 
+    Task: regression.
+
     Args:
         condition: Boolean mask of the cells to score (e.g. the evaluation-side occurrence event);
             defaults to the observed-positive cells ``obs > 0``.
@@ -221,6 +280,8 @@ def conditional_error(
 
 def stratified_mae(pred: np.ndarray, obs: np.ndarray, bin_edges: Sequence[Tuple[str, float]]) -> Dict[str, float]:
     """MAE within observed-intensity bins delimited by named ascending edges (last bin is open above).
+
+    Task: regression (the hour bands do not exist on a 0/1 target).
 
     Args:
         bin_edges: Sequence of (name, value) pairs. Under the current metric suite these are the ABSOLUTE hour
@@ -245,7 +306,10 @@ def stratified_mae(pred: np.ndarray, obs: np.ndarray, bin_edges: Sequence[Tuple[
 
 
 def skill_score(model_error: float, baseline_error: float) -> float:
-    """Generic reduction-of-error skill score ``1 - e_model / e_baseline`` (positive = beats the baseline)."""
+    """Generic reduction-of-error skill score ``1 - e_model / e_baseline`` (positive = beats the baseline).
+
+    Task: both (a generic reduction-of-error ratio).
+    """
     if not np.isfinite(baseline_error) or baseline_error <= 0:
         return float('nan')
     return float(1.0 - model_error / baseline_error)
@@ -255,49 +319,82 @@ def skill_score(model_error: float, baseline_error: float) -> float:
 # neighborhood and spectral structure scores
 # ----------------------------------------------------------------------------------------------------------------
 def _fractions_skill(
-        pred_event: np.ndarray,
-        obs_event: np.ndarray,
+        pred_field: np.ndarray,
+        obs_field: np.ndarray,
         scale: int
 ) -> Tuple[float, float]:
     """FSS numerator/denominator contributions of ONE map pair at one neighborhood scale.
 
-    Split out of :func:`fss` so that :func:`fss_useful_scale` can compute the binary exceedance fields once per
-    map and reuse them across every scale, instead of re-thresholding the map for each scale.
+    Split out of :func:`fss` so that :func:`fss_useful_scale` can derive each map's fields once and reuse them
+    across every scale, instead of re-deriving them per scale. Accepts boolean exceedance fields or float
+    probability fields interchangeably — both are cast to float64 before the neighborhood mean.
     """
-    pred_fraction = uniform_filter(pred_event.astype(np.float64), size=scale, mode='constant', cval=0.0)
-    obs_fraction = uniform_filter(obs_event.astype(np.float64), size=scale, mode='constant', cval=0.0)
+    pred_fraction = uniform_filter(pred_field.astype(np.float64), size=scale, mode='constant', cval=0.0)
+    obs_fraction = uniform_filter(obs_field.astype(np.float64), size=scale, mode='constant', cval=0.0)
     return (
         float(np.sum((pred_fraction - obs_fraction) ** 2)),
         float(np.sum(pred_fraction ** 2 + obs_fraction ** 2))
     )
 
 
+def _fss_fields(
+        pred_map: np.ndarray,
+        obs_map: np.ndarray,
+        threshold: Optional[float],
+        strict: bool
+) -> Tuple[np.ndarray, np.ndarray]:
+    """The pair of fields whose neighborhood means become the FSS fractions.
+
+    ``threshold`` given -> binarise both sides at it (the deterministic/regression form). ``threshold is None`` ->
+    take both sides as they are, which is valid when they are already fractions in [0, 1] (the probabilistic form).
+    """
+    if threshold is None:
+        return pred_map, obs_map
+    return exceedance(pred_map, threshold, strict), exceedance(obs_map, threshold, strict)
+
+
 def fss(
         pred: np.ndarray,
         obs: np.ndarray,
-        threshold: float,
+        threshold: Optional[float],
         scale: int,
         strict: bool = False,
         progress: Optional[Callable[[], None]] = None
 ) -> float:
-    """Fractions skill score at one exceedance threshold and neighborhood scale, aggregated over time.
+    """Fractions skill score at one neighborhood scale, aggregated over time.
 
-    Fractions are neighborhood means of the binary exceedance fields; the numerator/denominator are accumulated
-    over all maps before the final ratio (the standard aggregation for multi-day verification).
+    Task: both, in two forms.
+
+    FSS is defined on neighborhood FRACTIONS; thresholding is only one way to obtain them, needed when the
+    prediction is a deterministic field that has to be turned into an event first.
+
+    * **``threshold`` given — the REGRESSION form.** Both sides are binarised at the level (an hour band), then
+      averaged over the neighborhood. This is Roberts & Lean's original FSS.
+    * **``threshold=None`` — the CLASSIFICATION form.** The prediction is already a probability and the observation
+      already a 0/1 event, so their neighborhood means ARE fractions and no threshold is needed. In this form FSS is
+      exactly a **fractions Brier skill score** at that scale: the numerator is the Brier score of the predicted
+      against the observed fractions, and the denominator is the reference Brier ``sum(f_p^2 + f_o^2)``. It carries
+      strictly more information than committing to one decision cut.
+
+    Do NOT use the threshold-free form on the daily 0-24 target: comparing neighborhood means of *hours* is a
+    scale-dependent MSE skill score, not a Brier one, because neither side is a probability. Which form applies
+    follows from the mode, not from a config switch.
+
+    The numerator/denominator are accumulated over all maps before the final ratio (the standard aggregation for
+    multi-day verification).
 
     Args:
         pred, obs: Map stacks ``[N, H, W]``.
-        threshold: Exceedance threshold.
+        threshold: Exceedance level, or ``None`` to treat both stacks as fractions already.
         scale: Side (in pixels) of the square neighborhood; 1 reduces to gridpoint verification.
-        strict: Strict (>) vs non-strict (>=) exceedance.
+        strict: Strict (>) vs non-strict (>=) exceedance; ignored when ``threshold`` is None.
         progress: Optional no-arg callback invoked once per map (drives an evaluation-stage progress bar over the
             pooled ensemble stack); ``None`` disables it.
     """
     numerator, denominator = 0.0, 0.0
     for index in range(pred.shape[0]):
-        map_numerator, map_denominator = _fractions_skill(
-            exceedance(pred[index], threshold, strict), exceedance(obs[index], threshold, strict), scale
-        )
+        pred_field, obs_field = _fss_fields(pred[index], obs[index], threshold, strict)
+        map_numerator, map_denominator = _fractions_skill(pred_field, obs_field, scale)
         numerator += map_numerator
         denominator += map_denominator
         if progress is not None:
@@ -310,17 +407,19 @@ def fss(
 def fss_useful_scale(
         pred: np.ndarray,
         obs: np.ndarray,
-        threshold: float,
+        threshold: Optional[float],
         scales: Sequence[int],
         strict: bool = False,
         progress: Optional[Callable[[], None]] = None
 ) -> Tuple[float, Dict[int, float]]:
     """Smallest scale whose FSS exceeds the useful-skill criterion ``0.5 + base_rate / 2``, plus every scale's FSS.
 
-    Every requested scale is computed in ONE pass over the stack: the binary exceedance fields are derived once
-    per map and reused across scales, where calling :func:`fss` per scale would re-threshold the whole stack for
-    each one. The returned per-scale dict is what the evaluation suite emits as ``fss_<threshold>_s<scale>``, so
-    the useful scale costs nothing beyond those values.
+    Task: both — ``threshold=None`` selects the probabilistic (fractions Brier skill) form, exactly as in
+    :func:`fss`.
+
+    Every requested scale is computed in ONE pass over the stack: each map's fields are derived once and reused
+    across scales, where calling :func:`fss` per scale would re-derive the whole stack for each one. The returned
+    per-scale dict is what the evaluation suite emits, so the useful scale costs nothing beyond those values.
 
     ``progress`` still ticks once per (map, scale) pair, so an evaluation-stage progress bar sized as
     ``n_thresholds * n_scales * n_maps`` stays exact.
@@ -332,10 +431,9 @@ def fss_useful_scale(
     numerators = {scale: 0.0 for scale in scales}
     denominators = {scale: 0.0 for scale in scales}
     for index in range(pred.shape[0]):
-        pred_event = exceedance(pred[index], threshold, strict)
-        obs_event = exceedance(obs[index], threshold, strict)
+        pred_field, obs_field = _fss_fields(pred[index], obs[index], threshold, strict)
         for scale in scales:
-            map_numerator, map_denominator = _fractions_skill(pred_event, obs_event, scale)
+            map_numerator, map_denominator = _fractions_skill(pred_field, obs_field, scale)
             numerators[scale] += map_numerator
             denominators[scale] += map_denominator
             if progress is not None:
@@ -346,7 +444,9 @@ def fss_useful_scale(
         for scale in scales
     }
 
-    base_rate = float(np.mean(exceedance(obs, threshold, strict)))
+    # the base rate is the observed event frequency: the exceedance rate when thresholding, and the mean of the
+    # observed 0/1 field itself in the probabilistic form
+    base_rate = float(np.mean(obs if threshold is None else exceedance(obs, threshold, strict)))
     target_skill = 0.5 + base_rate / 2.0
     for scale in sorted(by_scale):
         if np.isfinite(by_scale[scale]) and by_scale[scale] >= target_skill:
@@ -355,7 +455,10 @@ def fss_useful_scale(
 
 
 def mean_power_spectrum(fields: np.ndarray, progress: Optional[Callable[[], None]] = None) -> np.ndarray:
-    """Mean 2-D power spectrum ``|FFT|^2`` over a stack of maps ``[N, H, W]`` (``progress`` ticks once per map)."""
+    """Mean 2-D power spectrum ``|FFT|^2`` over a stack of maps ``[N, H, W]`` (``progress`` ticks once per map).
+
+    Task: both (structure scores are family- and task-agnostic).
+    """
     spectrum = np.zeros(fields.shape[-2:], dtype=np.float64)
     for index in range(fields.shape[0]):
         spectrum += np.abs(np.fft.fft2(fields[index])) ** 2
@@ -380,6 +483,8 @@ def radial_psd(
         spectrum: Optional[np.ndarray] = None
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Radially-averaged power spectral density of a stack of maps.
+
+    Task: both.
 
     Args:
         spectrum: Optional precomputed ``mean_power_spectrum(fields)`` to reuse (skips the expensive FFT loop);
@@ -412,6 +517,8 @@ def radial_psd_per_map(
         return_mean_spectrum: bool = False
 ):
     """Radially-averaged PSD of EACH map in a stack ``[N, H, W]`` (one row per map), for an ensemble-spread band.
+
+    Task: both.
 
     The radial bins are identical to :func:`radial_psd`, so the per-map rows share its wavelength axis and their
     column mean reproduces ``radial_psd(fields)`` exactly. ``progress`` ticks once per map.
@@ -461,6 +568,8 @@ def psd_band_ratios(
 ) -> Dict[str, float]:
     """Predicted/observed mean spectral power ratio within wavelength bands (in pixels).
 
+    Task: both.
+
     Args:
         bands: Dict band name -> (lower wavelength, upper wavelength), upper possibly inf; the DC component is
             always excluded. The ``full`` band [2, inf] is low+mid+high combined.
@@ -489,6 +598,8 @@ def psd_band_ratios(
 def psd_fidelity(ratio: float) -> float:
     """Scalar fidelity ``clip(1 - |1 - ratio|, 0, 1)`` of a spectral band power ratio.
 
+    Task: both.
+
     ONE function serves every band: the metric keys ``psd_full_fidelity`` and ``psd_high_fidelity`` are produced by
     the evaluation suite passing this the corresponding band's ratio (the ``band:`` argument of each
     ``psd_*_fidelity`` entry in metrics.yaml). There is deliberately no separate ``psd_full_fidelity`` function.
@@ -506,6 +617,8 @@ def log_spectral_distance(
         obs_spectrum: Optional[np.ndarray] = None
 ) -> float:
     """RMS distance (in dB) between the radially-averaged log-spectra of predictions and observations
+
+    Task: both.
     (``pred_spectrum`` / ``obs_spectrum`` optionally reuse a precomputed ``mean_power_spectrum``)."""
     _, pred_power = radial_psd(pred, progress=progress, spectrum=pred_spectrum)
     _, obs_power = radial_psd(obs, progress=progress, spectrum=obs_spectrum)
@@ -517,7 +630,10 @@ def log_spectral_distance(
 
 
 def sharpness_ratio(pred: np.ndarray, obs: np.ndarray) -> float:
-    """Ratio of the pooled standard deviations of the spatial gradient magnitude (pred / obs); < 1 = blurry."""
+    """Ratio of the pooled standard deviations of the spatial gradient magnitude (pred / obs); < 1 = blurry.
+
+    Task: both.
+    """
     def gradient_std(fields):
         gy, gx = np.gradient(fields, axis=(-2, -1))
         return float(np.std(np.sqrt(gy ** 2 + gx ** 2)))
@@ -527,7 +643,10 @@ def sharpness_ratio(pred: np.ndarray, obs: np.ndarray) -> float:
 
 
 def variance_ratio(pred: np.ndarray, obs: np.ndarray) -> float:
-    """Ratio of the mean per-map spatial variances (pred / obs); < 1 = under-dispersed fields."""
+    """Ratio of the mean per-map spatial variances (pred / obs); < 1 = under-dispersed fields.
+
+    Task: both.
+    """
     obs_value = float(np.mean(np.var(obs, axis=(-2, -1))))
     return float(np.mean(np.var(pred, axis=(-2, -1)))) / obs_value if obs_value > _EPS else float('nan')
 
@@ -538,9 +657,11 @@ def variance_ratio(pred: np.ndarray, obs: np.ndarray) -> float:
 def reliability_curve(
         probabilities: np.ndarray,
         occurrences: np.ndarray,
-        bins: int = 10
+        bins: int = 100
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Reliability diagram data for the occurrence classifier.
+
+    Task: classification.
 
     Returns:
         Tuple (mean forecast probability per bin, observed frequency per bin, cell counts per bin).
@@ -560,11 +681,21 @@ def reliability_curve(
 
 
 def brier_score(probabilities: np.ndarray, occurrences: np.ndarray) -> float:
+    """Mean squared error of probabilistic occurrence forecasts — the quadratic proper score.
+
+    Task: classification.
+
+    The bounded counterpart of :func:`bernoulli_logloss`: both are proper, but the Brier score stays finite at a
+    confident mistake where the log score does not, which is why the Brier skill score tolerates a binarised
+    forecast and the explained deviance does not.
+    """
     return float(np.mean((probabilities - occurrences.astype(np.float64)) ** 2))
 
 
 def bernoulli_logloss(probabilities: np.ndarray, occurrences: np.ndarray, eps: float = 1e-7) -> float:
     """Mean Bernoulli negative log-likelihood (log loss) of probabilistic occurrence forecasts.
+
+    Task: classification.
 
     Probabilities are clipped to ``[eps, 1 - eps]`` because the log loss is unbounded at a confident mistake: a
     single cell forecast at exactly 0 where the event occurred would otherwise make the whole score infinite.
@@ -581,6 +712,8 @@ def explained_deviance(
         eps: float = 1e-7
 ) -> float:
     """Bernoulli explained deviance of an occurrence forecast against a baseline: ``1 - logloss / logloss_base``.
+
+    Task: classification.
 
     The likelihood-based counterpart of :func:`brier_score`'s quadratic skill score, and the reason it is scoped to
     the BINARY head: with the Tweedie/Poisson machinery gone, the bounded 0-24 target has no likelihood left to
@@ -604,6 +737,8 @@ def explained_deviance(
 def dice_coefficient(pred_binary: np.ndarray, obs_binary: np.ndarray, smooth: float = 1.0) -> float:
     """Dice / F1 coefficient: 2*TP / (2*TP + FP + FN), pooled over all pixels and time steps.
 
+    Task: classification.
+
     Args:
         pred_binary: Predicted binary map(s), any shape.
         obs_binary: Observed binary map(s), same shape.
@@ -621,84 +756,194 @@ def dice_coefficient(pred_binary: np.ndarray, obs_binary: np.ndarray, smooth: fl
     return float((2.0 * intersection + smooth) / (denominator + smooth))
 
 
-def _subsampled_ranking_inputs(
+# ----------------------------------------------------------------------------------------------------------------
+# threshold-free ranking metrics (ROC-AUC and PR-AUC) — STREAMING, like the ensemble scores
+# ----------------------------------------------------------------------------------------------------------------
+# ROC-AUC and average precision need the WHOLE split's score/label population, which cannot be held in memory:
+#
+#     daily test split (3 years)   16 478 655 cells
+#     hourly test split (3 years)  395 487 720 cells
+#
+# The previous implementation handed a random 2 000 000-cell subsample to sklearn, i.e. 12 % of the daily population
+# and 0.5 % of the hourly one — for a metric (``average_precision_occurrence``) that carries weight 0.50 in the
+# classification selection composite.
+#
+# Instead, accumulate a HISTOGRAM of the score axis: positives per bin and negatives per bin. Those two count arrays
+# are ADDITIVE across batches, so the evaluation stage sums them exactly as it sums the CRPS partials, and the
+# curves are reconstructed once at the end from suffix sums. Memory is two arrays of ``n_bins``, independent of the
+# split size. This is the same "return sums, divide once at the end" invariant as ``crps_sums``.
+#
+# There is ONE implementation: ``roc_auc`` / ``average_precision`` are thin whole-array wrappers over the same
+# primitives the streaming path uses, so a batched evaluation and a single-shot call cannot disagree. (Keeping an
+# exact sklearn path beside a binned one is exactly the ``crps_ensemble`` divergence this rebuild exists to undo.)
+
+DEFAULT_RANKING_BINS = 4000
+
+
+def ranking_bin_edges(n_bins: int = DEFAULT_RANKING_BINS, floor: float = 1e-6) -> np.ndarray:
+    """Score-axis bin edges for the streaming ranking metrics: geometric near 0, mirrored near 1, coarse in between.
+
+    Task: classification (and the occurrence head of a regression run).
+
+    Uniform bins fail badly on this problem. A calibrated forecast at a ~0.07 % base rate puts nearly all of its
+    probability mass below 0.01, which uniform bins barely resolve: measured against exact sklearn, 1000 uniform bins
+    give a ROC-AUC error of 6e-3, where the same count of geometric-from-zero bins gives 8e-7. The mirror near 1
+    costs nothing and covers a confident model that pushes mass to the top of the range.
+
+    The bin COUNT is driven by average precision rather than AUC. At 1000 bins AP's error is 0.5-0.7 % relative
+    whatever the spacing; 4000 bins holds the ABSOLUTE error below ~1e-4 for 62 KB per accumulator, which is the
+    figure that matters since ``average_precision_occurrence`` enters a weighted composite — what could reorder two
+    trials is its absolute contribution, not its relative error. Relative error can still reach ~1 % when AP is
+    itself around 0.006 (a near-useless forecast), simply because a few hundred positives make the recall steps
+    coarse; at that point the metric has no resolution to lose.
+
+    A discrete target is EXACT at any bin count: the daily prediction takes 25 distinct values after clamping, so no
+    bin ever mixes two of them.
+
+    Args:
+        n_bins: Approximate number of bins (the mirroring and de-duplication may shift it by one or two).
+        floor: Smallest non-zero edge; scores below it share the first bin.
+
+    Returns:
+        Monotone edge array of length ``n_bins + 1``-ish, spanning exactly [0, 1].
+    """
+    half = np.geomspace(floor, 0.5, max(n_bins // 2, 2))
+    return np.unique(np.concatenate([[0.0], half, 1.0 - half[::-1], [1.0]]))
+
+
+def ranking_partials(
         ranking_score: np.ndarray,
         occurrences: np.ndarray,
-        max_samples: int
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Flatten and (seeded) random-subsample a score/label pair, for the threshold-free ranking metrics."""
-    ranking_score = np.asarray(ranking_score).ravel()
-    occurrences = np.asarray(occurrences).ravel()
-    if ranking_score.size > max_samples:
-        chosen = np.random.default_rng(0).choice(ranking_score.size, size=max_samples, replace=False)
-        ranking_score, occurrences = ranking_score[chosen], occurrences[chosen]
-    return ranking_score, occurrences
+        edges: Optional[np.ndarray] = None,
+        score_max: float = 1.0
+) -> Dict[str, np.ndarray]:
+    """Per-bin positive/negative label counts for one batch — the summable unit of the ranking metrics.
 
+    Task: classification (and the occurrence head of a regression run).
 
-def average_precision(probabilities: np.ndarray, occurrences: np.ndarray, max_samples: int = 2_000_000) -> float:
-    """Average precision (area under the precision-recall curve; random-subsampled for large populations).
+    Args:
+        ranking_score: The field whose ORDERING is being scored — an occurrence probability, or the regression
+            prediction when no probabilistic head exists.
+        occurrences: Binary observed event (0/1), same shape.
+        edges: Bin edges from :func:`ranking_bin_edges`; ``None`` builds the default grid.
+        score_max: Divisor mapping the score into [0, 1] (24.0 for a lightning-hours prediction, 1.0 for a
+            probability). ROC-AUC and average precision are invariant under ANY fixed monotone map of the score, so
+            this changes only which bin a value lands in, never the metric — but it must be a CONSTANT across
+            batches, or the bins would mean different things in different batches.
 
-    THE discrimination measure at this base rate: precision-recall is computed from hits, misses and false alarms
-    only, so it is not flattered by the huge correct-negative mass the way ROC-AUC is. NaN when the event never
-    occurs (no positive class to rank).
+    Returns:
+        Dict with ``positive_counts`` and ``negative_counts``, both length ``len(edges) - 1``. Sum these across
+        batches (elementwise) and pass the total to :func:`finalize_ranking_metrics`.
     """
-    from sklearn.metrics import average_precision_score
+    edges = ranking_bin_edges() if edges is None else edges
+    score = np.asarray(ranking_score, dtype=np.float64).ravel()
+    labels = np.asarray(occurrences).ravel().astype(bool)
+    if score_max != 1.0:
+        score = score / float(score_max)
+    score = np.clip(score, 0.0, 1.0)
 
-    probabilities, occurrences = _subsampled_ranking_inputs(probabilities, occurrences, max_samples)
-    if occurrences.sum() == 0:
-        return float('nan')
-    return float(average_precision_score(occurrences.astype(int), probabilities))
+    n_bins = len(edges) - 1
+    index = np.clip(np.searchsorted(edges, score, side='right') - 1, 0, n_bins - 1)
+    return {
+        'positive_counts': np.bincount(index[labels], minlength=n_bins).astype(np.float64),
+        'negative_counts': np.bincount(index[~labels], minlength=n_bins).astype(np.float64),
+    }
 
 
-def roc_auc(probabilities: np.ndarray, occurrences: np.ndarray, max_samples: int = 2_000_000) -> float:
-    """Area under the ROC curve (random-subsampled for large populations).
+def finalize_ranking_metrics(
+        partials: Dict[str, np.ndarray],
+        edges: Optional[np.ndarray] = None
+) -> Dict[str, object]:
+    """Reduce summed :func:`ranking_partials` into ROC-AUC, average precision and both curves.
 
-    Reported ALONGSIDE :func:`average_precision`, not instead of it: ROC-AUC is the familiar cross-study number
-    but is optimistic when negatives dominate, so at a ~0.07 % base rate a model with little practical skill can
-    still score well. A high ``roc_auc`` next to a low ``average_precision`` is the signature of
-    imbalance-exploitation, which is exactly why both are emitted.
+    Task: classification (and the occurrence head of a regression run).
 
-    NaN when only one class is present (the ROC curve is undefined without both).
+    Walks the decision threshold DOWN the score axis (from the top bin to the bottom), which sweeps recall from 0 to
+    1. At each cut the suffix sums of the per-bin counts give the confusion quantities directly:
+    ``TP = positives above the cut``, ``FP = negatives above the cut``.
+
+    Returns:
+        Dict with ``roc_auc``, ``average_precision`` and the ``fpr`` / ``tpr`` / ``recall`` / ``precision`` arrays the
+        ``roc_pr_curves`` figure draws. Both scalars are NaN and the curves empty when a class is missing, since
+        neither curve is defined without both.
     """
-    from sklearn.metrics import roc_auc_score
+    edges = ranking_bin_edges() if edges is None else edges
+    positive_counts = np.asarray(partials['positive_counts'], dtype=np.float64)
+    negative_counts = np.asarray(partials['negative_counts'], dtype=np.float64)
+    n_positive, n_negative = positive_counts.sum(), negative_counts.sum()
 
-    probabilities, occurrences = _subsampled_ranking_inputs(probabilities, occurrences, max_samples)
-    labels = occurrences.astype(int)
-    if labels.sum() == 0 or labels.sum() == labels.size:
-        return float('nan')
-    return float(roc_auc_score(labels, probabilities))
+    empty = {'roc_auc': float('nan'), 'average_precision': float('nan'),
+             'fpr': np.array([]), 'tpr': np.array([]), 'recall': np.array([]), 'precision': np.array([])}
+    if n_positive == 0 or n_negative == 0:
+        return empty
+
+    # Sweep the cut DOWN the score axis. A reversed cumulative sum is exactly that: element k counts the labels in
+    # the top k+1 bins, i.e. those at or above the (n-1-k)-th bin's lower edge. Recall therefore increases with k.
+    true_positive = np.cumsum(positive_counts[::-1])
+    false_positive = np.cumsum(negative_counts[::-1])
+    recall = true_positive / n_positive
+    false_positive_rate = false_positive / n_negative
+    predicted_positive = true_positive + false_positive
+    precision = np.divide(true_positive, predicted_positive,
+                          out=np.ones_like(predicted_positive), where=predicted_positive > 0)
+
+    # prepend the degenerate cut above every bin: nothing predicted positive -> recall 0, and precision defined as 1
+    # by convention (sklearn's), so the PR curve starts at the top-left corner
+    recall_curve = np.concatenate([[0.0], recall])
+    fpr_curve = np.concatenate([[0.0], false_positive_rate])
+    precision_curve = np.concatenate([[1.0], precision])
+
+    roc_auc_value = float(np.trapezoid(recall_curve, fpr_curve))
+    # average precision is the STEP sum sum_k (R_k - R_{k-1}) * P_k, not a trapezoid: the interpolated area would
+    # overstate performance on a sparse target, which is why sklearn defines it this way too
+    average_precision_value = float(np.sum(np.diff(recall_curve) * precision_curve[1:]))
+    return {
+        'roc_auc': roc_auc_value,
+        'average_precision': average_precision_value,
+        'fpr': fpr_curve,
+        'tpr': recall_curve,
+        'recall': recall_curve,
+        'precision': precision_curve,
+    }
 
 
-def roc_curve_points(
+def average_precision(
         probabilities: np.ndarray,
         occurrences: np.ndarray,
-        max_samples: int = 2_000_000
-) -> Tuple[np.ndarray, np.ndarray]:
-    """(false positive rate, true positive rate) of the ROC curve, for the ``roc_pr_curves`` report figure."""
-    from sklearn.metrics import roc_curve
+        edges: Optional[np.ndarray] = None,
+        score_max: float = 1.0
+) -> float:
+    """Average precision (area under the precision-recall curve), via the streaming primitives.
 
-    probabilities, occurrences = _subsampled_ranking_inputs(probabilities, occurrences, max_samples)
-    labels = occurrences.astype(int)
-    if labels.sum() == 0 or labels.sum() == labels.size:
-        return np.array([]), np.array([])
-    false_positive_rate, true_positive_rate, _ = roc_curve(labels, probabilities)
-    return false_positive_rate, true_positive_rate
+    Task: classification (and the occurrence head of a regression run).
+
+    THE discrimination measure at this base rate: precision and recall are computed from hits, misses and false
+    alarms only, so PR is not flattered by the huge correct-negative mass the way ROC-AUC is. NaN when a class is
+    missing (nothing to rank).
+    """
+    return float(finalize_ranking_metrics(
+        ranking_partials(probabilities, occurrences, edges, score_max), edges
+    )['average_precision'])
 
 
-def precision_recall_curve_points(
+def roc_auc(
         probabilities: np.ndarray,
         occurrences: np.ndarray,
-        max_samples: int = 2_000_000
-) -> Tuple[np.ndarray, np.ndarray]:
-    """(recall, precision) of the precision-recall curve, for the ``roc_pr_curves`` report figure."""
-    from sklearn.metrics import precision_recall_curve
+        edges: Optional[np.ndarray] = None,
+        score_max: float = 1.0
+) -> float:
+    """Area under the ROC curve, via the streaming primitives.
 
-    probabilities, occurrences = _subsampled_ranking_inputs(probabilities, occurrences, max_samples)
-    labels = occurrences.astype(int)
-    if labels.sum() == 0:
-        return np.array([]), np.array([])
-    precision, recall, _ = precision_recall_curve(labels, probabilities)
-    return recall, precision
+    Task: classification (and the occurrence head of a regression run).
+
+    Reported ALONGSIDE :func:`average_precision`, not instead of it: ROC-AUC is the familiar cross-study number but
+    is optimistic when negatives dominate, so at a ~0.07 % base rate a model with little practical skill can still
+    score well. A high ``roc_auc`` next to a low ``average_precision`` is the signature of imbalance-exploitation,
+    which is exactly why both are emitted. NaN when only one class is present.
+    """
+    return float(finalize_ranking_metrics(
+        ranking_partials(probabilities, occurrences, edges, score_max), edges
+    )['roc_auc'])
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -745,6 +990,8 @@ def crps_sums(
 ) -> Tuple[float, float, int]:
     """Summed (fair, almost-fair) CRPS over the scored cells plus the cell count — the streaming partials.
 
+    Task: both (ensemble runs).
+
     The almost-fair correction (Ferro 2014) replaces the spread factor ``1/2`` by ``(M-1)/(2M)`` (equivalently a
     ``(M-1)/M`` factor on ``spread_term``), removing the negative bias of the finite-ensemble spread estimator;
     it matters most for small M.
@@ -765,13 +1012,19 @@ def crps_sums(
 
 
 def crps_ensemble(members: np.ndarray, obs: np.ndarray, condition: Optional[np.ndarray] = None) -> float:
-    """Fair CRPS averaged over the scored cells (scalar convenience wrapper over :func:`crps_sums`)."""
+    """Fair CRPS averaged over the scored cells (scalar convenience wrapper over :func:`crps_sums`).
+
+    Task: both (ensemble runs).
+    """
     crps_sum, _, n = crps_sums(members, obs, condition)
     return crps_sum / n if n else float('nan')
 
 
 def almost_fair_crps_ensemble(members: np.ndarray, obs: np.ndarray, condition: Optional[np.ndarray] = None) -> float:
-    """Almost-fair (bias-corrected) CRPS averaged over the scored cells."""
+    """Almost-fair (bias-corrected) CRPS averaged over the scored cells.
+
+    Task: both (ensemble runs).
+    """
     _, af_sum, n = crps_sums(members, obs, condition)
     return af_sum / n if n else float('nan')
 
@@ -780,6 +1033,8 @@ def spread_skill_sums(
         members: np.ndarray, obs: np.ndarray, condition: Optional[np.ndarray] = None
 ) -> Tuple[float, float, int]:
     """Summed ensemble variance and squared error of the ensemble mean over the scored cells (streaming partials).
+
+    Task: both (ensemble runs).
 
     The spread-skill ratio is ``sqrt(mean ensemble variance) / sqrt(mean squared error of the ensemble mean)``: a
     well-calibrated ensemble has ratio ~ 1; < 1 is under-dispersed (over-confident), > 1 over-dispersed.
@@ -801,7 +1056,10 @@ def spread_skill_sums(
 
 
 def spread_skill_ratio(members: np.ndarray, obs: np.ndarray, condition: Optional[np.ndarray] = None) -> float:
-    """Ensemble spread-skill ratio ``sqrt(mean variance) / sqrt(mean squared error of the mean)`` (scalar)."""
+    """Ensemble spread-skill ratio ``sqrt(mean variance) / sqrt(mean squared error of the mean)`` (scalar).
+
+    Task: both (ensemble runs).
+    """
     variance_sum, squared_error_sum, n = spread_skill_sums(members, obs, condition)
     if n == 0:
         return float('nan')
@@ -817,6 +1075,8 @@ def rank_histogram_counts(
         rng: Optional[np.random.Generator] = None
 ) -> np.ndarray:
     """Talagrand rank histogram counts: bin ``i`` counts cells whose observation has rank ``i`` among the members.
+
+    Task: both (ensemble runs).
 
     The rank is the number of members strictly below the observation, with TIES broken at random (the standard
     treatment; otherwise the huge mass of all-zero cells, where the observation ties every zero member, would pile
@@ -848,6 +1108,8 @@ def rank_histogram_counts(
 def rank_histogram_reliability(counts: np.ndarray) -> float:
     """Scalar flatness of a rank histogram: ``sum_i |c_i / N - 1/(M+1)|`` (0 = perfectly flat / calibrated).
 
+    Task: both (ensemble runs).
+
     A single number summarising the Talagrand diagram for the metrics JSON (the full counts go to the report
     figure); larger means a more U-shaped / domed / sloped — i.e. mis-calibrated — ensemble.
     """
@@ -866,6 +1128,8 @@ def ensemble_partials(
         rng: Optional[np.random.Generator] = None
 ) -> Dict[str, object]:
     """Bundle one batch's summable ensemble-metric partials (the streaming unit of the ensemble suite).
+
+    Task: both (ensemble runs).
 
     Computes the CRPS / almost-fair CRPS sums (over all cells AND restricted to the occurrence event, a
     tail-focused variant), the spread/skill sums, and the occurrence-conditioned rank histogram counts. The
