@@ -54,11 +54,17 @@ loss:
 # brier_skill_score, explained_deviance, reliability_diagram and the ROC/PR curves computable, so it is the natural
 # companion of the classification-first scope.
 #
-# Config alias -> loss function (losses.py), since the short names below are dispatch keys, not function names:
-#   focal_bce   -> focal_bce_with_logits
-#   dice        -> dice_loss
-#   brier       -> brier_loss
-#   crps_binary -> crps_binary
+# Config alias -> loss function (losses.py), since the short names below are dispatch keys, not function names.
+# The third column is the INPUT SPACE each expects; build_binary_loss returns it as BinaryLoss.expects, because
+# every mismatch here is silent (a probability handed to dice_loss is sigmoided a second time into [0.5, 0.73]):
+#   focal_bce   -> focal_bce_with_logits   (logits)
+#   dice        -> dice_loss               (logits)
+#   brier       -> brier_loss              (probabilities)
+#   crps_binary -> crps_binary             (ENSEMBLE samples)
+#
+# ⚠️ `crps_binary` is deliberately ABSENT from this family's choices, unlike mc_dropout's and diffusion's. It needs
+# ⚠️ a genuine ensemble: with the single forward pass of a deterministic model N = 1, the spread term is
+# ⚠️ identically zero and it degrades silently to a mean absolute error on probabilities.
 #
 # !! Step 3 constraint for search.apply_constraints: when occurrence_head.loss == focal_bce, force
 # !! loss.intensity_weight_gamma to 0.0. focal_bce already carries positive_class_weight, and on a BINARY target
@@ -67,7 +73,7 @@ loss:
 # ---------------------------------------------------------------------------------------------------------------------
 occurrence_head:
     enabled: {type: categorical, choices: [true, false]}
-    loss: {type: categorical, choices: [focal_bce, dice, brier, crps_binary]}
+    loss: {type: categorical, choices: [focal_bce, dice, brier]}      # no crps_binary: N = 1 here, see above
     focal_gamma: {type: float, low: 1.0, high: 3.0}
     positive_class_weight: {type: float, low: 1.0, high: 50.0}
 
@@ -138,28 +144,30 @@ batch_size: {type: int, low: 4, high: 32}
 max_epochs: 50
 
 # ---------------------------------------------------------------------------------------------------------------------
-# Trial selection: ONE composite score, ONE name, shared by all three families so their trials tables are directly
-# comparable (this retires the old valid_tail_score / valid_regression_score split). Computed on the validation
-# split, in the target space, on the ensemble MEAN for stochastic families. Component definitions are exactly the
-# metric keys emitted by config/eval/metrics.yaml.
+# Trial selection: ONE composite per TASK, shared by all three families so their trials tables are directly
+# comparable. Computed on the validation split, in the target space, on the ensemble MEAN for stochastic families.
+# Component definitions are exactly the metric keys emitted by config/eval/metrics.yaml.
 #
-#   valid_regression_score = 0.40 * average_precision_occurrence  (PR-AUC on the occurrence event: threshold-free,
-#                                                                  base-rate-robust discrimination on the headline
-#                                                                  task; preferred over ROC-AUC, which is
-#                                                                  optimistic when negatives dominate)
-#                          + 0.30 * mae_cond_ss_climatology       (conditional-MAE skill vs the climatology
-#                                                                  baseline on occurrence cells; anti-trivial — an
-#                                                                  all-zero model scores <= 0)
-#                          + 0.30 * psd_full_fidelity             (1 - |1 - full-band PSD ratio|, clipped to
-#                                                                  [0, 1]; anti-smoothing)
-# Deliberately anti-degenerate on all three axes: a model cannot win by discriminating without magnitude, by being
-# conservative-in-the-mean without structure, or by being sharp without skill.
+#   valid_regression_score = 0.60 * mae_cond_ss_climatology       (magnitude: conditional-MAE skill vs the
+#                                                                  climatology baseline on occurrence cells;
+#                                                                  anti-trivial — an all-zero model scores <= 0)
+#                          + 0.40 * psd_full_fidelity             (structure: 1 - |1 - full-band PSD ratio|,
+#                                                                  clipped to [0, 1]; anti-smoothing)
+#
+# ⚠️ `metric:` is a DECLARATION, not a choice. The composite is determined by the prepared data's `mode` — daily
+# ⚠️ gives valid_regression_score, hourly gives valid_classification_score — and
+# ⚠️ validation.selection_metric_for_mode RAISES when this line disagrees, rather than overriding it, because a
+# ⚠️ file naming the wrong composite has the wrong `components` weights too. An hourly pipeline must change BOTH.
+#
+# ⚠️ KNOWN GAP: neither term sees a FALSE ALARM. mae_cond_ss_climatology is conditioned on observed-positive cells
+# ⚠️ only, and psd_full_fidelity is a location-insensitive power ratio, so a spatially-textured over-forecast is
+# ⚠️ not penalized by this composite. `average_precision_occurrence` — the one component that does see false
+# ⚠️ alarms — is computed and REPORTED in the trials table but carries weight 0 by decision; read it when two
+# ⚠️ trials have similar composites.
 # ---------------------------------------------------------------------------------------------------------------------
 selection:
     metric: valid_regression_score
     mode: max
     components:
-        mae_cond_ss_climatology:      0.50
-        psd_full_fidelity:            0.50
-
-# average_precision_occurrence: 0.40
+        mae_cond_ss_climatology:      0.60
+        psd_full_fidelity:            0.40

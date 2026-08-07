@@ -108,7 +108,5 @@ selection:
     metric: valid_regression_score
     mode: max
     components:
-        mae_cond_ss_climatology:      0.50
-        psd_full_fidelity:            0.50
-
-# average_precision_occurrence: 0.40
+        mae_cond_ss_climatology:      0.60
+        psd_full_fidelity:            0.40

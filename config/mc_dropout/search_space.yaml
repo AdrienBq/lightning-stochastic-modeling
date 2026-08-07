@@ -32,8 +32,10 @@
 #   what the finetuning phase has to calibrate.
 # ---------------------------------------------------------------------------------------------------------------------
 #
-# `finetuning` is a NESTED block of the loss configuration, not a separate builder — build_finetune_loss is removed
-# and the option folds into build_regression_loss / build_binary_loss.
+# `finetuning` has its OWN builder, losses.build_ensemble_loss, and is not folded into build_regression_loss. The
+# two are used together rather than as alternatives — phase 2's step is
+# `regression_loss(pred, y, weights, mask) + finetuning.loss_weight * ensemble_loss(samples, y)` — and their
+# signatures differ, so there is no single builder to fold them into.
 #
 # There is deliberately NO `target_transform:` block. See config/eval/metrics.yaml.
 # =====================================================================================================================
@@ -150,7 +152,5 @@ selection:
     metric: valid_regression_score
     mode: max
     components:
-        mae_cond_ss_climatology:      0.50
-        psd_full_fidelity:            0.50
-
-# average_precision_occurrence: 0.40
+        mae_cond_ss_climatology:      0.60
+        psd_full_fidelity:            0.40
