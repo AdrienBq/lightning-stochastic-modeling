@@ -26,7 +26,12 @@ extra conditioning channel, materialised by `prepare_regression`).
 The **first** modelling target is **occurrence**, not unbounded stroke counts:
 
 - **hourly** binary occurrence, or
-- **daily regression of the number of hours with lightning, bounded `0–24`** (`daily_lightning_hours`).
+- **daily regression of the number of hours with lightning, bounded `0–24`**.
+
+**`mode` is the only key that selects between them.** `daily_lightning_hours` is the informal English name of
+`mode: daily`, never a config value — there is no `target-variable` key, and the string appears nowhere in
+`config/`. It survives only as a deprecated alias in `normalize_mode`, so artifacts prepared under the old name
+keep loading.
 
 The gamma F-transform (`GammaFTransform` / `LogStandardizeTransform`) is **removed**. It existed to condition an
 unbounded heavy-tailed target and only adds complication here.

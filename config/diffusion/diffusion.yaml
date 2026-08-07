@@ -55,10 +55,9 @@ stages:
     - prepare_regression:
         data-path: '{{$DATA_ROOT}}'         # dataset root; NEVER hardcode a path
         split-config: config/split/split.yaml     # the shared year-based split (see CLAUDE.md "Data")
-        output-path: outputs/diffusion/prepared/daily_lightning_hours
+        output-path: outputs/diffusion/prepared/daily
         mode: daily                         # daily | hourly
         feature-aggregation: hourly_stack   # stacks 24 hourly maps into C*24 input channels
-        target-variable: daily_lightning_hours
         features: MU_LI,MU_MIXR,RH_500850,cp,lsm
         hourly-threshold: 2                 # >= 2 strokes for an hour to count (single-stroke denoising); baked
                                             # into the target AND inherited by the residual (never re-applied to it)
@@ -80,7 +79,7 @@ stages:
     - tune:
         model-family: diffusion
         model-type: diffusion               # tagged on the mlflow run for ease of access
-        input-path: outputs/diffusion/prepared/daily_lightning_hours
+        input-path: outputs/diffusion/prepared/daily
         model-config: config/diffusion/search_space.yaml
         metrics-config: config/eval/metrics.yaml # supplies the climatology baseline behind the
                                             # mae_cond_ss_climatology selection component
@@ -107,7 +106,7 @@ stages:
         model-family: diffusion
         model-type: diffusion
         source-path: outputs/diffusion/tuning
-        input-path: outputs/diffusion/prepared/daily_lightning_hours
+        input-path: outputs/diffusion/prepared/daily
         metrics-config: config/eval/metrics.yaml
         output-path: outputs/diffusion/best
         metrics-path: outputs/diffusion/best/best_trial_metrics.json
@@ -125,7 +124,7 @@ stages:
     # residual_* report figures populate as well; they self-skip otherwise.
     # ------------------------------------------------------------------------------------------------------------
     - evaluate_regression:
-        input-path: outputs/diffusion/prepared/daily_lightning_hours
+        input-path: outputs/diffusion/prepared/daily
         model-path: outputs/diffusion/best/best_model.ckpt
         output-path: outputs/diffusion/evaluation
         metrics-config: config/eval/metrics.yaml

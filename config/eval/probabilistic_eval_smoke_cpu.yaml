@@ -33,7 +33,7 @@ stages:
 
     # 1a) Deterministic U-net -- the baseline
     - evaluate_regression:
-        input-path: outputs/deterministic_unet_smoke_cpu/prepared/daily_lightning_hours
+        input-path: outputs/deterministic_unet_smoke_cpu/prepared/daily
         model-path: outputs/deterministic_unet_smoke_cpu/best/best_model.ckpt
         output-path: outputs/comparison_smoke_cpu/evaluation/deterministic_unet
         metrics-config: config/eval/metrics.yaml
@@ -50,7 +50,7 @@ stages:
 
     # 1b) MC-dropout
     - evaluate_regression:
-        input-path: outputs/mc_dropout_smoke_cpu/prepared/daily_lightning_hours
+        input-path: outputs/mc_dropout_smoke_cpu/prepared/daily
         model-path: outputs/mc_dropout_smoke_cpu/best/best_model.ckpt
         output-path: outputs/comparison_smoke_cpu/evaluation/mc_dropout
         metrics-config: config/eval/metrics.yaml
@@ -67,7 +67,7 @@ stages:
 
     # 1c) Flow-matching diffusion
     - evaluate_regression:
-        input-path: outputs/diffusion_smoke_cpu/prepared/daily_lightning_hours
+        input-path: outputs/diffusion_smoke_cpu/prepared/daily
         model-path: outputs/diffusion_smoke_cpu/best/best_model.ckpt
         output-path: outputs/comparison_smoke_cpu/evaluation/diffusion
         metrics-config: config/eval/metrics.yaml

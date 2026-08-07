@@ -19,7 +19,10 @@ The **first** target is **occurrence** rather than unbounded stroke counts:
 | Mode | Target | Nature |
 |---|---|---|
 | `hourly` | lightning occurred in this cell/hour | binary classification |
-| `daily` | **number of hours with lightning, `0–24`** (`daily_lightning_hours`) | bounded regression |
+| `daily` | **number of hours with lightning, `0–24`** | bounded regression |
+
+`mode` is the only key that selects between them — there is no `target-variable`. "Daily lightning hours" is the
+informal name of `mode: daily`; as a *string* it survives only as a deprecated alias in `normalize_mode`.
 
 Consequently there is **no target transform**: training space and evaluation space are the same space, so no
 prediction is ever back-transformed. The bounded `0–24` target keeps ordinary distance losses (MSE / MAE / Huber)

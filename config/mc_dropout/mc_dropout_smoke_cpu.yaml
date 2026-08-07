@@ -35,10 +35,9 @@ stages:
     - prepare_regression:
         data-path: '{{$DATA_ROOT}}'
         split-config: config/split/split_smoke_cpu.yaml
-        output-path: outputs/mc_dropout_smoke_cpu/prepared/daily_lightning_hours
+        output-path: outputs/mc_dropout_smoke_cpu/prepared/daily
         mode: daily
         feature-aggregation: hourly_stack
-        target-variable: daily_lightning_hours
         features: MU_LI,MU_MIXR,RH_500850,cp,lsm
         hourly-threshold: 2
         overwrite: false
@@ -48,7 +47,7 @@ stages:
     - tune:
         model-family: mc_dropout
         model-type: mc_dropout
-        input-path: outputs/mc_dropout_smoke_cpu/prepared/daily_lightning_hours
+        input-path: outputs/mc_dropout_smoke_cpu/prepared/daily
         model-config: config/mc_dropout/search_space.yaml
         metrics-config: config/eval/metrics.yaml
         output-path: outputs/mc_dropout_smoke_cpu/tuning
@@ -70,7 +69,7 @@ stages:
         model-family: mc_dropout
         model-type: mc_dropout
         source-path: outputs/mc_dropout_smoke_cpu/tuning
-        input-path: outputs/mc_dropout_smoke_cpu/prepared/daily_lightning_hours
+        input-path: outputs/mc_dropout_smoke_cpu/prepared/daily
         metrics-config: config/eval/metrics.yaml
         output-path: outputs/mc_dropout_smoke_cpu/best
         metrics-path: outputs/mc_dropout_smoke_cpu/best/best_trial_metrics.json
@@ -82,7 +81,7 @@ stages:
         progress-bar: true
 
     - evaluate_regression:
-        input-path: outputs/mc_dropout_smoke_cpu/prepared/daily_lightning_hours
+        input-path: outputs/mc_dropout_smoke_cpu/prepared/daily
         model-path: outputs/mc_dropout_smoke_cpu/best/best_model.ckpt
         output-path: outputs/mc_dropout_smoke_cpu/evaluation
         metrics-config: config/eval/metrics.yaml

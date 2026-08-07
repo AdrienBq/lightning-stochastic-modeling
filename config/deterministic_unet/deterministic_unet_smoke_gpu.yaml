@@ -36,10 +36,9 @@ stages:
     - prepare_regression:
         data-path: '{{$DATA_ROOT}}'
         split-config: config/split/split_smoke_gpu.yaml
-        output-path: outputs/deterministic_unet_smoke_gpu/prepared/daily_lightning_hours
+        output-path: outputs/deterministic_unet_smoke_gpu/prepared/daily
         mode: daily
         feature-aggregation: hourly_stack
-        target-variable: daily_lightning_hours
         features: MU_LI,MU_MIXR,RH_500850,cp,lsm
         hourly-threshold: 2
         overwrite: false
@@ -49,7 +48,7 @@ stages:
     - tune:
         model-family: deterministic_unet
         model-type: deterministic_unet
-        input-path: outputs/deterministic_unet_smoke_gpu/prepared/daily_lightning_hours
+        input-path: outputs/deterministic_unet_smoke_gpu/prepared/daily
         model-config: config/deterministic_unet/search_space.yaml
         metrics-config: config/eval/metrics.yaml
         output-path: outputs/deterministic_unet_smoke_gpu/tuning
@@ -70,7 +69,7 @@ stages:
         model-family: deterministic_unet
         model-type: deterministic_unet
         source-path: outputs/deterministic_unet_smoke_gpu/tuning
-        input-path: outputs/deterministic_unet_smoke_gpu/prepared/daily_lightning_hours
+        input-path: outputs/deterministic_unet_smoke_gpu/prepared/daily
         metrics-config: config/eval/metrics.yaml
         output-path: outputs/deterministic_unet_smoke_gpu/best
         metrics-path: outputs/deterministic_unet_smoke_gpu/best/best_trial_metrics.json
@@ -83,7 +82,7 @@ stages:
         progress-bar: true
 
     - evaluate_regression:
-        input-path: outputs/deterministic_unet_smoke_gpu/prepared/daily_lightning_hours
+        input-path: outputs/deterministic_unet_smoke_gpu/prepared/daily
         model-path: outputs/deterministic_unet_smoke_gpu/best/best_model.ckpt
         output-path: outputs/deterministic_unet_smoke_gpu/evaluation
         metrics-config: config/eval/metrics.yaml
