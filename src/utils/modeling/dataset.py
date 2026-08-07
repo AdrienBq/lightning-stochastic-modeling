@@ -21,6 +21,29 @@ Features are returned RAW (unscaled, NaNs preserved): standardization and NaN im
 (per-channel normalization buffers fitted at tuning time and persisted in the checkpoint), since the dataset-side
 scalers (e.g. ``scaler_full``) are deprecated.
 
+HOW THE DAILY INPUT CHANNELS ARE BUILT — ``feature_aggregation``, which is DAILY-MODE ONLY (an hourly item is
+already a single hour, so the key is never read there):
+- ``hourly_stack`` — the option that does NOT aggregate. The day's T hourly maps are concatenated onto the CHANNEL
+  axis, giving ``Vf * T`` channels (5 variables x 24 hours = 120 here), so the network sees the whole diurnal cycle
+  and learns its own weighting over hours rather than being handed a summary. A static field such as ``lsm`` does
+  contribute T identical channels, but it was already expanded upstream — per variable by ``load_sample_tensor``,
+  or at prepare time for materialized features — so every variable shares one T axis by the time this module reads
+  it. The ``shape[T] == 1`` broadcast below is the remaining WHOLE-DAY case, where the stored array has no usable
+  time axis at all.
+- ``daily_mean`` — the aggregating option: mean over the day, ``Vf`` channels.
+Both names read backwards (the key says "aggregation" yet its default value aggregates nothing, and the value that
+does not aggregate is the one named "hourly"), but they are the on-disk vocabulary in ``prepared_config.json`` and
+are kept as-is. Read ``hourly_stack`` as "keep the hours, as channels".
+
+WRITTEN BY THE PREPARATION STAGE, NOT CONFIGURED — two fields of ``prepared_config.json`` that look like tunables
+and appear nowhere in ``config/``:
+- ``hours_per_day`` — DISCOVERED FROM THE DATA: the first axis of a day's lightning tensor (24 for this dataset).
+- ``feature_layout`` — DERIVED FROM THE MODE, purely an I/O optimization: ``time_major [T, Vf, H, W]`` for hourly
+  (one hour is then a contiguous read) and ``variable_major [Vf, T, H, W]`` for daily (the channel reshape above is
+  then free). Either layout yields the SAME channel order; only the copy cost differs. It is stored as literal
+  ``None`` when features were not materialized, which is why it is read with ``or 'time_major'`` below rather than
+  through a dict default.
+
 Residual (diffusion) mode: when the preparation stage was given an upstream model (``residual_target`` in the
 prepared config, with per-day ``upstream/<date>.npy`` prediction maps), the upstream prediction is appended as an
 extra conditioning channel of ``x`` AND returned as a third item, so the diffusion module can form the residual
@@ -218,6 +241,13 @@ class DayGroupedShuffleSampler(Sampler[int]):
     (hours shuffled within each day) but each day's items stay contiguous, so the per-worker day-checkpoint cache
     keeps hitting instead of reloading a full multi-variable day per item. Slightly less mixed batches than fully
     uniform shuffling; unnecessary (and unused) when features are materialized.
+
+    ⚠️ NOT DEAD CODE, though it currently never runs. ``tuning.py`` constructs it as the ``sampler=`` argument of the
+    TRAIN ``DataLoader`` at both fit sites (the sweep trial and the best-config retrain), under the guard
+    ``mode == MODE_HOURLY and not uses_materialized_features``. Every pipeline config sets
+    ``materialize-features: true``, so that guard is false today — it becomes live the first time an hourly run
+    skips materialization, which is a plausible choice given the cost of materializing hourly features for 5843
+    days.
     """
 
     def __init__(self, dataset: LightningMapsDataset):
@@ -242,7 +272,12 @@ def build_split_datasets(
         prepared_config: dict,
         splits: Optional[List[str]] = None
 ) -> Dict[str, LightningMapsDataset]:
-    """Build one dataset per requested split from the full split index."""
+    """Build one dataset per requested split from the full split index.
+
+    Datasets only — :class:`DayGroupedShuffleSampler` is deliberately NOT built here. A sampler is a ``DataLoader``
+    argument, and it applies to the train split alone, so it belongs with the loaders in ``tuning.py`` (see that
+    class's docstring for the guard).
+    """
     splits = splits or ['train', 'valid', 'test']
     return {
         split: LightningMapsDataset(split_index[split_index['split'] == split], prepared_config)
