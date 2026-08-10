@@ -66,17 +66,43 @@ def suggest_trial_optuna(space, optuna_trial, prefix: str = ''):
 def apply_constraints(trial: dict, *, upstream_model_path: Optional[str] = None) -> dict:
     """Repair jointly-meaningless hyperparameter combinations in a sampled trial (in place, also returned).
 
+    ⚠️ This function repairs the sampled DICT and never loads a checkpoint. ``upstream_model_path`` is read only for
+    its truthiness; the weights are loaded by the stage's ``module_factory`` (see ``tuning.py``'s module docstring),
+    which is also where the architecture override below is owed.
+
     Both rules exist because the search space samples each subtree independently and cannot express a dependency
     between them. Neither is a validity check — every value involved is legal on its own.
 
-    1. ``occurrence_head.loss == focal_bce`` forces ``loss.intensity_weight_gamma = 0``. Focal BCE already carries
-       ``positive_class_weight``, and on a BINARY target ``(1 + y)^gamma`` takes only two values ``{1, 2^gamma}``
-       — i.e. it IS a positive-class weight. Sampling both makes the effective weight the product of two
-       independently-tuned numbers, so the sweep explores one quantity along two axes and the trials table shows
-       neither.
-    2. An ``upstream-model-path`` forces ``finetuning.enabled = true`` and makes the ``unet:`` block inert. A warm
-       start loads the upstream checkpoint's architecture along with its weights, so a sampled architecture would
-       be silently discarded; and with phase 1 skipped, ``finetuning.enabled = false`` would leave nothing to run.
+    **1. ``loss.name == 'focal_bce'`` forces ``loss.intensity_weight_gamma = 0``.** Focal BCE already carries
+    ``positive_class_weight``, and on a BINARY target ``intensity_weights(y, gamma) = (1 + y)^gamma`` takes only two
+    values ``{1, 2^gamma}`` — i.e. it IS a positive-class weight. Sampling both makes the effective weight the
+    product of two independently-tuned numbers, so the sweep explores one quantity along two axes and the trials
+    table shows neither.
+
+    ⚠️ The rule is scoped to ``focal_bce`` deliberately, and must NOT be widened to every binary task. A DISTANCE
+    loss on the hourly probability field is legitimate — ``rmse`` on a probability is exactly ``sqrt(brier_score)``,
+    hence proper — and none of the distance losses carries a positive-class weight of its own. There
+    ``intensity_weight_gamma`` is the only reweighting knob available, and collapsing to ``{1, 2^gamma}`` on a binary
+    target is precisely what makes it useful rather than redundant.
+
+    This rule is inert in the three daily search spaces, whose ``loss.name`` choices are all distance losses; it
+    fires only where ``focal_bce`` is reachable, i.e. an hourly pipeline.
+
+    **2. An ``upstream-model-path`` forces ``finetuning.enabled = true``.** With phase 1 replaced by the upstream
+    checkpoint there is nothing to fall back on, so a sampled ``false`` would make the trial a no-op — and worse,
+    it would raise: the MC-dropout module builds its ensemble loss only when ``finetuning.enabled`` is set, and its
+    ``set_phase('finetune')`` rejects the phase outright otherwise. This rule is what makes a warm-started trial's
+    single-phase schedule LEGAL; it does not itself skip phase 1, which is the module's ``training_phases()``.
+
+    In practice the rule fires for ``mc_dropout`` ONLY — it is the only family whose ``tune`` stage takes an
+    ``upstream-model-path``, because MC-dropout warm-starts from the upstream's WEIGHTS. Diffusion's upstream sits on
+    ``prepare_regression`` instead, where the upstream's PREDICTION is materialised once as the last conditioning
+    channel, so its sweep never sees this argument.
+
+    The second thing the warm-start branch does is **log** that the sampled ``unet:`` block will be ignored. That is
+    a statement about an obligation, not an enforcement: making it true is the job of the module factory, which must
+    build the network from the CHECKPOINT's architecture rather than from ``trial['unet']``. Nothing is removed from
+    the trial here — the block is left byte-identical, so the log and the dict deliberately disagree.
 
     Args:
         trial: A sampled trial configuration; mutated in place.
@@ -85,16 +111,14 @@ def apply_constraints(trial: dict, *, upstream_model_path: Optional[str] = None)
     Returns:
         The same ``trial`` object, repaired.
     """
-    occurrence_head = trial.get('occurrence_head', {})
-    if occurrence_head.get('enabled') and occurrence_head.get('loss') == 'focal_bce':
-        loss = trial.setdefault('loss', {})
-        if float(loss.get('intensity_weight_gamma', 0.0)) != 0.0:
-            logger.info(
-                f'occurrence_head.loss is focal_bce, which already carries positive_class_weight; forcing '
-                f'loss.intensity_weight_gamma from {loss["intensity_weight_gamma"]} to 0.0 so the two mechanisms '
-                f'do not duplicate.'
-            )
-            loss['intensity_weight_gamma'] = 0.0
+    loss = trial.get('loss', {})
+    if loss.get('name') == 'focal_bce' and float(loss.get('intensity_weight_gamma', 0.0)) != 0.0:
+        logger.info(
+            f'loss.name is focal_bce, which already carries positive_class_weight; forcing '
+            f'loss.intensity_weight_gamma from {loss["intensity_weight_gamma"]} to 0.0 so the two mechanisms do '
+            f'not duplicate.'
+        )
+        loss['intensity_weight_gamma'] = 0.0
 
     if upstream_model_path:
         finetuning = trial.setdefault('finetuning', {})

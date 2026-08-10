@@ -48,7 +48,7 @@ from yaml import safe_load
 from src import console_handler
 from src.utils.io import lazy
 from src.utils.io.data import compute_feature_stats, compute_upstream_stats, load_prepared_artifacts
-from src.utils.metrics.evaluation import climatology_conditional_mae
+from src.utils.metrics.evaluation import climatology_brier, climatology_conditional_mae
 from src.utils.modeling.dataset import MODE_HOURLY, DayGroupedShuffleSampler, build_split_datasets
 from src.utils.modeling.search import apply_constraints, flatten_trial, sample_trial, suggest_trial_optuna
 from src.utils.modeling.validation import DEFAULT_SELECTION_WEIGHTS, selection_metric_for_mode
@@ -508,18 +508,25 @@ def run_sweep(
         f'{ {name: round(feature_stats["mean"][name], 3) for name in prepared_config["features"]} } (means).'
     )
 
-    # model-independent denominator of the mae_cond_ss_climatology selection component (the climatology
-    # baseline's conditional MAE on the valid occurrence cells): computed once and injected into every trial's
-    # module, so the composite valid_tail_score's skill term is normalized identically across trials
+    # Model-independent denominators of the two SKILL selection components, computed once on the valid split and
+    # injected into every trial's module so each component is normalized identically across trials:
+    #   * mae_cond_ss_climatology -> the climatology baseline's conditional MAE on the valid occurrence cells;
+    #   * brier_skill_score       -> the climatological occurrence frequency's Brier score.
+    # Both are computed whichever composite is active: they are cheap next to a fit, and the unweighted one still
+    # appears in the trials table as a diagnostic.
     with open(os.path.join(root_path, metrics_config)) as handle:
         metrics_spec = safe_load(handle)
     selection_climatology_cond_mae, selection_occurrence_event = climatology_conditional_mae(
         split_index, datasets['valid'].items_frame(), prepared_config, metrics_spec, target_stats
     )
+    selection_climatology_brier, _ = climatology_brier(
+        split_index, datasets['valid'].items_frame(), prepared_config, metrics_spec, target_stats
+    )
     logger.info(
-        f'Selection denominator: climatology conditional-MAE = {selection_climatology_cond_mae:.4f} on the valid '
-        f'split (occurrence value={selection_occurrence_event[0]:g}, strict={selection_occurrence_event[1]}); '
-        f'valid_tail_score includes mae_cond_ss_climatology = 1 - mae_cond(model) / this.'
+        f'Selection denominators on the valid split: climatology conditional-MAE = '
+        f'{selection_climatology_cond_mae:.4f}, climatology Brier = {selection_climatology_brier:.6f} '
+        f'(occurrence value={selection_occurrence_event[0]:g}, strict={selection_occurrence_event[1]}); '
+        f'"{selection_metric}" includes mae_cond_ss_climatology = 1 - mae_cond(model) / the former.'
     )
 
     # optional model-family-specific train statistics merged into target_stats (and persisted for provenance)
@@ -593,7 +600,7 @@ def run_sweep(
                 trial = sample_trial(search_space, rng)
             trial = apply_constraints(trial, upstream_model_path=upstream_model_path)
 
-            trial_batch_size = int(batch_size or trial['optimizer']['batch_size'])
+            trial_batch_size = int(batch_size or trial['batch_size'])
             loader_kwargs = dict(
                 num_workers=num_workers, persistent_workers=num_workers > 0,
                 pin_memory=use_cuda if pin_memory is None else pin_memory
@@ -617,6 +624,7 @@ def run_sweep(
             try:
                 module = module_factory(trial, in_channels, target_stats, normalization)
                 module.valid_climatology_cond_mae = selection_climatology_cond_mae
+                module.valid_climatology_brier = selection_climatology_brier
                 module.selection_occurrence_event = selection_occurrence_event
                 if compile_model and use_cuda:
                     if hasattr(module.net, 'compile'):
@@ -927,10 +935,13 @@ def retrain_best_config(
         'std': [feature_stats['std'][name] for name in channel_names]
     }
 
-    # selection-score denominator (climatology conditional MAE on the valid occurrence cells), as in the sweep
+    # selection-score denominators (climatology conditional MAE and Brier on the valid split), as in the sweep
     with open(os.path.join(root_path, metrics_config)) as handle:
         metrics_spec = safe_load(handle)
     selection_climatology_cond_mae, selection_occurrence_event = climatology_conditional_mae(
+        split_index, datasets['valid'].items_frame(), prepared_config, metrics_spec, target_stats
+    )
+    selection_climatology_brier, _ = climatology_brier(
         split_index, datasets['valid'].items_frame(), prepared_config, metrics_spec, target_stats
     )
 
@@ -943,7 +954,7 @@ def retrain_best_config(
                 json.dump(extra_stats, handle, indent=2)
 
     # 4) loaders + single fixed-config fit, exactly like one sweep trial
-    trial_batch_size = int(batch_size or trial['optimizer']['batch_size'])
+    trial_batch_size = int(batch_size or trial['batch_size'])
     loader_kwargs = dict(num_workers=num_workers, persistent_workers=num_workers > 0,
                          pin_memory=use_cuda if pin_memory is None else pin_memory)
     if num_workers > 0:
@@ -959,6 +970,7 @@ def retrain_best_config(
     L.seed_everything(seed, workers=True)
     module = module_factory(trial, in_channels, target_stats, normalization)
     module.valid_climatology_cond_mae = selection_climatology_cond_mae
+    module.valid_climatology_brier = selection_climatology_brier
     module.selection_occurrence_event = selection_occurrence_event
     if compile_model and use_cuda and hasattr(module.net, 'compile'):
         module.net.compile()

@@ -144,8 +144,8 @@ metrics:
     #     `average_precision_occurrence` — not ROC-AUC — is the discrimination term of the selection score.
     #   * dice is THRESHOLD-FREE too, and is SOFT: computed on the probability with no cut, it is the eval-time
     #     complement of the `dice` training loss, so the reported number measures what that loss optimized. Emitted
-    #     only where the field is a genuine probability — `dice_occurrence` with an occurrence head, and nothing on
-    #     the hour bands of a plain regression run (a deliberate absence, not a NaN).
+    #     only where the field is a genuine probability, which under the one-head design means HOURLY MODE ONLY —
+    #     nothing on the hour bands of a daily run (a deliberate absence, not a NaN).
     # -----------------------------------------------------------------------------------------------------------
     categorical:
         thresholds: [occurrence, h3, h6, h12]
@@ -161,14 +161,21 @@ metrics:
                                                                                 # `mae_cond_ss_climatology` is the
                                                                                 # anti-trivial term of the
                                                                                 # selection score
-        brier_skill_score: {baselines: [climatology], target: occurrence}        # occurrence head, when enabled
-        explained_deviance: {baseline: climatology, target: occurrence}          # BERNOULLI explained deviance on
-                                                                                # the occurrence head:
+        brier_skill_score: {baselines: [climatology], target: occurrence}        # HOURLY ONLY — see the note below
+        explained_deviance: {baseline: climatology, target: occurrence}          # BERNOULLI explained deviance,
                                                                                 # 1 - logloss(model)/logloss(clim).
-                                                                                # Deliberately scoped to the binary
-                                                                                # head — with Tweedie/Poisson gone
-                                                                                # the bounded 0-24 target has no
-                                                                                # likelihood to take a deviance of.
+                                                                                # Deliberately scoped to a binary
+                                                                                # forecast — with Tweedie/Poisson
+                                                                                # gone the bounded 0-24 target has
+                                                                                # no likelihood to take a deviance
+                                                                                # of. HOURLY ONLY.
+        # ⚠️ BOTH OF THE ABOVE ARE NaN IN A DAILY RUN, and that is a design consequence rather than a gap to fix.
+        # ⚠️ Each needs a CALIBRATED PROBABILITY, and the one-head design gives a daily model no probabilistic
+        # ⚠️ output: there is no occurrence head (see any config/<family>/search_space.yaml for that decision).
+        # ⚠️ `mae_conditional_skill_score` is therefore the only skill term a daily run actually reports, which is
+        # ⚠️ why the regression selection composite leans on it. What is NOT lost daily: `average_precision` and
+        # ⚠️ `roc_auc` above, which rank on the predicted hours — exact, since both are invariant to any monotone
+        # ⚠️ rescaling of the score axis.
 
     # -----------------------------------------------------------------------------------------------------------
     # Calibration. Reduced to what is meaningful on a bounded target with a probabilistic occurrence head.

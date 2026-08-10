@@ -407,11 +407,16 @@ def build_regression_loss(loss_config: dict) -> Callable:
 
 
 def build_binary_loss(loss_config: dict) -> BinaryLoss:
-    """Build the occurrence-head loss from a trial's ``occurrence_head`` section. Every option takes LOGITS.
+    """Build the binary occurrence loss from a trial's ``loss`` section. Every option takes LOGITS.
+
+    This is the MAIN loss of the hourly classification task, not an auxiliary head's: it reads the same ``loss``
+    section and the same ``name`` key as :func:`build_regression_loss`, and ``mode`` selects between the two
+    builders (see ``module.py``). Keeping the two signatures aligned is what lets the module dispatch on the mode
+    alone, with no second config key.
 
     Args:
-        loss_config: Sampled ``occurrence_head`` section — ``loss``, plus ``positive_class_weight`` /
-            ``focal_gamma`` for ``focal_bce`` and ``dice_smooth`` for ``dice``.
+        loss_config: Sampled ``loss`` section — ``name``, plus ``positive_class_weight`` / ``focal_gamma`` for
+            ``focal_bce`` and ``dice_smooth`` for ``dice``.
 
     Returns:
         :class:`BinaryLoss` — the callable and whether its first argument is an ensemble.
@@ -419,7 +424,7 @@ def build_binary_loss(loss_config: dict) -> BinaryLoss:
     Raises:
         ValueError: On a name outside :data:`BINARY_LOSSES`.
     """
-    name = loss_config['loss']
+    name = loss_config['name']
     if name not in BINARY_LOSSES:
         raise ValueError(f'Unknown binary loss "{name}"; expected one of {BINARY_LOSSES}.')
 

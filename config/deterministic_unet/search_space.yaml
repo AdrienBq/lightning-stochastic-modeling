@@ -50,32 +50,40 @@ loss:
     alpha: {type: float, low: 0.5, high: 1.0}
 
 # ---------------------------------------------------------------------------------------------------------------------
-# Optional occurrence head: a per-cell P(lightning) classifier trained alongside the regressor. It is what makes
-# brier_skill_score, explained_deviance, reliability_diagram and the ROC/PR curves computable, so it is the natural
-# companion of the classification-first scope.
+# ⛔ THERE IS NO `occurrence_head:` BLOCK, BY DECISION. The model has exactly ONE output head, and `mode` decides
+# what it emits: 0-24 lightning-hours (daily) or an occurrence probability (hourly). Two things were considered and
+# rejected:
+#   * a GATE (a classifier masking dry cells, the regressor fitted on wet cells only, prediction = regression x
+#     mask). It answers an UNBOUNDED count target; this target is bounded 0-24, where the regression covers the
+#     zeros directly.
+#   * a REPORT-ONLY second head, emitting P(lightning) purely to feed the probability metrics without touching the
+#     prediction. Dropped as machinery that changes no forecast.
 #
-# Config alias -> loss function (losses.py), since the short names below are dispatch keys, not function names.
-# ALL of them take LOGITS and sigmoid internally, so the occurrence head emits a raw logit and never has to know
-# which loss was sampled; the sigmoid happens once, on the inference path:
-#   focal_bce   -> focal_bce_with_logits
-#   dice        -> dice_loss
-#   brier       -> brier_loss
-#   crps_binary -> crps_binary             (the one that needs an ENSEMBLE [N, *spatial], not a single map)
+# ⚠️ CONSEQUENCE, in daily runs: `brier_skill_score`, `explained_deviance`, `dice_occurrence` and the reliability
+# ⚠️ diagram need a calibrated probability and are therefore NaN / absent. `average_precision_occurrence` and
+# ⚠️ `roc_auc` are NOT lost — they rank on the predicted hours, and AP/AUC are invariant to any monotone rescaling,
+# ⚠️ so that is exact rather than an approximation. That keeps the one reported component which sees a false alarm
+# ⚠️ (see the KNOWN GAP note under `selection:` below).
 #
-# ⚠️ `crps_binary` is deliberately ABSENT from this family's choices, unlike mc_dropout's and diffusion's. It needs
-# ⚠️ a genuine ensemble: with the single forward pass of a deterministic model N = 1, the spread term is
-# ⚠️ identically zero and it degrades silently to a mean absolute error on probabilities.
+# The binary losses in losses.py are not orphaned by this: they are the MAIN loss of the hourly task, built from the
+# same `loss:` section above. An hourly search space just sets `loss.name` to one of focal_bce / dice / brier /
+# crps_binary (plus focal_gamma and positive_class_weight for focal_bce) and changes nothing else.
 #
-# !! Step 3 constraint for search.apply_constraints: when occurrence_head.loss == focal_bce, force
-# !! loss.intensity_weight_gamma to 0.0. focal_bce already carries positive_class_weight, and on a BINARY target
-# !! (1 + y)^gamma collapses to {1, 2^gamma} — i.e. a plain positive-class weight — so the two mechanisms duplicate
-# !! each other and their product is uninterpretable.
+# ⚠️ The LOSS NAME picks the builder, NOT the mode — because the hourly task admits BOTH families. A distance loss
+# ⚠️ on the predicted probability is not a misuse but proper: rmse(p, y)^2 is exactly brier_score(p, y). So an hourly
+# ⚠️ pipeline may keep `loss.name: weighted_mse` and module.py hands the loss the PROBABILITY; with a binary name it
+# ⚠️ hands over the LOGIT, which every binary loss sigmoids internally. Either way the sigmoid exists in exactly one
+# ⚠️ place. The reverse is rejected: a binary loss on the 0-24 daily target raises.
+#
+# ⚠️ This is also why `loss.intensity_weight_gamma` keeps a role in hourly mode and its apply_constraints rule is
+# ⚠️ narrow. No distance loss carries a positive-class weight of its own, and on a binary target
+# ⚠️ (1 + y)^gamma ∈ {1, 2^gamma} IS one — so gamma is the reweighting knob there. Only `focal_bce`, which brings its
+# ⚠️ own positive_class_weight, has gamma forced to 0.
+#
+# ⚠️ `crps_binary` must never be given to THIS family: it needs a genuine ensemble, and a deterministic single
+# ⚠️ forward pass gives N = 1, a spread term identically zero, and a silent degradation to a mean absolute error on
+# ⚠️ probabilities. module.py raises rather than letting that train.
 # ---------------------------------------------------------------------------------------------------------------------
-occurrence_head:
-    enabled: {type: categorical, choices: [true, false]}
-    loss: {type: categorical, choices: [focal_bce, dice, brier]}      # no crps_binary: N = 1 here, see above
-    focal_gamma: {type: float, low: 1.0, high: 3.0}
-    positive_class_weight: {type: float, low: 1.0, high: 50.0}
 
 # ---------------------------------------------------------------------------------------------------------------------
 # U-net backbone.
@@ -88,9 +96,23 @@ occurrence_head:
 #      best model that no downstream family can consume.
 #   2. Batch sizes here are 4-32, where batch-norm statistics are noisy anyway.
 # ---------------------------------------------------------------------------------------------------------------------
+# The four FIXED values below are required by UNetBackbone and deliberately not searched — each would widen the
+# space for little return at this resolution:
+#   * kernel_size 3      : 5 roughly triples the parameter count per block; at 0.25 deg (~28 km) the extra receptive
+#                          field is cheaper to buy with `depth`, which IS searched.
+#   * blocks_per_level 2 : the standard U-net double-conv block.
+#   * upsampling         : bilinear_conv, NOT transposed_conv. Transposed convolutions produce checkerboard
+#                          artefacts, and this project SELECTS on spatial structure (`psd_full_fidelity` carries
+#                          0.40 of the composite), so a periodic upsampling artefact would be scored as texture.
+#   * dropout 0.0        : this family is deterministic. mc_dropout needs dropout > 0 and carries its own top-level
+#                          `dropout_p`, which its module injects here.
 unet:
     base_channels: {type: categorical, choices: [16, 32, 64]}
     depth: {type: int, low: 3, high: 5}                 # number of down/upsampling levels
+    kernel_size: 3                                      # FIXED -- see above
+    blocks_per_level: 2                                 # FIXED -- see above
+    upsampling: bilinear_conv                           # FIXED -- transposed_conv/bilinear_conv; see above
+    dropout: 0.0                                        # FIXED -- deterministic family
     normalization: group                                # FIXED -- see the two reasons above
     activation: {type: categorical, choices: [relu, gelu, silu]}
     bottleneck_attention: {type: categorical, choices: [true, false]}
@@ -106,12 +128,17 @@ output_activation: {type: categorical, choices: [softplus]}
 max_hours: 24                                           # the bounded-target ceiling, in hours per day
 
 # ---------------------------------------------------------------------------------------------------------------------
-# Calibration of the model heads, each fitted in a dedicated FINAL phase with the backbone frozen. Treated as
-# hyperparameters (on/off), identity-initialised so that "disabled" is an exact no-op.
-#   * occurrence: classical Platt scaling of the occurrence logit, p = sigmoid(a * z + b), fitted with PLAIN BCE on
-#     the raw 0-vs-positive labels — independent of how the head was trained. Rank-preserving, so it recalibrates
-#     the probabilities (Brier / reliability / explained deviance) without moving a hard decision mask.
-#   * regression: a MONOTONE, zero-preserving recalibration of the predicted hours, fitted with a plain symmetric
+# Calibration of the model head, fitted in a dedicated FINAL phase with the backbone frozen. Treated as a
+# hyperparameter (on/off), identity-initialised so that "disabled" is an exact no-op.
+#
+# ⚠️ EXACTLY ONE of the two applies to any given run, and WHICH is decided by `mode`, not configured — Platt scaling
+# ⚠️ recalibrates a logit and the monotone warp recalibrates non-negative hours, so neither is meaningful in the
+# ⚠️ other task. `training_phases()` therefore returns at most one calibration phase. In a DAILY pipeline like this
+# ⚠️ one, `occurrence:` below is inert: module.py logs once and ignores it.
+#   * occurrence (HOURLY ONLY): classical Platt scaling of the head's logit, p = sigmoid(a * z + b), fitted with
+#     PLAIN BCE on the occurrence labels — independent of which binary loss trained the head. Rank-preserving, so it
+#     recalibrates the probabilities (Brier / reliability / explained deviance) without moving a decision mask.
+#   * regression (DAILY ONLY): a MONOTONE, zero-preserving recalibration of the predicted hours, fitted with a plain symmetric
 #     log1p-Huber loss on observed-positive cells. Deliberately decoupled from the backbone's weighted loss
 #     (otherwise the calibrator just relearns the identity), and both extremes-robust (Huber) and scale-robust
 #     (log1p). `structure` is itself a hyperparameter:
@@ -123,7 +150,7 @@ max_hours: 24                                           # the bounded-target cei
 #     more — the earlier count-regression objection to this block no longer applies.
 # ---------------------------------------------------------------------------------------------------------------------
 calibration:
-    occurrence: {type: categorical, choices: [none, platt]}
+    occurrence: {type: categorical, choices: [none, platt]}     # hourly only; inert in this daily pipeline
     regression:
         structure: {type: categorical, choices: [none, power_law, monotone_smooth]}
         objective: {type: categorical, choices: [pointwise, quantile]}
