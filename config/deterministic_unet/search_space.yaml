@@ -55,12 +55,12 @@ loss:
 # companion of the classification-first scope.
 #
 # Config alias -> loss function (losses.py), since the short names below are dispatch keys, not function names.
-# The third column is the INPUT SPACE each expects; build_binary_loss returns it as BinaryLoss.expects, because
-# every mismatch here is silent (a probability handed to dice_loss is sigmoided a second time into [0.5, 0.73]):
-#   focal_bce   -> focal_bce_with_logits   (logits)
-#   dice        -> dice_loss               (logits)
-#   brier       -> brier_loss              (probabilities)
-#   crps_binary -> crps_binary             (ENSEMBLE samples)
+# ALL of them take LOGITS and sigmoid internally, so the occurrence head emits a raw logit and never has to know
+# which loss was sampled; the sigmoid happens once, on the inference path:
+#   focal_bce   -> focal_bce_with_logits
+#   dice        -> dice_loss
+#   brier       -> brier_loss
+#   crps_binary -> crps_binary             (the one that needs an ENSEMBLE [N, *spatial], not a single map)
 #
 # ⚠️ `crps_binary` is deliberately ABSENT from this family's choices, unlike mc_dropout's and diffusion's. It needs
 # ⚠️ a genuine ensemble: with the single forward pass of a deterministic model N = 1, the spread term is

@@ -8,18 +8,24 @@ Every option is designed against the extreme class imbalance of the target (~99.
   accuracy with blur;
 - focal BCE with a positive-class weight drives the high-recall occurrence classifier of the hierarchy.
 
-THREE INPUT SPACES, and mixing them silently is the failure mode this module is organised to prevent:
+EVERY BINARY LOSS TAKES LOGITS. Each applies its own sigmoid internally, and the probability is formed exactly once
+per loss, so there is no configuration in which the head has to know which space the sampled loss wants:
 
-| builder                 | returns                     | callable signature                    |
-|-------------------------|-----------------------------|---------------------------------------|
-| ``build_regression_loss`` | a callable                | ``(pred, target, weights, mask)``     |
-| ``build_binary_loss``     | ``BinaryLoss(fn, expects)`` | ``(logits | probs | samples, target)`` |
-| ``build_ensemble_loss``   | a callable                | ``(samples [N, *spatial], target)``   |
+| builder                   | returns                              | callable signature                      |
+|---------------------------|--------------------------------------|-----------------------------------------|
+| ``build_regression_loss`` | a callable                           | ``(pred, target, weights, mask)``       |
+| ``build_binary_loss``     | ``BinaryLoss(fn, needs_ensemble)``   | ``(logits, target)``                    |
+| ``build_ensemble_loss``   | a callable                           | ``(samples [N, *spatial], target)``     |
 
-``build_binary_loss`` returns the space its callable expects rather than leaving the caller to infer it: ``dice``
-and ``focal_bce`` take LOGITS (they apply their own sigmoid), ``brier`` takes PROBABILITIES, and ``crps_binary``
-takes an ENSEMBLE of probability samples. Handing a probability to ``dice_loss`` would silently sigmoid it a second
-time — a monotone squash into [0.5, 0.73] that trains without ever erroring.
+The occurrence head therefore emits a RAW LOGIT and never sigmoids it for training; the sigmoid happens once, on
+the inference path, where the reported probability is formed. That makes the worst mismatch structurally impossible
+rather than merely documented: there is no probability-taking binary loss left to hand a logit to, and no
+logit-taking loss left to hand a probability to (which would sigmoid it a second time, squashing [0, 1] into
+[0.5, 0.73] — a monotone map that trains without ever erroring).
+
+One difference survives, and it is about SHAPE rather than space: ``crps_binary`` needs an ensemble
+``[N, *spatial]``. Given a plain ``[B, H, W]`` batch it would read the batch as a B-member ensemble and return a
+number, so it cannot be caught by shape alone — hence ``BinaryLoss.needs_ensemble``.
 
 The regression and ensemble builders are SEPARATE because the MC-dropout finetuning phase uses both at once:
 ``loss = regression_loss(...) + loss_weight * ensemble_loss(...)``. They are not alternatives, and their signatures
@@ -211,10 +217,9 @@ def focal_bce_with_logits(
 def dice_loss(logits: torch.Tensor, target: torch.Tensor, smooth: float = 1.0) -> torch.Tensor:
     """Soft Dice / F1 loss for binary classification: ``1 - 2*TP / (2*TP + FP + FN)``.
 
-    Takes LOGITS and applies its own sigmoid — passing an already-sigmoided probability squashes it a second time
-    into [0.5, 0.73], which trains without erroring and quietly destroys the head's dynamic range.
+    Takes LOGITS and applies its own sigmoid, like every other binary loss here.
 
-    Its eval-time complement is ``scores.dice_coefficient`` on the same probability field, so the reported
+    Its eval-time complement is ``scores.dice_coefficient`` on ``sigmoid(logits)``, so the reported
     ``dice_<threshold>`` measures exactly what this optimized.
 
     Args:
@@ -227,9 +232,16 @@ def dice_loss(logits: torch.Tensor, target: torch.Tensor, smooth: float = 1.0) -
     return 1.0 - (2.0 * intersection + smooth) / (probs.sum() + target.sum() + smooth)
 
 
-def brier_loss(probs: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Brier score: mean squared error of PROBABILITY predictions vs binary labels. Takes probabilities."""
-    return ((probs - target.float()) ** 2).mean()
+def brier_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Brier score: mean squared error of the predicted probability vs binary labels. Takes LOGITS.
+
+    Equals ``scores.brier_score(sigmoid(logits), target)`` — the same number, entered from the training side.
+
+    Args:
+        logits: Raw model outputs (pre-sigmoid), any shape.
+        target: Binary ground-truth labels (0/1), same shape.
+    """
+    return ((torch.sigmoid(logits) - target.float()) ** 2).mean()
 
 
 def crps(samples: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -313,8 +325,8 @@ def afcrps_psd(samples: torch.Tensor, target: torch.Tensor, beta: float = 0.7) -
     return beta * almost_fair_crps(samples, target) + (1.0 - beta) * psd_penalty(samples.mean(dim=0), target)
 
 
-def crps_binary(samples: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Continuous ranked probability score for binary events (Ferro & Fricker 2012).
+def crps_binary(logit_samples: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Continuous ranked probability score for binary events (Ferro & Fricker 2012). Takes LOGIT samples.
 
     CRPS(F, y) = E[|P - y|] - (1/2) E[|P - P'|]
 
@@ -322,17 +334,22 @@ def crps_binary(samples: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         E[|P - P'|] = (2 / N²) Σ_{k=0}^{N-1} (2k - N + 1) * P_{(k)}
     where P_{(0)} ≤ ... ≤ P_{(N-1)} are the sorted MC samples.
 
-    ⚠️ Needs a GENUINE ensemble. With ``N = 1`` the spread term is identically zero and this silently degrades to
-    a mean absolute error on probabilities — which is why ``crps_binary`` is not offered to the deterministic
-    family, whose single forward pass has no sample axis.
+    ⚠️ The only binary loss needing a SAMPLE AXIS, and the one place the uniform logit contract does not make a
+    mismatch impossible: handed a plain ``[B, H, W]`` batch it would read the BATCH as a B-member ensemble and
+    return a number. That is what ``BinaryLoss.needs_ensemble`` flags.
+
+    ⚠️ With ``N = 1`` the spread term is identically zero and this degrades to a mean absolute error on
+    probabilities — which is why it is not offered to the deterministic family, whose single forward pass has no
+    sample axis.
 
     Args:
-        samples: MC probability samples, shape [N, *spatial].
+        logit_samples: MC samples of the raw model output (pre-sigmoid), shape [N, *spatial].
         target: Binary ground-truth labels (0/1), shape [*spatial].
 
     Returns:
         Scalar CRPS averaged over all spatial positions.
     """
+    samples = torch.sigmoid(logit_samples)
     n = samples.shape[0]
     mae_term = (samples - target.unsqueeze(0)).abs().mean(dim=0)        # [*spatial]
 
@@ -348,15 +365,16 @@ def crps_binary(samples: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 # builders
 # ----------------------------------------------------------------------------------------------------------------
 class BinaryLoss(NamedTuple):
-    """An occurrence-head loss together with the INPUT SPACE its callable expects.
+    """An occurrence-head loss together with the one thing about it the caller still has to know.
 
-    The space is returned rather than documented because the four binary losses genuinely disagree, and every
-    mismatch is silent: a probability fed to a logit loss is sigmoided twice, a logit fed to ``brier_loss`` is
-    scored against 0/1 labels on an unbounded axis, and a single map fed to ``crps_binary`` yields a zero spread
-    term. The module reads ``expects`` and hands over the matching tensor.
+    Every binary loss takes LOGITS, so the input SPACE needs no flag — the head emits one tensor and hands it to
+    whichever loss was sampled. What still differs is the SHAPE: ``crps_binary`` needs an ensemble
+    ``[N, *spatial]`` while the other three take the head output as-is. That distinction cannot be made structural,
+    because a plain ``[B, H, W]`` batch handed to ``crps_binary`` is a valid B-member ensemble as far as the tensor
+    shapes are concerned — it would return a number, computed over the wrong axis.
     """
     fn: Callable
-    expects: str                    # 'logits' | 'probabilities' | 'samples'
+    needs_ensemble: bool            # crps_binary only: the callable's first argument is [N, *spatial]
 
 
 def build_regression_loss(loss_config: dict) -> Callable:
@@ -389,14 +407,14 @@ def build_regression_loss(loss_config: dict) -> Callable:
 
 
 def build_binary_loss(loss_config: dict) -> BinaryLoss:
-    """Build the occurrence-head loss from a trial's ``occurrence_head`` section, tagged with its input space.
+    """Build the occurrence-head loss from a trial's ``occurrence_head`` section. Every option takes LOGITS.
 
     Args:
         loss_config: Sampled ``occurrence_head`` section — ``loss``, plus ``positive_class_weight`` /
             ``focal_gamma`` for ``focal_bce`` and ``dice_smooth`` for ``dice``.
 
     Returns:
-        :class:`BinaryLoss` — the callable and the space it expects (``logits``, ``probabilities`` or ``samples``).
+        :class:`BinaryLoss` — the callable and whether its first argument is an ensemble.
 
     Raises:
         ValueError: On a name outside :data:`BINARY_LOSSES`.
@@ -412,14 +430,16 @@ def build_binary_loss(loss_config: dict) -> BinaryLoss:
             lambda logits, target: focal_bce_with_logits(
                 logits, target.float(), focal_gamma=gamma, positive_class_weight=pos_weight
             ),
-            'logits'
+            needs_ensemble=False
         )
     if name == 'dice':
         smooth = float(loss_config.get('dice_smooth', 1.0))
-        return BinaryLoss(lambda logits, target: dice_loss(logits, target.float(), smooth=smooth), 'logits')
+        return BinaryLoss(
+            lambda logits, target: dice_loss(logits, target.float(), smooth=smooth), needs_ensemble=False
+        )
     if name == 'brier':
-        return BinaryLoss(brier_loss, 'probabilities')
-    return BinaryLoss(crps_binary, 'samples')
+        return BinaryLoss(brier_loss, needs_ensemble=False)
+    return BinaryLoss(crps_binary, needs_ensemble=True)
 
 
 def build_ensemble_loss(finetuning_config: dict) -> Callable:
