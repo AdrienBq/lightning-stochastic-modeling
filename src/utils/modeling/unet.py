@@ -1,13 +1,13 @@
-"""Configurable U-net backbone and the (optionally hierarchical) prediction network, shared by all three families.
+"""Configurable U-net backbone and the single-head prediction network, shared by all three families.
 
 The architecture hyperparameters mirror the ``unet`` section of each family's config/<family>/search_space.yaml:
 depth, base channels, kernel size, blocks per level, normalization, activation, dropout, upsampling mode,
 skip connections and an optional multi-head self-attention block at the bottleneck (cheap at this grid size,
 ~7x10 tokens at depth 4 on the 0.25-degree European domain).
 
-``DeterministicUnetNet`` adds a 1x1 regression head and, when the hierarchy is enabled, an occurrence-classifier
-head, either sharing the trunk (``shared_encoder``) or with its own backbone (``standalone_unet``). Inputs are
-padded internally to a multiple of ``2 ** depth`` and outputs cropped back, so any grid size is accepted.
+``DeterministicUnetNet`` adds ONE 1x1 output head, whose meaning the LightningModule fixes from the data's ``mode``
+(hours in daily, an occurrence logit in hourly), plus the two optional calibration layers. Inputs are padded
+internally to a multiple of ``2 ** depth`` and outputs cropped back, so any grid size is accepted.
 
 ONE backbone, three families. The deterministic U-net trains it directly; MC-dropout re-runs it with dropout left
 active at inference (:func:`enable_mc_dropout`); diffusion conditions it on the flow state. Nothing here is
@@ -18,7 +18,7 @@ family-specific, which is what keeps the three comparable at equal architecture:
 - ``Fp32BilinearUpsample`` is PARAMETER-FREE, so a checkpoint is interchangeable with one trained against a plain
   ``nn.Upsample``. That is what lets MC-dropout warm-start from a deterministic U-net checkpoint.
 """
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -208,14 +208,18 @@ class UNetBackbone(nn.Module):
 
 
 class PlattScaling(nn.Module):
-    """Classical Platt scaling of a classifier logit: ``z -> weight * z + bias``, two learnable scalars applied
+    """Classical Platt scaling of an occurrence logit: ``z -> weight * z + bias``, two learnable scalars applied
     BEFORE the sigmoid, so the calibrated probability is ``sigmoid(weight * z + bias)``. Initialised to the
     identity so that enabling it leaves the pre-calibration logit unchanged until its dedicated training phase
     fits the scalars (plain BCE, with the rest of the backbone frozen).
 
-    The map is monotonic in the logit, so it leaves the classifier's RANKING (and therefore a recall-calibrated
-    hard occurrence mask) untouched; it recalibrates the probabilities themselves (Brier/reliability, and the
-    soft-masked prediction).
+    HOURLY MODE ONLY: it calibrates the single head's logit, which is where the classification task lives. In daily
+    mode the head emits hours and there is no logit to scale — see :class:`MonotoneCalibration` for that task's
+    calibrator.
+
+    The map is monotonic in the logit, so it leaves the RANKING untouched (hence ``roc_auc`` and
+    ``average_precision`` are invariant to it); what it moves is the probabilities themselves — Brier, reliability
+    and explained deviance.
     """
 
     def __init__(self):
@@ -284,29 +288,35 @@ class MonotoneCalibration(nn.Module):
 
 
 class DeterministicUnetNet(nn.Module):
-    """U-net regressor with an optional occurrence-classifier head (the top level of the hierarchy) and optional
-    post-hoc calibration layers: Platt scaling on the classifier logits and a monotone calibration on the
-    regression output. Each is fitted in its own phase with the rest of the backbone frozen.
+    """U-net with a SINGLE output head, plus the two optional post-hoc calibration layers. Each calibrator is
+    fitted in its own final phase with the rest of the backbone frozen, and exactly one of them can exist in a
+    given run because which is meaningful follows from the task (see the two classes above).
+
+    ONE HEAD, BY DESIGN. There was formerly a second, occurrence-classifier head that gated the regression output.
+    It is gone: it answers an unbounded count target, whereas this one is bounded 0-24 where the regression covers
+    the zeros directly, and in hourly mode THIS head already emits the occurrence logit — a second identical
+    ``Conv2d(base, 1, 1)`` would only produce a redundant probability. What the head's output MEANS is decided by
+    the LightningModule from the data's ``mode``, not here.
 
     Args:
         in_channels: Number of input channels.
         unet_config: The ``unet`` section of a sampled trial.
-        classifier_architecture: ``None`` (hierarchy disabled), ``shared_encoder`` (classification head on the
-            shared trunk) or ``standalone_unet`` (dedicated backbone for the classifier).
-        classifier_calibration: Whether to append a :class:`PlattScaling` layer to the classifier logits.
-            Ignored when there is no classifier head.
+        output_calibration: Whether to append a :class:`PlattScaling` layer to the head's logit. HOURLY mode only —
+            in daily mode the head emits hours, and there is no logit to scale.
         regression_calibration: ``None`` / falsy to disable, else a dict ``{'structure': ..., 'num_sigmoids':
-            ...}`` selecting a :class:`MonotoneCalibration` for the regression output (``structure == 'none'``
-            also disables it). The layer is owned here (so it is checkpointed and discoverable) but APPLIED by
-            the LightningModule after the regression activation, where the prediction is non-negative.
+            ...}`` selecting a :class:`MonotoneCalibration` for the predicted hours (``structure == 'none'`` also
+            disables it). DAILY mode only. The layer is owned here (so it is checkpointed and discoverable) but
+            APPLIED by the LightningModule after the output activation, where the prediction is non-negative.
+
+    Both calibrators live HERE rather than on the module so they travel inside ``net.state_dict()`` — which is what
+    a warm start loads (``MCDropoutModule.from_upstream``). A module-level layer would be silently dropped by it.
     """
 
     def __init__(
             self,
             in_channels: int,
             unet_config: dict,
-            classifier_architecture: Optional[str] = None,
-            classifier_calibration: bool = False,
+            output_calibration: bool = False,
             regression_calibration: Optional[dict] = None
     ):
         super().__init__()
@@ -314,25 +324,9 @@ class DeterministicUnetNet(nn.Module):
         self.pad_multiple = 2 ** int(unet_config['depth'])
 
         self.backbone = UNetBackbone(in_channels, unet_config)
-        self.regression_head = nn.Conv2d(base, 1, kernel_size=1)
+        self.head = nn.Conv2d(base, 1, kernel_size=1)
 
-        self.classifier_architecture = classifier_architecture
-        self.classifier_backbone = None
-        self.classifier_head = None
-        if classifier_architecture == 'shared_encoder':
-            self.classifier_head = nn.Conv2d(base, 1, kernel_size=1)
-        elif classifier_architecture == 'standalone_unet':
-            self.classifier_backbone = UNetBackbone(in_channels, unet_config)
-            self.classifier_head = nn.Conv2d(base, 1, kernel_size=1)
-        elif classifier_architecture is not None:
-            raise ValueError(
-                f'Unknown classifier architecture "{classifier_architecture}" '
-                f'(expected "shared_encoder" or "standalone_unet").'
-            )
-
-        # Platt scaling only applies to the classifier; it is a no-op without a classifier head
-        self.classifier_calibration = PlattScaling() \
-            if (classifier_calibration and self.classifier_head is not None) else None
+        self.output_calibration = PlattScaling() if output_calibration else None
 
         regression_calibration = regression_calibration or {}
         structure = regression_calibration.get('structure', 'none')
@@ -340,39 +334,31 @@ class DeterministicUnetNet(nn.Module):
             structure, int(regression_calibration.get('num_sigmoids', 4))
         ) if structure and structure != 'none' else None
 
-    def classifier_parameters(self):
-        """Parameters belonging exclusively to the classifier level (for sequential-phase freezing)."""
-        modules = [m for m in (self.classifier_backbone, self.classifier_head) if m is not None]
-        for module in modules:
-            yield from module.parameters()
-
-    def classifier_calibration_parameters(self):
-        """Parameters of the classifier Platt layer (calibration-phase freezing); empty when disabled."""
-        if self.classifier_calibration is not None:
-            yield from self.classifier_calibration.parameters()
+    def output_calibration_parameters(self):
+        """Parameters of the Platt layer (calibration-phase freezing); empty when disabled."""
+        if self.output_calibration is not None:
+            yield from self.output_calibration.parameters()
 
     def regression_calibration_parameters(self):
         """Parameters of the monotone regression calibrator (calibration-phase freezing); empty when disabled."""
         if self.regression_calibration is not None:
             yield from self.regression_calibration.parameters()
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Raw head output, ``[B, H, W]`` — hours-to-be-activated in daily mode, an occurrence logit in hourly.
+
+        Platt scaling is applied here because it is affine in the logit and belongs before the sigmoid; it is
+        ``None`` outside hourly mode, so no branch on the task is needed.
+        """
         height, width = x.shape[-2:]
         pad_h = (-height) % self.pad_multiple
         pad_w = (-width) % self.pad_multiple
         if pad_h or pad_w:
             x = F.pad(x, (0, pad_w, 0, pad_h), mode='replicate')
 
-        features = self.backbone(x)
-        regression = self.regression_head(features).squeeze(1)[..., :height, :width]
-
-        classifier_logits = None
-        if self.classifier_head is not None:
-            cls_features = features if self.classifier_backbone is None else self.classifier_backbone(x)
-            classifier_logits = self.classifier_head(cls_features).squeeze(1)[..., :height, :width]
-            if self.classifier_calibration is not None:     # Platt scaling of the classifier logits
-                classifier_logits = self.classifier_calibration(classifier_logits)
-
-        # NOTE: the monotone regression calibration is applied by the LightningModule AFTER the regression
-        # activation (where the prediction is non-negative), not here on the raw head output.
-        return regression, classifier_logits
+        output = self.head(self.backbone(x)).squeeze(1)[..., :height, :width]
+        if self.output_calibration is not None:
+            output = self.output_calibration(output)
+        # NOTE: the monotone regression calibration is applied by the LightningModule AFTER the output activation,
+        # where the prediction is non-negative — not here on the raw head output.
+        return output
