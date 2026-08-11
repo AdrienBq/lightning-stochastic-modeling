@@ -362,6 +362,60 @@ def crps_binary(logit_samples: torch.Tensor, target: torch.Tensor) -> torch.Tens
 
 
 # ----------------------------------------------------------------------------------------------------------------
+# CALIBRATION OBJECTIVES — reached by `calibration.regression.objective`, NOT by `loss.name`
+#
+# These fit the MonotoneCalibration layer (unet.py) in its own final phase with the backbone frozen. They are
+# deliberately absent from REGRESSION_LOSSES: they are not selectable as a backbone loss, and that tuple is asserted
+# set-equal to the search spaces' `loss.name` choices.
+#
+# ⚠️ They take (pred, target, mask, delta) and NOT the (pred, target, weights, mask) of every other pointwise loss
+# ⚠️ here. The missing `weights` is the point, not an oversight: the calibrator is fitted with a PLAIN, SYMMETRIC
+# ⚠️ objective precisely so it is decoupled from the intensity-weighted backbone loss — sharing that weighting would
+# ⚠️ let the monotone map relearn the identity instead of correcting the backbone's systematic distortion. A
+# ⚠️ `weights` parameter would invite the one thing the design rules out.
+# ----------------------------------------------------------------------------------------------------------------
+def log1p_huber(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor, delta: float) -> torch.Tensor:
+    """Mean Huber loss on the ``log1p`` residual over the masked cells.
+
+    The log1p compression makes the loss scale-robust across the target's wide dynamic range; Huber makes it
+    extremes-robust. log1p space is valid here BECAUSE the target is non-negative — there is no signed transformed
+    space any more, so the earlier count-regression objection to this objective no longer applies.
+
+    Args:
+        pred: Predicted target, non-negative (clamped defensively).
+        target: Observed target, non-negative.
+        mask: Cells that contribute; typically ``target > 0`` (the calibrator is fitted on observed positives).
+        delta: Huber transition width in log1p space (~a factor e at ``delta = 1``).
+    """
+    residual = torch.log1p(pred.clamp(min=0.0)) - torch.log1p(target.clamp(min=0.0))
+    absolute = residual.abs()
+    elementwise = torch.where(absolute <= delta, 0.5 * residual ** 2, delta * (absolute - 0.5 * delta))
+    # reduces through the shared helper like every other pointwise loss, at unit weights: the normalizer is then the
+    # masked cell count, which is what a plain (unweighted) objective wants
+    return _weighted_masked_mean(elementwise, torch.ones_like(elementwise), mask.to(elementwise.dtype))
+
+
+def log1p_huber_quantile(pred: torch.Tensor, target: torch.Tensor, mask: torch.Tensor,
+                         delta: float) -> torch.Tensor:
+    """Marginal quantile-matching variant of :func:`log1p_huber`: the same log1p-Huber, but between the SORTED
+    masked prediction and the SORTED masked observation.
+
+    Sorting each marginal independently and pairing by rank is 1-D quantile mapping (discrete optimal transport), so
+    minimizing it realigns the prediction's marginal QUANTILES onto the observation's — classical bias correction —
+    rather than correcting each cell pointwise. Same signature as :func:`log1p_huber`, so the two are interchangeable
+    as the ``calibration.regression.objective``.
+
+    ⚠️ The sort population is whatever tensor it is handed, so a per-batch training call and a per-epoch validation
+    call do NOT return the same number. That is intended — each realigns the marginals it can see — but it means only
+    the pointwise objective is comparable across the two.
+    """
+    mask = mask.bool()
+    pred_sorted = torch.sort(pred[mask])[0]
+    target_sorted = torch.sort(target[mask])[0]
+    return log1p_huber(pred_sorted, target_sorted, torch.ones_like(pred_sorted), delta)
+
+
+# ----------------------------------------------------------------------------------------------------------------
 # builders
 # ----------------------------------------------------------------------------------------------------------------
 class BinaryLoss(NamedTuple):

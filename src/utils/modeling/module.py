@@ -48,7 +48,8 @@ import torch.nn.functional as F
 
 from src.utils.io.data import MODE_HOURLY, normalize_mode
 from src.utils.modeling.losses import (
-    BINARY_LOSSES, REGRESSION_LOSSES, build_binary_loss, build_regression_loss, intensity_weights
+    BINARY_LOSSES, REGRESSION_LOSSES, build_binary_loss, build_regression_loss, intensity_weights,
+    log1p_huber, log1p_huber_quantile
 )
 from src.utils.modeling.unet import DeterministicUnetNet, PlattScaling
 from src.utils.modeling.validation import (
@@ -63,34 +64,6 @@ PHASES = ('train', 'occurrence_calibration', 'regression_calibration')
 
 # Written into every checkpoint and read back by registry.load_model_module to dispatch the evaluation stage.
 CHECKPOINT_MARKER = 'deterministic_unet'
-
-
-def log1p_huber(residual_pred: torch.Tensor, residual_obs: torch.Tensor, mask: torch.Tensor,
-                delta: float) -> torch.Tensor:
-    """Mean Huber loss on the ``log1p`` residual over the masked cells. The log1p compression makes the loss
-    scale-robust across the target's wide dynamic range; Huber makes it extremes-robust. Plain and symmetric
-    (no intensity weighting, no asymmetry): the regression calibrator is deliberately fitted with a different
-    objective than the intensity-weighted backbone loss, so it does real work rather than relearning the identity.
-
-    log1p space is valid here because the target is non-negative — there is no signed transformed space any more."""
-    residual = torch.log1p(residual_pred.clamp(min=0.0)) - torch.log1p(residual_obs.clamp(min=0.0))
-    absolute = residual.abs()
-    elementwise = torch.where(absolute <= delta, 0.5 * residual ** 2, delta * (absolute - 0.5 * delta))
-    mask = mask.to(elementwise.dtype)
-    return (elementwise * mask).sum() / mask.sum().clamp(min=1.0)
-
-
-def log1p_huber_quantile(prediction: torch.Tensor, observation: torch.Tensor, mask: torch.Tensor,
-                         delta: float) -> torch.Tensor:
-    """Marginal quantile-matching variant of :func:`log1p_huber`: the same log1p-Huber, but between the SORTED
-    masked prediction and the SORTED masked observation. Sorting each marginal independently and pairing by rank
-    is 1-D quantile mapping (discrete optimal transport), so minimizing it realigns the prediction's marginal
-    QUANTILES onto the observation's — classical bias correction — rather than correcting each cell pointwise.
-    Same signature as :func:`log1p_huber` so the two are interchangeable as the calibration objective."""
-    mask = mask.bool()
-    prediction_sorted = torch.sort(prediction[mask])[0]
-    observation_sorted = torch.sort(observation[mask])[0]
-    return log1p_huber(prediction_sorted, observation_sorted, torch.ones_like(prediction_sorted), delta)
 
 
 class DeterministicUnetModule(L.LightningModule):
@@ -430,8 +403,14 @@ class DeterministicUnetModule(L.LightningModule):
 
     def _validation_reg_calibration(self, prediction: np.ndarray, observation: np.ndarray,
                                     occurrence: np.ndarray) -> float:
-        """Validation log1p-Huber on observed-positive cells — the numpy mirror of the objective the
-        regression-calibration phase fits, including its pointwise-vs-quantile pairing."""
+        """Validation log1p-Huber on observed-positive cells — the numpy mirror of :func:`losses.log1p_huber`, whose
+        torch original the regression-calibration phase minimizes. Mirrors its pointwise-vs-quantile pairing too, so
+        the monitored metric selects the checkpoint that phase actually improved.
+
+        ⚠️ TWO IMPLEMENTATIONS OF ONE FORMULA, which is the divergence risk this repo names elsewhere (the CRPS in
+        losses.py vs scores.py). numpy is needed here because validation accumulates numpy arrays. The gate asserts
+        this agrees with ``losses.log1p_huber`` on the POINTWISE objective; the quantile pair is deliberately NOT
+        asserted equal, because the torch loss sorts per BATCH while this sorts the whole EPOCH."""
         if not occurrence.any():
             return 0.0
         delta = self.regression_calibration_huber_delta
