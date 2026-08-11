@@ -127,7 +127,7 @@ stages:
         progress-bar: true
 
     # ------------------------------------------------------------------------------------------------------------
-    # 4) Evaluation and reporting -- THE common evaluation. registry.load_regression_module dispatches the family
+    # 4) Evaluation and reporting -- THE common evaluation. registry.load_model_module dispatches the family
     # from the checkpoint marker, and the SAME metric suite runs for every family, so tabulate_metrics can put them
     # in one table with identical metric-key columns. Writes a flat JSON of scalars (auto-logged to mlflow via
     # metrics-path) and a report directory of figures + CSVs (auto-logged via report-path).

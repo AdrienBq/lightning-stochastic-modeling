@@ -18,29 +18,37 @@
 # =====================================================================================================================
 
 # ---------------------------------------------------------------------------------------------------------------------
-# RESIDUAL (knowledge-guided) mode. When true, the model does not learn the target: it learns the DISCREPANCY between
+# RESIDUAL (knowledge-guided) mode. When on, the model does not learn the target: it learns the DISCREPANCY between
 # the observation and an upstream deterministic_unet prediction, and returns clamp(upstream + residual, 0, max_hours).
 #
-# Requirements, all checked at load time:
-#   * the prepared directory must have been built WITH `upstream-model-path` set (config/diffusion/diffusion.yaml), so that
-#     upstream/<date>.npy maps exist and the directory is flagged residual;
-#   * the upstream prediction is appended as the LAST conditioning channel and passed as a third batch item,
-#     (x_cond, y, upstream); the channel count is validated against feature_mean.shape[0].
-# Toggling this changes the input channel count, so switch output directories (or set overwrite: true on prepare)
+# ⛔ THERE IS NO `residual_target:` KEY, and there must not be. It is a property of the PREPARED DIRECTORY, not a
+# ⛔ hyperparameter: the mode exists only if prepare_regression was given `upstream-model-path`, which is what
+# ⛔ materialises upstream/<date>.npy, appends the upstream prediction as the LAST conditioning channel and makes the
+# ⛔ dataset yield a third batch item (x_cond, y, upstream). Sampling it per trial would make roughly half of every
+# ⛔ sweep's trials ask for a mode the data cannot provide, and they would fail on the channel count rather than
+# ⛔ train. diffusion_module.py reads it from target_stats instead, like dataset.py already does.
+#
+# So ONE PIPELINE RUN IS ONE MODE, chosen by the environment:
+#     UPSTREAM_MODEL set   -> residual        UPSTREAM_MODEL unset -> full target
+# Switching changes the input channel count, so switch output directories (or set overwrite: true on prepare)
 # rather than reusing a directory prepared for the other setting.
 # ---------------------------------------------------------------------------------------------------------------------
-residual_target: {type: categorical, choices: [true, false]}
 
 # ---------------------------------------------------------------------------------------------------------------------
 # Flow-matching backbone + ODE sampling.
-# Constraints satisfied by construction below: hidden_dim is divisible by the head count and by 4 (2-D positional
+# Constraints satisfied by construction below: hidden_dim is divisible by num_heads and by 4 (the 2-D positional
 # embedding), and patch_size is a power of two.
 # ---------------------------------------------------------------------------------------------------------------------
 flow:
     n_steps: {type: int, low: 8, high: 32}              # Euler ODE integration steps during validation scoring;
                                                         # evaluate_regression overrides with `sampling-steps`
     hidden_dim: {type: categorical, choices: [128, 256]} # token (model) width
-    n_blocks: {type: int, low: 2, high: 6}              # DiTBlock count
+    n_blocks: {type: int, low: 2, high: 6}              # DiTBlock count. Named n_blocks rather than `depth`
+                                                        # because `depth` already means the down/upsampling level
+                                                        # count in the other families' `unet` block; the module
+                                                        # translates it (see DiffusionModule._net_config).
+    num_heads: 4                                        # FIXED, and REQUIRED by FlowVelocityNet: both hidden_dim
+                                                        # choices divide by 4, giving 32- or 64-wide heads.
     patch_size: {type: categorical, choices: [1, 2]}    # stem stride / token-grid coarsening (power of two).
                                                         # 1 = full resolution: the 101 x 149 grid is small enough
                                                         # that this is affordable, and coarse patches are exactly
@@ -48,9 +56,17 @@ flow:
                                                         # measure.
 
 # ---------------------------------------------------------------------------------------------------------------------
-# Target-space loss terms. Identical set and rationale to the deterministic family (see that file); on the residual
-# path they apply to clamp(upstream + residual), i.e. always in the target space, never to the raw discrepancy.
-# intensity_weight_gamma's lower bound MUST stay 0.0.
+# ⛔ THIS BLOCK IS NOT THE TRAINING OBJECTIVE OF THIS FAMILY, and diffusion_module.py does not read it.
+#
+# The flow trains on the velocity MSE alone: one forward pass predicts v(x_t, t, cond) against the straight-path
+# target x1 - z. That objective lives in the generation space and never forms a lightning-hours map. Applying any
+# term below would first require a PREDICTION, and this family only produces one by integrating the ODE —
+# `flow.n_steps` (8-32) forward passes per training step, with the gradient threaded through the whole Euler chain,
+# i.e. roughly an order of magnitude slower per trial.
+#
+# The block is kept for skeleton parity with the other two families (same file shape, same keys, same names), and
+# because the target-space composite under `selection:` IS what trials are ranked on — but that is computed from ODE
+# draws on the validation split, not from this section. Do not add a `loss.name` here expecting it to train.
 # ---------------------------------------------------------------------------------------------------------------------
 loss:
     name: {type: categorical, choices: [weighted_mae, weighted_rmse, weighted_mse, asymmetric_huber, wmae_psd, wmse_psd]}

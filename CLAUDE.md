@@ -69,7 +69,7 @@ $DATA_ROOT/
 ## Design invariants
 
 - **One evaluation for all families.** `evaluate_regression` is the single eval stage;
-  `registry.load_regression_module` dispatches by checkpoint marker (with `_sniff_family` as the legacy fallback).
+  `registry.load_model_module` dispatches by checkpoint marker (with `_sniff_family` as the legacy fallback).
   Never add a family-specific evaluation path.
 - **The ensemble contract.** `predict_step(batch, idx)` returns a dict with `observation` `[B,H,W]`, `prediction`
   `[B,H,W]` (the ensemble *mean* for stochastic families), and `ensemble_members` `[B,M,H,W]` only when the family

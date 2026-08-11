@@ -19,7 +19,7 @@ description: 'Cross-family comparison: one evaluation, one metric table, one set
 # config/deterministic_unet/deterministic_unet.yaml, config/mc_dropout/mc_dropout.yaml and config/diffusion/diffusion.yaml first, then this.
 #
 # What makes it a proof: every `evaluate_regression` call below is the SAME stage with the SAME metrics-config.
-# registry.load_regression_module dispatches the family from the checkpoint marker (with _sniff_family as the legacy
+# registry.load_model_module dispatches the family from the checkpoint marker (with _sniff_family as the legacy
 # fallback) and wraps MC-dropout in MCDropoutEnsembleModule so it satisfies the shared ensemble contract. Therefore
 # tabulate_metrics MUST emit one CSV whose metric-key COLUMNS ARE IDENTICAL across the three families. If they are
 # not, the pipelines are not actually merged.
