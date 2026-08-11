@@ -465,8 +465,8 @@ def build_binary_loss(loss_config: dict) -> BinaryLoss:
 
     This is the MAIN loss of the hourly classification task, not an auxiliary head's: it reads the same ``loss``
     section and the same ``name`` key as :func:`build_regression_loss`, and ``mode`` selects between the two
-    builders (see ``module.py``). Keeping the two signatures aligned is what lets the module dispatch on the mode
-    alone, with no second config key.
+    builders (see ``unet_module_base.py``). Keeping the two signatures aligned is what lets the module dispatch on
+    the mode alone, with no second config key.
 
     Args:
         loss_config: Sampled ``loss`` section — ``name``, plus ``positive_class_weight`` / ``focal_gamma`` for
