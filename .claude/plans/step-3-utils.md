@@ -35,9 +35,11 @@ above it):
 | **4** | **Plotting** | `plotting/` figure functions per the 02a spec | new, from [`inventory-figures.md`](inventory-figures.md) §1 |
 
 **Already in the template — do NOT rebuild:** `io/lazy.py`, `io/parse_config.py`, `seeding.py`, `banner.py`,
-`plotting/__init__.py` (`show_plot_and_save`), `plotting/palettes.py`. The template's versions are an evolved
-superset of A's.
-Update the plotting/palettes.py to include the 02a specs
+`plotting/__init__.py` (`show_plot_and_save`), `plotting/palettes.py`. The template's versions are
+**byte-identical** to A's (md5-checked), not an evolved superset.
+
+~~Update the plotting/palettes.py to include the 02a specs~~ — **not done, by decision.** The 02a colours live in
+`plotting/maps.py` beside their only consumer, `make_lightning_cmap`; see Block 4 for the reasoning.
 
 **Verification after every block:** `python -c "import ..."` on the touched module, plus `pytest` on its ported
 tests. The end-to-end smoke run is Step 4's gate — nothing here is runnable on its own.
@@ -445,12 +447,62 @@ bespoke accumulator.
 - Rank trials on the target-space composite, **not** `valid_flow_loss` — the flow loss lives in the generation
   space and says nothing about occurrence skill or structure fidelity.
 
-## 4. Plotting
+## 4. Plotting — ✅ DONE (98/98 gate checks)
 
 Figure functions in `src/utils/plotting/`, built to the 02a spec
 ([`inventory-figures.md`](inventory-figures.md) §1) on top of the template's existing `show_plot_and_save` and
 `palettes`. Keep `_geographic_context` and `_select_plot_indices`; add `make_lightning_cmap`, `draw_map`,
 `draw_diff_map`. **Notebooks are not ported.**
+
+**Most of this shipped early, inside Block 2.** Restyling `reporting.py` to the 02a grammar is not separable from
+writing the grammar, so `src/utils/plotting/maps.py` (the colour system, the projection, `draw_map` /
+`draw_diff_map` / `add_shared_diff_colorbars`) landed with the metric suite in commit `1133cb6`, and all fourteen
+figures came with it. What was left for this block was therefore an audit against §1 plus the gate — and the audit
+found one real deviation:
+
+- 🐛 **cartopy was still optional.** `geographic_context` caught `ImportError` and returned `(None, None)`, and six
+  call sites branched on it, against §5 answer 2 ("keep cartopy as a hard requirement"). cartopy is a hard
+  dependency in `minimal_requirements.txt:39`, so the fallback was unreachable in any working install and reachable
+  only in a broken one — where it would emit figures in raw pixel indices that look plausible and are not maps,
+  which is exactly what makes branch D's reporting unusable (§3). Fixed: module-scope `import cartopy.crs as ccrs`,
+  the fallback deleted, and the dead `is not None` branches collapsed in `maps.py` and `reporting.py`.
+  `projection` also leaves `draw_map` / `draw_diff_map` / `frame_map_axis`, whose only use for it was the `is None`
+  test; axis construction still takes it.
+
+### Two ambiguities resolved
+
+1. **§5 answer 1, "Discard coastlines", meant discard BORDERS.** The question offered "add borders" or "coastlines
+   only" and the answer named neither, so it read as removing the basemap entirely. Confirmed with the user
+   (2026-08-12): **coastlines stay, country borders are not added.** The gate pins both halves, so neither drifts.
+2. **The 02a colours stay in `maps.py`, not `palettes.py`** — a deliberate departure from this file's line 40. The
+   warm/cool/grey ramps define the *lightning-hours value axis* and have exactly one consumer,
+   `make_lightning_cmap`, in the same file; `palettes.py` holds the general-purpose IBM/Tol design libraries that
+   reach the line figures through the `rcParams` prop cycle. Moving them would separate `make_lightning_cmap` from
+   its own data for no second caller. `palettes.py` is therefore untouched by Step 3.
+
+**Known gap, deliberately left open** (inventory-figures.md §4): `make_lightning_cmap` has no probability scale, so
+an hourly run's maps collapse to two colours (`nanmax(obs) == 1` ⇒ levels `[0, 0.5, 1]`). By decision, not oversight.
+
+**Gate** (`gate_block4.py`, 98 checks) — the emphasis is on what no metric can catch, because every score in this
+repo is computed on the arrays rather than on the rendered picture:
+
+- **The north-edge claim, proved end to end by rasterising.** Two probes light one array row each, north and south,
+  and their painted centroids are compared in image coordinates. Mutation-tested: flipping `origin` to `'lower'`
+  trips five checks. Not readable off the artifact — cartopy regrids the field into the target CRS and re-emits it
+  as `origin='lower'` in projected metres — so the source kwargs are checked by AST alongside, and the
+  reprojection itself is pinned so nobody "fixes" the source to match what they see.
+- Rows are chosen inside the displayed window: §5 answer 5 crops the view at 55 °N, which hides the **top ~20 array
+  rows** of every map. The gate asserts that crop, so it stays a decision rather than a surprise.
+- The colour axis: 26 boundaries / 25 bands at `max_val = 24`, white `[0, 0.5)`, grey `[0.5, 1)`, ceil-rounding, the
+  degenerate `max_val <= 1` floor, and warm/cool sharing an identical boundary array (the comparability invariant
+  the two diff colorbars rest on).
+- The over/under encoding, tested **behaviourally**: a field that over-predicts west of 7.5 °E and under-predicts
+  east of it must come out red on the left and blue on the right, and `pred == obs` must render warm — otherwise a
+  perfect forecast reads as under-prediction. Swapping the two masks trips both checks.
+- Both layouts (panel and colorbar counts, figsize, the `M = 2` smoke case blanking its third slot), the std panel's
+  vmax being **derived from the day** rather than 02b's hardcoded `vmax=8` (§5 issue 2), the PSD figure's kilometre
+  axis and inverted x, and `metrics.yaml` ⇄ `write_report` parity in **both** directions (no unconfigured builder,
+  no undispatched figure, `qq_plot` absent from both).
 
 ---
 

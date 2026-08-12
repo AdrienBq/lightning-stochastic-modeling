@@ -22,13 +22,11 @@ Three ideas carry the grammar:
 The colour scale is observation-driven and PER DATE (``max_val = ceil(nanmax(obs))``), so every panel of one
 figure shares a scale; panels from different days deliberately do not.
 """
-import logging
 from typing import NamedTuple, Optional, Sequence, Tuple
 
+import cartopy.crs as ccrs
 import numpy as np
 from matplotlib.colors import BoundaryNorm, ListedColormap
-
-logger = logging.getLogger(__name__)
 
 # The ERA5 domain, from metadata.json: 0.25 deg, 35-60 N / -12-25 E on a 101 x 149 grid, array row 0 = NORTH edge.
 GRID_EXTENT = (-12.0, 25.0, 35.0, 60.0)              # (lon_min, lon_max, lat_min, lat_max) of the DATA
@@ -110,34 +108,30 @@ def make_lightning_scales(max_val: float) -> LightningScales:
 def geographic_context():
     """Return ``(axes projection, data transform)`` for the maps — cartopy ``EuroPP`` over ``PlateCarree`` data.
 
-    Returns ``(None, None)`` when cartopy is unavailable, in which case the callers fall back to plain
-    non-geographic axes so a missing optional dependency degrades the figures rather than losing the run.
+    cartopy is a HARD requirement (``minimal_requirements.txt``: ``cartopy>=0.22,<1``), so this never degrades to
+    plain axes: a missing install raises at import. The alternative — silently dropping the projection — would emit
+    figures in raw pixel indices that look plausible but are not maps, which is exactly what makes branch D's
+    reporting unusable (see inventory-figures.md §3).
     """
-    try:
-        import cartopy.crs as ccrs
-    except Exception as error:                       # cartopy is an optional dependency
-        logger.warning(f'cartopy unavailable ({error}); maps render without the CRS projection / basemap.')
-        return None, None
     return ccrs.EuroPP(), ccrs.PlateCarree()
 
 
 def add_map_axis(figure, spec, projection):
-    """Add a map axis at a gridspec slot (a geographic GeoAxes when a projection is available)."""
-    return figure.add_subplot(spec, projection=projection) if projection is not None \
-        else figure.add_subplot(spec)
+    """Add a geographic ``GeoAxes`` at a gridspec slot."""
+    return figure.add_subplot(spec, projection=projection)
 
 
-def frame_map_axis(ax, title: str, left_labels: bool, projection, data_crs) -> None:
+def frame_map_axis(ax, title: str, left_labels: bool, data_crs) -> None:
     """Apply the 02a framing: display extent, coastlines, equal aspect and dashed labelled gridlines.
 
     Latitude labels are drawn only on the LEFTMOST panel of a row (``left_labels``); top and right labels are always
     off. That keeps a 3-wide panel grid legible without repeating the same axis three times.
+
+    Coastlines only — no country borders. 02a draws neither and branch A draws both; the resolved decision
+    (inventory-figures.md §5) keeps the coast as the geographic anchor and leaves out political boundaries, whose
+    line density would compete with a field that is 99.93 % zero.
     """
     ax.set_title(title, fontsize=11)
-    if projection is None:
-        ax.set_xticks([])
-        ax.set_yticks([])
-        return
     ax.set_extent(DISPLAY_EXTENT, crs=data_crs)
     ax.coastlines(linewidth=0.8)
     ax.set_aspect('equal')
@@ -152,7 +146,6 @@ def draw_map(
         ax,
         data: np.ndarray,
         title: str,
-        projection,
         data_crs,
         cmap,
         norm=None,
@@ -162,15 +155,14 @@ def draw_map(
 ):
     """Draw one ``[H, W]`` field on a framed map axis. Returns the matplotlib image (for a colorbar).
 
-    ``origin='upper'`` is not optional: array row 0 is the NORTHERN edge of the domain, so flipping it would
-    silently mirror the field about the equator-ward axis.
+    ``origin='upper'`` is not optional, and pairs with ``extent=GRID_EXTENT`` whose last element is the NORTHERN
+    latitude: together they put array row 0 at the north edge of the domain. Flipping either would mirror the field
+    about the domain's mid-latitude — a change no metric would notice, since every score in this repo is computed on
+    the arrays rather than on the rendered map.
     """
-    if data_crs is not None:
-        image = ax.imshow(data, cmap=cmap, norm=norm, vmin=vmin, vmax=vmax,
-                          origin='upper', transform=data_crs, extent=GRID_EXTENT)
-    else:
-        image = ax.imshow(data, cmap=cmap, norm=norm, vmin=vmin, vmax=vmax, origin='upper')
-    frame_map_axis(ax, title, left_labels, projection, data_crs)
+    image = ax.imshow(data, cmap=cmap, norm=norm, vmin=vmin, vmax=vmax,
+                      origin='upper', transform=data_crs, extent=GRID_EXTENT)
+    frame_map_axis(ax, title, left_labels, data_crs)
     return image
 
 
@@ -179,7 +171,6 @@ def draw_diff_map(
         prediction: np.ndarray,
         observation: np.ndarray,
         title: str,
-        projection,
         data_crs,
         scales: LightningScales,
         left_labels: bool = False
@@ -187,7 +178,10 @@ def draw_diff_map(
     """Draw a prediction with the over/under encoding: warm where ``pred >= obs``, cool where ``pred < obs``.
 
     The prediction is drawn TWICE under complementary masks, both on the shared value axis, so one panel conveys
-    magnitude and error direction simultaneously.
+    magnitude and error direction simultaneously. The two masks partition the grid exactly — ``<`` and ``>=`` are
+    complementary — so every cell is painted by exactly one layer and neither hides the other.
+
+    Note both layers show the PREDICTION; the observation only decides which palette each cell is drawn in.
     """
     over = np.ma.masked_where(prediction < observation, prediction)          # pred >= obs -> warm
     under = np.ma.masked_where(prediction >= observation, prediction)        # pred <  obs -> cool
@@ -195,11 +189,8 @@ def draw_diff_map(
             (over, scales.warm_cmap, scales.warm_norm),
             (under, scales.cool_cmap, scales.cool_norm),
     ):
-        if data_crs is not None:
-            ax.imshow(field, cmap=cmap, norm=norm, origin='upper', transform=data_crs, extent=GRID_EXTENT)
-        else:
-            ax.imshow(field, cmap=cmap, norm=norm, origin='upper')
-    frame_map_axis(ax, title, left_labels, projection, data_crs)
+        ax.imshow(field, cmap=cmap, norm=norm, origin='upper', transform=data_crs, extent=GRID_EXTENT)
+    frame_map_axis(ax, title, left_labels, data_crs)
 
 
 def add_shared_diff_colorbars(figure, scales: LightningScales, bottom: float, height: float) -> None:

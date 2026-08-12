@@ -127,10 +127,10 @@ def _deterministic_day_figure(observation, prediction, title, projection, data_c
     figure = plt.figure(figsize=(11, 5.5))
     grid = figure.add_gridspec(1, 2, left=0.05, right=0.80, top=0.88, bottom=0.10, wspace=0.05)
     figure.suptitle(title, fontsize=14, fontweight='bold')
-    draw_map(add_map_axis(figure, grid[0, 0], projection), observation, 'Observed', projection, data_crs,
+    draw_map(add_map_axis(figure, grid[0, 0], projection), observation, 'Observed', data_crs,
              scales.warm_cmap, scales.warm_norm, left_labels=True)
     draw_diff_map(add_map_axis(figure, grid[0, 1], projection), prediction, observation, 'Predicted',
-                  projection, data_crs, scales)
+                  data_crs, scales)
     add_shared_diff_colorbars(figure, scales, 0.10, 0.78)
     return figure
 
@@ -159,17 +159,17 @@ def _stochastic_day_figure(observation, mean, std, members, title, projection, d
                                hspace=hspace, wspace=0.05)
     figure.suptitle(title, fontsize=14, fontweight='bold')
 
-    draw_map(add_map_axis(figure, grid[0, 0], projection), observation, 'Observed', projection, data_crs,
+    draw_map(add_map_axis(figure, grid[0, 0], projection), observation, 'Observed', data_crs,
              scales.warm_cmap, scales.warm_norm, left_labels=True)
     draw_diff_map(add_map_axis(figure, grid[0, 1], projection), mean, observation, 'Predicted (ensemble mean)',
-                  projection, data_crs, scales)
+                  data_crs, scales)
     std_image = draw_map(add_map_axis(figure, grid[0, 2], projection), std, 'Predicted (ensemble std)',
-                         projection, data_crs, 'viridis', norm=None, vmin=0)
+                         data_crs, 'viridis', norm=None, vmin=0)
     for column in range(n_cols):
         ax = add_map_axis(figure, grid[1, column], projection)
         if column < k:
             draw_diff_map(ax, chosen[column], observation, f'Member {int(chosen_index[column]) + 1}',
-                          projection, data_crs, scales, left_labels=(column == 0))
+                          data_crs, scales, left_labels=(column == 0))
         else:                                                            # fewer than 3 members: blank the slot
             ax.set_axis_off()
 
@@ -520,10 +520,8 @@ def _solid_cmap(color):
 
 
 def _residual_imshow(ax, data, cmap, norm, data_crs):
-    """imshow a signed ``[H, W]`` residual field, geographically transformed when a projection is available."""
-    if data_crs is not None:
-        return ax.imshow(data, cmap=cmap, norm=norm, origin='upper', transform=data_crs, extent=GRID_EXTENT)
-    return ax.imshow(data, cmap=cmap, norm=norm, origin='upper')
+    """imshow a signed ``[H, W]`` residual field on the same geographic footing as the lightning maps."""
+    return ax.imshow(data, cmap=cmap, norm=norm, origin='upper', transform=data_crs, extent=GRID_EXTENT)
 
 
 def _residual_map_panel(figure, spec, field, norm, projection, data_crs, title, specials=()):
@@ -536,12 +534,8 @@ def _residual_map_panel(figure, spec, field, norm, projection, data_crs, title, 
         if mask.any():
             overlay = np.ma.masked_where(~mask, np.ones(mask.shape, dtype=float))
             _residual_imshow(ax, overlay, _solid_cmap(color), Normalize(0.0, 1.0), data_crs)
-    if projection is not None:
-        ax.set_extent(DISPLAY_EXTENT, crs=data_crs)
-        ax.coastlines(linewidth=0.8)
-    else:
-        ax.set_xticks([])
-        ax.set_yticks([])
+    ax.set_extent(DISPLAY_EXTENT, crs=data_crs)
+    ax.coastlines(linewidth=0.8)
     ax.set_title(title, fontsize=9)
     return ax
 

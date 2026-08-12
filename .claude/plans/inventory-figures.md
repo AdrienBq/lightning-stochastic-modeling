@@ -273,3 +273,25 @@ Nothing in any of the three implementations covers these, and they'd be the natu
 3. drop
 4. Do not port the notebooks for now. We will make plotting functions in src.utils that are inspired by 02a
 5. don't make 55-60 °N visible
+
+### ⚠️ Clarification of answer 1 (2026-08-12) — it meant discard BORDERS
+
+Question 1 offered two options, "add borders to the 02a style" or "keep coastlines only", and the answer named
+neither, so on re-reading in Step 3 Block 4 it parsed as *remove the basemap entirely*. Confirmed with the user:
+
+> **Coastlines stay** (`ax.coastlines(linewidth=0.8)`, the geographic anchor). **Country borders are not added** —
+> A draws them, 02a does not, and their line density would compete with a field that is 99.93 % zero.
+
+`gate_block4.py` pins both halves — `coastlines` present, `BORDERS` / `add_feature` absent — in both `maps.py` and
+`reporting.py`, so neither side of the decision can drift back silently.
+
+### Answers 2 and 5, as implemented
+
+- **Answer 2 was not honoured until Block 4.** Block 2 shipped `geographic_context` with a `try/except ImportError`
+  that returned `(None, None)`, plus six call sites branching on it. Since cartopy is a hard dependency
+  (`minimal_requirements.txt:39`), that path was dead in any working install and live only in a broken one — where
+  it would emit exactly the projection-less pixel-index figures §3 condemns. The fallback is now gone and a missing
+  cartopy raises at import.
+- **Answer 5 costs the top ~20 array rows.** `DISPLAY_EXTENT` stops at 55 °N while the data runs to 60 °N, so rows
+  0–20 of every `[101, 149]` field are never drawn (issue 1's northern clip, accepted). The gate asserts the crop so
+  it stays visible as a decision, and its own north/south orientation probes light rows *inside* the shown window.
