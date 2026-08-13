@@ -416,8 +416,14 @@ Three changes:
 function order with newer additions missing.
 - 🔧 **Add the warm-start entry point** — the module has `set_phase('train'|'finetune')` and a `finetuning_enabled`
   gate but **nothing that loads foreign weights**. Needs an init-from-checkpoint path plus a load-time
-  compatibility check over `in_channels`/`base_channels`/`depth`/`activation`/`normalization` that **raises naming
+  compatibility check over ~~`in_channels`/`base_channels`/`depth`/`activation`/`normalization`~~ that **raises naming
   the offending field**. A silent partial `load_state_dict` is the failure mode to prevent.
+  > ⚠️ **Corrected during block 5a — the field list above is wrong.** Only `in_channels`, `mode` and a missing
+  > `hyper_parameters.trial` raise; the sampled ARCHITECTURE (`base_channels` / `depth` / `activation` / …) is
+  > **overridden from the checkpoint and logged**, never rejected. Rejecting it would fail 26 warm-start trials in 27,
+  > since the sweep samples architecture independently of the frozen upstream — and the override is what discharges
+  > `apply_constraints`' "the sampled `unet` block is ignored" obligation. `WARM_START_ARCHITECTURE_KEYS` names the
+  > fields whose discard is REPORTED, not fields that must agree; its own comment said otherwise until 5a fixed it.
 - 🔧 `build_output_activation` — dispatch on the mode: plain `softplus` for daily, `sigmoid` for hourly (see
   "Settled: the output head, per mode" below). In daily mode the `max_hours` ceiling is applied by a **clamp in
   `predict_step`**, not by the activation, and the ensemble path must clamp each member, not just their mean. In

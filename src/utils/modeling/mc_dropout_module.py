@@ -43,8 +43,22 @@ from src.utils.modeling.unet_module_base import UnetModuleBase
 
 logger = logging.getLogger(__name__)
 
-# Architecture fields that must agree between an upstream checkpoint and this trial for a warm start to be valid.
-# in_channels is checked separately (it comes from the data, not the trial).
+# The `unet` fields whose SAMPLED value `from_upstream` reports as discarded when it differs from the upstream
+# checkpoint's. Nothing here is a compatibility requirement: the checkpoint's architecture always wins, and this tuple
+# drives only the log line that says so.
+#
+# ⚠️ Do NOT turn a mismatch here into an error. The sweep samples base_channels x depth x activation independently of
+# the frozen upstream, so exactly one of ~27 combinations matches it — rejecting the rest would fail 26 warm-start
+# trials in 27 for a reason unrelated to the model. The override is also what makes `search.apply_constraints`'s
+# "the sampled unet block is ignored" log line true.
+#
+# What DOES raise, because it genuinely cannot be overridden (see `from_upstream`): `in_channels` (it comes from the
+# DATA, not the trial, so the weights really do not fit), `mode` (the shapes match but the head means a different
+# thing in each task, which is precisely what `load_state_dict` cannot catch), and a checkpoint with no recorded
+# `hyper_parameters.trial` (the architecture cannot be read at all).
+#
+# `dropout` is deliberately absent: the MC rate is OURS, not the upstream's — the upstream is deterministic, and
+# calibrating that rate is what this family's finetuning phase exists to do.
 WARM_START_ARCHITECTURE_KEYS = (
     'base_channels', 'depth', 'kernel_size', 'blocks_per_level', 'upsampling', 'normalization', 'activation',
     'bottleneck_attention'
