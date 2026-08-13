@@ -112,6 +112,52 @@ def test_daily_mean_is_the_aggregating_option(prepared):
     assert x.shape == (len(VARIABLES), HEIGHT, WIDTH)
 
 
+def test_the_stacked_channels_ARE_the_stored_hours_in_order(prepared):
+    """Shape alone does not prove the stacking: a transposed reshape gives the same ``Vf * T`` channel count with the
+    hours interleaved across variables, and every channel would then be normalized with the wrong variable's mean.
+    Compared against the bytes on disk, so the channel ORDER is pinned and not just its length."""
+    index, config = prepared(mode='daily', feature_aggregation='hourly_stack')
+    x, _ = LightningMapsDataset(index, config)[0]
+    on_disk = np.load(index.iloc[0]['feature_file'])                    # variable_major [Vf, T, H, W]
+
+    assert np.allclose(x.numpy().astype(np.float32)[:HOURS],
+                       on_disk[0].astype(np.float32), atol=1e-3)
+
+
+def test_the_daily_target_stays_within_the_bounded_zero_to_twenty_four_range(prepared):
+    """The daily target is lightning-HOURS per day, so 24 is a physical ceiling, not a clipping choice. A target above
+    it means the aggregation counted something other than hours."""
+    index, config = prepared(mode='daily', feature_aggregation='daily_mean')
+    _, target = LightningMapsDataset(index, config)[0]
+    assert target.shape == (HEIGHT, WIDTH)
+    assert float(target.max()) <= 24.0
+
+
+def test_in_channels_agrees_with_the_tensor_it_actually_returns(prepared):
+    """``in_channels`` is read by the tuning stage to build the network BEFORE any item is loaded, so a disagreement
+    with the real tensor surfaces as a conv shape mismatch on step 0 rather than as a config error."""
+    for aggregation in ('hourly_stack', 'daily_mean'):
+        index, config = prepared(mode='daily', feature_aggregation=aggregation)
+        dataset = LightningMapsDataset(index, config)
+        x, _ = dataset[0]
+        assert dataset.in_channels == x.shape[0], aggregation
+
+
+def test_a_static_field_stored_with_one_hour_BROADCASTS_to_identical_channels(prepared):
+    """``lsm`` is time-invariant and is stored with ``T = 1``. Under ``hourly_stack`` it therefore contributes T
+    IDENTICAL channels rather than one — which is why the channel count is uniformly ``Vf * T`` and the normalization
+    expansion stays a simple repeat. Documented in block 3a-doc; this is what makes the claim checkable."""
+    index, config = prepared(mode='daily', feature_aggregation='hourly_stack', hours=1)
+    stacked_config = {**config, 'hours_per_day': HOURS}
+    x, _ = LightningMapsDataset(index, stacked_config)[0]
+
+    assert x.shape == (len(VARIABLES) * HOURS, HEIGHT, WIDTH)
+    for variable in range(len(VARIABLES)):
+        first = x[variable * HOURS]
+        for hour in range(1, HOURS):
+            assert torch.equal(x[variable * HOURS + hour], first), (variable, hour)
+
+
 def test_the_channel_names_are_variable_major_when_stacked(prepared):
     """The tuning stage expands per-VARIABLE normalization statistics to per-CHANNEL buffers using this list, so the
     order has to match how the channels are actually laid out — a transposed list would normalise every channel with
@@ -170,6 +216,35 @@ def test_the_appended_channel_IS_the_upstream_returned_separately(prepared):
 def test_a_non_residual_dataset_returns_two_items(prepared):
     index, config = prepared(mode='daily', feature_aggregation='daily_mean', residual=False)
     assert len(LightningMapsDataset(index, config)[0]) == 2
+
+
+def test_the_appended_upstream_channel_does_not_UPCAST_the_feature_stack(prepared):
+    """The upstream prediction is float32 and the features are float16, so a naive concatenate promotes the whole stack
+    and doubles the loader's dominant cost — silently, since nothing about the shapes changes."""
+    index, config = prepared(mode='daily', feature_aggregation='daily_mean', residual=True)
+    plain, _ = prepared(mode='daily', feature_aggregation='daily_mean', residual=False, seed=1)
+    x_residual, _, _ = LightningMapsDataset(index, config)[0]
+    x_plain, _ = LightningMapsDataset(plain, {**config, 'residual_target': False})[0]
+    assert x_residual.dtype == x_plain.dtype == torch.float16
+
+
+def test_the_upstream_is_returned_as_float32(prepared):
+    """It goes into ``clamp(upstream + residual)`` in the module, so it must not inherit the features' float16 — the
+    sum would then be computed in half precision on a 0-24 range."""
+    index, config = prepared(mode='daily', feature_aggregation='daily_mean', residual=True)
+    _, _, upstream = LightningMapsDataset(index, config)[0]
+    assert upstream.dtype == torch.float32
+
+
+def test_hourly_residual_mode_slices_the_upstream_by_HOUR(prepared):
+    """The same per-hour indexing the target gets. An unsliced upstream would pair hour 0's prediction with every hour's
+    observation, which is a silent misalignment rather than a shape error."""
+    index, config = prepared(mode='hourly', n_days=1, residual=True)
+    dataset = LightningMapsDataset(index, config)
+    on_disk = np.load(index.iloc[0]['upstream_file'])
+    for hour in range(HOURS):
+        _, _, upstream = dataset[hour]
+        assert np.allclose(upstream.numpy(), on_disk[hour], atol=1e-6), hour
 
 
 def test_residual_mode_without_an_upstream_column_raises(prepared):
@@ -237,6 +312,14 @@ def test_the_sampler_shuffles_the_day_order(prepared):
     assert len(orders) > 1, 'the sampler must shuffle across epochs'
 
 
+def test_the_sampler_REFUSES_a_daily_dataset(prepared):
+    """In daily mode an item is already a whole day, so there is no grouping to do and the sampler's day arithmetic
+    would silently produce a wrong permutation rather than a useless one. It raises instead."""
+    index, config = prepared(mode='daily', n_days=5)
+    with pytest.raises(ValueError, match='hourly'):
+        list(DayGroupedShuffleSampler(LightningMapsDataset(index, config)))
+
+
 def test_the_sampler_is_still_referenced_by_the_tuning_stage():
     """Its guard — ``mode == hourly and not uses_materialized_features`` — is DORMANT today, because every config sets
     ``materialize-features: true``. So it reads as dead code, and this is the assertion that stops it being deleted in a
@@ -268,6 +351,7 @@ def test_build_split_datasets_honours_a_requested_subset(prepared):
     assert set(build_split_datasets(index, config, splits=['valid'])) == {'valid'}
 
 
+@pytest.mark.source_invariant
 def test_no_sampler_is_CONSTRUCTED_here():
     """It is a LOADER concern and applies to the train split only, while this returns a dataset per split — so the
     sampler belongs to whoever builds the DataLoader.
@@ -285,3 +369,42 @@ def test_no_sampler_is_CONSTRUCTED_here():
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
     assert 'DayGroupedShuffleSampler' not in constructed, f'built here: {sorted(constructed)}'
+
+
+# =====================================================================================================================
+# The mode vocabulary reaches the dataset through normalize_mode, and only through it
+# =====================================================================================================================
+def test_the_legacy_daily_alias_still_LOADS_a_prepared_directory(prepared):
+    """Artifacts prepared before the rename carry ``mode: daily_lightning_hours`` in ``prepared_config.json``. They must
+    keep loading — which is the only reason the alias survives in ``normalize_mode``."""
+    index, config = prepared(mode='daily', feature_aggregation='daily_mean')
+    dataset = LightningMapsDataset(index, {**config, 'mode': 'daily_lightning_hours'})
+    assert dataset.mode == 'daily'
+    assert len(dataset) == len(index)
+
+
+@pytest.mark.parametrize('bad', ['hourly_counts', 'daily_counts', 'weekly', ''])
+def test_an_unknown_prepared_mode_is_REJECTED(bad, prepared):
+    """``hourly_counts`` is in the list on purpose: it was a real prepared-artifact mode name and dropping its alias is
+    what stops a request for unbounded stroke counts loading as a binary occurrence target."""
+    index, config = prepared(mode='daily', feature_aggregation='daily_mean')
+    with pytest.raises(ValueError):
+        LightningMapsDataset(index, {**config, 'mode': bad})
+
+
+@pytest.mark.source_invariant
+def test_the_mode_vocabulary_is_imported_from_io_data_and_MODES_is_not():
+    """One gate on the task selector, not two. ``normalize_mode`` raising is what let this module drop its own ``MODES``
+    re-check; re-importing ``MODES`` here would invite that duplicate validation back."""
+    import ast
+
+    from src.utils.modeling import dataset as dataset_module
+
+    tree = ast.parse(open(dataset_module.__file__).read())
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            imported.update(alias.name for alias in node.names)
+
+    assert {'MODE_DAILY', 'MODE_HOURLY', 'normalize_mode'} <= imported, sorted(imported)
+    assert 'MODES' not in imported, 'normalize_mode is the single gate; MODES would be a second one'

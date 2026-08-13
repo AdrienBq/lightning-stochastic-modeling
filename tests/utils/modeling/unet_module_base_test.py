@@ -149,12 +149,154 @@ def test_the_learning_rate_is_read_from_lr_not_learning_rate(unet_trial, normali
     assert module._learning_rate() == pytest.approx(3e-4)
 
 
+@pytest.mark.source_invariant
+def test_the_output_activation_is_read_from_the_TOP_level_of_the_trial():
+    """The third key-contract mismatch of the same family: branch A read ``trial['unet']['output_activation']`` while
+    Step 2 put it at the top level. Unlike the other two this one did NOT raise — it silently defaulted, so the key the
+    user chose to keep was never read and the activation was whatever the default happened to be."""
+    source = inspect.getsource(UnetModuleBase)
+    assert "trial.get('output_activation'" in source
+    assert "['unet']['output_activation']" not in source
+
+
+def test_a_dozen_SAMPLED_trials_all_build_a_working_module(search_spaces, normalization, target_stats):
+    """The check whose absence let two ``KeyError``s ship. Building from a hand-written fixture cannot catch a config
+    contract mismatch; building from what ``sample_trial`` actually produces can, and twelve draws cover the categorical
+    combinations that a single draw misses.
+
+    ``configure_optimizers`` is exercised through ``_learning_rate`` because the real call needs an attached Trainer for
+    its scheduler's step count.
+    """
+    import numpy as np
+
+    from src.utils.modeling.search import apply_constraints, sample_trial
+
+    space = search_spaces['deterministic_unet']
+    for attempt in range(12):
+        trial = apply_constraints(sample_trial(space, np.random.default_rng(attempt)))
+        module = DeterministicUnetModule(trial, 5, target_stats(), normalization)
+        module.set_phase('train')
+        assert module._learning_rate() > 0, attempt
+        assert int(trial['batch_size']) > 0, attempt
+
+
 def test_the_batch_size_is_read_from_the_TOP_level(search_spaces):
     """The other live ``KeyError``: ``tuning.py`` read ``trial['optimizer']['batch_size']`` while Step 2 moved it to the
     top level and no ``tune`` stage passes ``batch-size:``. It would have aborted trial 0 of every family."""
     for family, space in search_spaces.items():
         assert 'batch_size' in space, family
         assert 'batch_size' not in space.get('optimizer', {}), family
+
+
+# =====================================================================================================================
+# The calibration phases: each trains ONLY its own layer, and monitors its own metric
+# =====================================================================================================================
+@pytest.fixture
+def platt_module(unet_trial, normalization, target_stats):
+    """An hourly module with Platt calibration enabled, advanced into its calibration phase."""
+    trial = unet_trial(loss={'name': 'brier'},
+                       calibration={'occurrence': 'platt', 'regression': {'structure': 'none'}})
+    module = DeterministicUnetModule(trial, 5, target_stats(mode='hourly'), normalization)
+    module.set_phase('occurrence_calibration')
+    return module
+
+
+def test_a_calibration_phase_monitors_its_OWN_metric(platt_module):
+    """Not the composite. The calibration phase fits one or two scalars on a frozen backbone, so ranking it by the full
+    composite would compare it against the train phase's checkpoint on a quantity it barely moves."""
+    assert platt_module.monitor_metric == 'valid_occurrence_calibration'
+
+
+def test_a_calibration_phase_FREEZES_everything_but_its_own_layer(platt_module):
+    """The point of the phase. If the backbone stayed trainable, the "calibration" step would be a second training run
+    at the calibration learning rate — which fits, writes a checkpoint, and scores plausibly."""
+    frozen = [name for name, parameter in platt_module.net.named_parameters()
+              if parameter.requires_grad and 'output_calibration' not in name]
+    assert not frozen, f'still trainable: {frozen}'
+    assert all(parameter.requires_grad for parameter in platt_module.net.output_calibration_parameters())
+
+
+def test_the_platt_layer_is_owned_by_the_NET_not_the_module(platt_module):
+    """Block 3d-0 rewired it. A module-level Platt is not in ``net.state_dict()``, so ``from_upstream``'s
+    ``load_state_dict`` would silently discard fitted Platt weights when warm-starting an hourly MC-dropout run from an
+    hourly deterministic upstream. Rewiring closed the hole rather than documenting it."""
+    assert not isinstance(getattr(platt_module, 'output_calibration', None), torch.nn.Module)
+    assert any('output_calibration' in key for key in platt_module.net.state_dict())
+
+
+# =====================================================================================================================
+# Which SPACE the loss is fed, per mode — the 3b-1r contract, end to end
+# =====================================================================================================================
+def test_an_hourly_BINARY_loss_receives_the_raw_logit(unet_trial, normalization, target_stats):
+    """The uniform logit contract reaching the module layer: the head emits a logit and every binary loss sigmoids
+    internally, so the module must pass the head output through untouched. Passing the probability instead is finite and
+    plausible — a double sigmoid — which is why this is checked numerically rather than by a flag."""
+    from src.utils.modeling import losses
+
+    module = DeterministicUnetModule(unet_trial(loss={'name': 'brier'}), 5,
+                                     target_stats(mode='hourly'), normalization).eval()
+    torch.manual_seed(0)
+    logit = torch.randn(2, 8, 8)
+    labels = (torch.rand(2, 8, 8) < 0.3).float()
+
+    got = module._fitting_loss(logit, labels)
+    expected = losses.brier_loss(logit, labels)
+    wrong = losses.brier_loss(torch.sigmoid(logit), labels)
+
+    assert float(got) == pytest.approx(float(expected), abs=1e-6)
+    assert float(got) != pytest.approx(float(wrong), abs=1e-6), 'a double sigmoid would not raise'
+
+
+def test_an_hourly_DISTANCE_loss_receives_the_PROBABILITY_and_is_the_brier_score(
+        unet_trial, normalization, target_stats):
+    """The other side of the dispatch, and the reason it is safe: a distance loss brings no sigmoid of its own, so the
+    module has to apply it. ``rmse`` on a probability is exactly ``sqrt(brier_score)`` and therefore PROPER — which is
+    what makes offering a distance loss on the hourly task legitimate rather than a mistake."""
+    from src.utils.metrics import scores
+
+    module = DeterministicUnetModule(unet_trial(loss={'name': 'weighted_mse', 'intensity_weight_gamma': 0.0}), 5,
+                                     target_stats(mode='hourly'), normalization).eval()
+    torch.manual_seed(0)
+    logit = torch.randn(2, 8, 8)
+    labels = (torch.rand(2, 8, 8) < 0.3).float()
+
+    got = float(module._fitting_loss(logit, labels))
+    assert got == pytest.approx(float(scores.brier_score(torch.sigmoid(logit).numpy(), labels.numpy())), abs=1e-6)
+
+
+def test_the_numpy_VALIDATION_MIRROR_agrees_with_the_torch_calibration_objective(
+        unet_trial, normalization, target_stats):
+    """The second hand-written copy of one formula, and the one no invariant covered. ``_validation_reg_calibration``
+    recomputes ``log1p_huber`` in numpy for the validation monitor; nothing checked the two agree. This is the
+    ``crps_ensemble`` divergence risk in a place the merge did not look — if they drift, the calibration phase is
+    monitored on a quantity it is not optimising.
+
+    Asserted for ``pointwise`` only, deliberately: the torch loss sorts per BATCH and the mirror per EPOCH, so the
+    ``quantile`` pair is not comparable and pretending otherwise would need a tolerance wide enough to hide a real
+    divergence.
+    """
+    from src.utils.modeling.losses import log1p_huber
+
+    delta = 1.0
+    trial = unet_trial(calibration={'occurrence': 'none',
+                                    'regression': {'structure': 'power_law', 'objective': 'pointwise',
+                                                   'num_sigmoids': 4, 'huber_delta': delta}})
+    module = DeterministicUnetModule(trial, 5, target_stats(), normalization)
+
+    torch.manual_seed(0)
+    observed = torch.randint(0, 25, (4, 8, 8)).float()
+    predicted = (observed + torch.randn_like(observed)).clamp(0, 24)
+    mask = torch.ones_like(observed, dtype=torch.bool)
+
+    mirror = module._validation_reg_calibration(predicted.numpy(), observed.numpy(), mask.numpy())
+    assert mirror == pytest.approx(float(log1p_huber(predicted, observed, mask, delta)), abs=1e-5)
+
+
+def test_the_legacy_mode_alias_resolves_at_the_MODULE_layer(unet_trial, normalization, target_stats):
+    """A checkpoint prepared under the old name must still build a module, not just load a dataset."""
+    stats = {**target_stats(), 'mode': 'daily_lightning_hours'}
+    module = DeterministicUnetModule(unet_trial(), 5, stats, normalization)
+    assert not module.hourly
 
 
 # =====================================================================================================================

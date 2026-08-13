@@ -143,6 +143,36 @@ def test_run_sweep_accepts_the_upstream_model_path():
     assert 'upstream_model_path' in inspect.signature(tuning.run_sweep).parameters
 
 
+def test_the_selection_stage_PARAMETERS_are_gone_from_both_entry_points():
+    """Step 2 made the search space's ``selection:`` block the ONE source of truth: ``tune`` reads it from
+    ``model-config`` and records it into ``best_trial.json``, and ``retrain_best`` reads it back. With
+    ``selection-metric`` / ``selection-mode`` still accepted as stage parameters, a retrain could rank on a different
+    score from the sweep that chose the configuration — and nothing would report the disagreement."""
+    sweep = inspect.signature(tuning.run_sweep).parameters
+    retrain = inspect.signature(tuning.retrain_best_config).parameters
+
+    assert 'selection_metric' not in sweep and 'selection_mode' not in sweep
+    assert 'selection_metric' not in retrain and 'selection_mode' not in retrain
+
+
+def test_only_the_SWEEP_takes_the_model_config():
+    """``model_config`` is where ``selection:`` lives, so the sweep needs it. The retrain must NOT take it — it reads the
+    recorded selection out of ``best_trial.json`` instead, which is what stops the two from diverging."""
+    assert 'model_config' in inspect.signature(tuning.run_sweep).parameters
+    assert 'model_config' not in inspect.signature(tuning.retrain_best_config).parameters
+
+
+@pytest.mark.source_invariant
+def test_apply_constraints_is_called_with_the_KEYWORD_argument():
+    """The call-site half of ``search_test.py::test_upstream_model_path_is_KEYWORD_ONLY``. Branch A called
+    ``apply_constraints(trial, rng)``, and a ``Generator`` is truthy — positionally that would have forced
+    ``finetuning.enabled = True`` on every trial of every family, silently. The signature makes it a ``TypeError``; this
+    pins that the call site here passes the path by keyword and never reintroduces the positional form."""
+    source = inspect.getsource(tuning)
+    assert 'apply_constraints(trial, upstream_model_path=upstream_model_path)' in source
+    assert 'apply_constraints(trial, rng)' not in source
+
+
 def test_the_selection_metric_is_resolved_from_the_mode():
     """``selection_metric_for_mode`` is imported here and raises when the search space declares the other composite, so
     the sweep cannot rank a binary target on the regression composite."""

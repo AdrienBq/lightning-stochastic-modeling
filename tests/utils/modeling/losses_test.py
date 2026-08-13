@@ -24,9 +24,36 @@ def BINARY_CONFIG(name):
     return {'name': name, 'focal_gamma': 2.0, 'positive_class_weight': 4.0, 'smooth': 1.0, 'beta': 0.7}
 
 
+PRESENT = ('intensity_weights', '_weighted_masked_mean', 'weighted_mse', 'weighted_mae', 'weighted_rmse',
+           'asymmetric_huber', 'psd_penalty', 'wmae_psd', 'wmse_psd', 'focal_bce_with_logits', 'dice_loss',
+           'brier_loss', 'crps', 'almost_fair_crps', 'afcrps_psd', 'crps_binary',
+           'build_regression_loss', 'build_binary_loss', 'build_ensemble_loss', 'BinaryLoss')
+
+REMOVED = ('mae', 'rmse',                       # absorbed by their weighted forms at gamma = 0
+           'tweedie_deviance', 'poisson_nll',   # unbounded-count machinery; Poisson puts mass above 24 h/day
+           'TRANSFORM_COMPATIBLE_LOSSES',       # the gamma F-transform is gone
+           'build_finetune_loss')               # renamed build_ensemble_loss for what it actually is
+
+
 # =====================================================================================================================
 # The loss name sets are exactly what the search spaces offer
 # =====================================================================================================================
+@pytest.mark.parametrize('name', PRESENT)
+def test_the_merged_surface_is_all_present(name):
+    """The union both branches had to produce. ``wmse_psd`` is in the list because the search spaces offered a name
+    NEITHER branch implemented, so it was written for this merge."""
+    assert hasattr(losses, name)
+
+
+@pytest.mark.parametrize('name', REMOVED)
+def test_a_removed_loss_stays_removed(name):
+    """Each removal is a decision, not a cleanup. ``poisson_nll`` is the sharpest: it is UNBOUNDED, so on a target
+    capped at 24 hours/day it puts probability mass above the physical ceiling — actively wrong here, not merely
+    unnecessary. ``mae`` / ``rmse`` are absorbed at ``gamma = 0``, which is why the search space must allow that value.
+    """
+    assert not hasattr(losses, name)
+
+
 def test_the_regression_loss_set_matches_the_search_spaces(search_spaces):
     """The tuple and the YAML must agree in BOTH directions: a name only in the YAML raises at trial 0, and a name only
     in the tuple is dead code that looks supported."""
@@ -107,6 +134,69 @@ def test_the_binary_builder_reads_the_name_key(search_spaces):
                 assert losses.build_binary_loss(BINARY_CONFIG(name)) is not None
 
 
+def test_brier_loss_on_logits_EQUALS_the_evaluation_brier_score_on_probabilities():
+    """The training/evaluation agreement for the binary head, the counterpart of the CRPS agreement below. The loss takes
+    logits and sigmoids internally; ``scores.brier_score`` takes probabilities. They must be the same number, or the
+    reported score does not measure the objective that was optimised."""
+    torch.manual_seed(3)
+    logits = torch.randn(3, 8, 9) * 2
+    labels = (torch.rand(3, 8, 9) < 0.3).float()
+
+    assert float(losses.brier_loss(logits, labels)) == pytest.approx(
+        float(scores.brier_score(torch.sigmoid(logits).numpy(), labels.numpy())), abs=1e-6
+    )
+
+
+def test_crps_binary_SIGMOIDS_its_samples_before_the_crps_formula():
+    """The logit contract reaching inside the ensemble axis: the members arrive as logits and the CRPS has to be computed
+    on probabilities. Applying the formula to raw logits would give a finite, plausible, wrong number.
+
+    Compared against the energy form written out independently — ``E|p - y| - 0.5 E|p - p'|`` via the sorted-sample
+    identity — so the assertion pins the whole computation, not just that a sigmoid happened somewhere.
+    """
+    torch.manual_seed(4)
+    members = 8
+    logit_samples = torch.randn(members, 3, 5, 6)                # [N, B, H, W]
+    labels = (torch.rand(3, 5, 6) < 0.1).float()
+
+    probabilities = torch.sigmoid(logit_samples)
+    absolute = (probabilities - labels.unsqueeze(0)).abs().mean(dim=0).mean()
+    coefficients = (2.0 * torch.arange(float(members)) - members + 1).view(-1, 1, 1, 1)
+    spread = (coefficients * torch.sort(probabilities, dim=0).values).sum(dim=0).div(members ** 2).mean()
+    expected = float(absolute - 0.5 * spread)
+
+    assert float(losses.crps_binary(logit_samples, labels)) == pytest.approx(expected, abs=1e-6)
+
+
+def test_crps_binary_at_one_member_degenerates_to_a_MAE_on_probabilities():
+    """Why ``crps_binary`` is not offered to the deterministic family: a single forward pass gives N = 1, the spread term
+    vanishes, and the loss silently becomes an MAE on probabilities — an improper score on a binary target (see
+    ``test_the_mae_is_IMPROPER...`` in scores_test.py). No error, just a different objective."""
+    torch.manual_seed(5)
+    single = torch.randn(1, 2, 5, 5) * 2
+    labels = (torch.rand(2, 5, 5) < 0.3).float()
+
+    assert float(losses.crps_binary(single, labels)) == pytest.approx(
+        float((torch.sigmoid(single[0]) - labels).abs().mean()), abs=1e-6
+    )
+
+
+@pytest.mark.parametrize('name', ['focal_bce', 'dice', 'brier'])
+def test_passing_a_PROBABILITY_where_a_logit_belongs_changes_the_loss_silently(name):
+    """The footgun the uniform logit contract narrows but cannot remove: a probability in [0, 1] is a perfectly valid
+    logit, so the wrong input space is finite and unremarkable rather than an error. The contract's value is that there
+    is now only ONE convention to get right, not that a mistake is caught."""
+    torch.manual_seed(6)
+    logits = torch.randn(2, 6, 6) * 2
+    labels = (torch.rand(2, 6, 6) < 0.3).float()
+    built = losses.build_binary_loss(BINARY_CONFIG(name)).fn
+
+    right = float(built(logits, labels))
+    wrong = float(built(torch.sigmoid(logits), labels))
+    assert np.isfinite(wrong), 'the wrong space does not raise — that is the point'
+    assert wrong != pytest.approx(right, abs=1e-6)
+
+
 # =====================================================================================================================
 # The weighting scheme
 # =====================================================================================================================
@@ -139,6 +229,76 @@ def test_weighted_mae_at_gamma_zero_is_a_plain_mae():
     assert float(built(prediction, target, losses.intensity_weights(target, 0.0), mask)) == pytest.approx(
         float((prediction - target).abs().mean())
     )
+
+
+def test_weighted_rmse_at_gamma_zero_is_a_plain_rmse():
+    """The same absorption as ``weighted_mae``, and worth pinning separately because RMSE takes the square root AFTER
+    the weighted reduction — doing it per-cell first would give a different number that still looks plausible."""
+    torch.manual_seed(1)
+    target = torch.rand(4, 6, 7) * 24
+    prediction = (target + torch.randn_like(target)).clamp(0, 24)
+    mask = torch.ones_like(target)
+    uniform = losses.intensity_weights(target, 0.0)
+
+    assert float(losses.weighted_rmse(prediction, target, uniform, mask)) == pytest.approx(
+        float(((prediction - target) ** 2).mean().sqrt()), abs=1e-6
+    )
+
+
+def test_a_positive_gamma_actually_CHANGES_the_loss():
+    """The converse of the absorption identity: if weighting were silently ignored, ``gamma`` would be a search
+    dimension with no effect and every trial would explore it for nothing."""
+    torch.manual_seed(1)
+    target = torch.rand(4, 6, 7) * 24
+    prediction = (target + torch.randn_like(target)).clamp(0, 24)
+    mask = torch.ones_like(target)
+
+    unweighted = losses.weighted_mae(prediction, target, losses.intensity_weights(target, 0.0), mask)
+    weighted = losses.weighted_mae(prediction, target, losses.intensity_weights(target, 2.0), mask)
+    assert float(weighted) != pytest.approx(float(unweighted))
+
+
+def test_wmae_psd_at_alpha_one_is_the_plain_weighted_mae():
+    """The MAE-flavoured sibling of the ``wmse_psd`` identity below. Both are checked because the two composites are
+    separate functions, so one can lose its spectral switch-off without the other."""
+    torch.manual_seed(1)
+    target = torch.rand(2, 12, 12) * 5
+    prediction = torch.rand(2, 12, 12) * 5
+    mask = torch.ones_like(target)
+    uniform = losses.intensity_weights(target, 0.0)
+
+    assert float(losses.wmae_psd(prediction, target, uniform, mask, alpha=1.0)) == pytest.approx(
+        float(losses.weighted_mae(prediction, target, uniform, mask)), abs=1e-6
+    )
+
+
+# =====================================================================================================================
+# psd_penalty — the spectral term the two composites share
+# =====================================================================================================================
+def test_the_psd_penalty_is_ZERO_for_an_identical_field():
+    """It compares radial power spectra, so a field against itself must score exactly 0 — otherwise the composite
+    losses carry a constant offset and ``alpha`` no longer interpolates between two comparable terms."""
+    torch.manual_seed(1)
+    target = torch.rand(4, 12, 12) * 24
+    assert abs(float(losses.psd_penalty(target, target))) < 1e-5
+
+
+def test_the_psd_penalty_PUNISHES_blur():
+    """The failure mode it exists for. A blurred prediction can score well on any pointwise distance while destroying
+    the small-scale structure — which on a 99.93 %-zero field is most of the signal."""
+    torch.manual_seed(1)
+    target = torch.rand(4, 12, 12) * 24
+    blurred = torch.nn.functional.avg_pool2d(target.unsqueeze(1), 3, stride=1, padding=1).squeeze(1)
+    assert float(losses.psd_penalty(blurred, target)) > 0.1
+
+
+def test_the_psd_penalty_stays_within_the_unit_interval():
+    """It is combined as ``alpha * distance + (1 - alpha) * psd_penalty``, so an unbounded spectral term would dominate
+    the sum at any alpha below 1 and the search over alpha would be meaningless."""
+    torch.manual_seed(1)
+    target = torch.rand(4, 12, 12) * 24
+    blurred = torch.nn.functional.avg_pool2d(target.unsqueeze(1), 3, stride=1, padding=1).squeeze(1)
+    assert 0.0 <= float(losses.psd_penalty(blurred, target)) <= 1.0
 
 
 def test_wmse_psd_at_alpha_one_is_the_plain_weighted_mse():
@@ -186,6 +346,39 @@ def test_every_regression_loss_normalises_by_the_effective_WEIGHT_not_the_cell_c
     assert float(built(prediction, target, weights, mask)) == pytest.approx(
         float(built(prediction, target, weights * 2.0, mask)), rel=1e-5
     ), f'{name} is normalised by the cell count, not the weight sum'
+
+
+def test_EVERY_alias_in_EVERY_shipped_space_resolves_and_is_finite(search_spaces):
+    """The sweep the gate ran per space rather than per name. The set-equality test above uses one space; this drives all
+    three, because a family whose space offers a name the builder cannot resolve fails on trial 0 — after the pipeline
+    has already prepared the data.
+
+    Every key any regression loss reads is supplied, so an unresolved name is the only way this fails.
+    """
+    checked = 0
+    for family, space in search_spaces.items():
+        for name in space['loss']['name']['choices']:
+            if name in losses.BINARY_LOSSES:
+                continue
+            built = losses.build_regression_loss({'name': name, 'intensity_weight_gamma': 0.5, 'alpha': 0.8,
+                                                  'asymmetry_tau': 0.7, 'huber_delta': 1.0})
+            prediction, target = torch.rand(2, 12, 12) * 5, torch.rand(2, 12, 12) * 5
+            mask = torch.ones_like(target, dtype=torch.bool)
+            value = float(built(prediction, target, losses.intensity_weights(target, 0.5), mask))
+            assert np.isfinite(value), f'{family}: {name} -> {value}'
+            checked += 1
+    assert checked >= 3 * 6, f'only {checked} (family, loss) pairs exercised'
+
+
+def test_the_almost_fair_crps_is_never_below_the_plain_crps():
+    """``almost_fair`` gives less credit for spread than the fair estimator, so on the same samples it can only score
+    higher. If the ordering inverted, the ``beta`` interpolation would be pointing the wrong way and a finetuning run
+    would be rewarded for over-dispersing."""
+    torch.manual_seed(7)
+    samples = torch.randn(9, 3, 6, 6) * 3 + 6
+    observed = torch.rand(3, 6, 6) * 12
+
+    assert float(losses.almost_fair_crps(samples, observed)) >= float(losses.crps(samples, observed))
 
 
 @pytest.mark.parametrize('name', ['weighted_mae', 'weighted_rmse', 'weighted_mse'])
@@ -315,6 +508,35 @@ def test_the_quantile_objective_differs_from_the_pointwise_one():
     assert float(losses.log1p_huber(prediction, target, mask, 1.0)) != pytest.approx(
         float(losses.log1p_huber_quantile(prediction, target, mask, 1.0))
     )
+
+
+@pytest.mark.source_invariant
+@pytest.mark.parametrize('name', ['log1p_huber', 'log1p_huber_quantile'])
+def test_the_calibration_objectives_are_DEFINED_here_and_nowhere_else(name):
+    """Block 3c-r moved them out of the deterministic family's module file. They are parameter-free loss functions that
+    all three families reach through ``calibration.regression.objective``, so leaving them in one family's module made
+    the other two import from it — and made them bypass ``_weighted_masked_mean``, which is private to this file.
+
+    Checked by AST: a copy left behind in a module file is the failure this pins, and a substring search would match the
+    import as readily as a definition.
+    """
+    import ast
+
+    from src.utils.modeling import deterministic_module, losses as losses_module, unet_module_base
+
+    def defined(module):
+        tree = ast.parse(open(module.__file__).read())
+        return {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+
+    def imported(module):
+        tree = ast.parse(open(module.__file__).read())
+        return {alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+                for alias in node.names}
+
+    assert name in defined(losses_module), f'losses.py must DEFINE {name}'
+    assert name not in defined(deterministic_module), f'a copy of {name} is left behind'
+    assert name not in defined(unet_module_base), f'a copy of {name} is left behind'
+    assert name in imported(unet_module_base), f'the shared base must IMPORT {name} from losses'
 
 
 def test_the_calibration_objectives_take_no_weights_argument():

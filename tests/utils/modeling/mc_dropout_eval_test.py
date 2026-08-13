@@ -123,6 +123,17 @@ def test_the_partials_are_what_the_shared_finalizer_consumes(adapter, batch):
     assert 'rank_histogram' in curves
 
 
+def test_the_per_batch_SEEDING_makes_the_ensemble_reproducible(adapter, batch):
+    """Two evaluation runs of the same checkpoint must report the same CRPS. Without per-batch seeding the members are
+    drawn from the ambient RNG, so the number moves between runs — small enough to look like noise, large enough to
+    reorder two close families in the comparison table."""
+    module = adapter(ensemble_size=4)
+    one_batch = batch()
+    first = module.predict_step(one_batch, 0)['ensemble_members']
+    second = module.predict_step(one_batch, 0)['ensemble_members']
+    assert torch.allclose(first, second, atol=1e-6)
+
+
 def test_the_adapter_is_a_lightning_module_so_trainer_predict_drives_it(adapter):
     """The evaluation stage calls ``trainer.predict(module, loader)``, so the wrapper has to be a LightningModule
     rather than a plain object with a ``predict_step`` method."""

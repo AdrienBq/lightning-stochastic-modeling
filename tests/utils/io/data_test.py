@@ -18,14 +18,26 @@ import pandas as pd
 import pytest
 
 from src.utils.io.data import (
-    LEGACY_MODE_ALIASES, MODE_DAILY, MODE_HOURLY, assign_splits_by_year, assign_splits_from_config,
-    compute_feature_stats, load_split_config, metadata_variable_names, normalize_mode,
+    LEGACY_MODE_ALIASES, MODE_DAILY, MODE_HOURLY, MODES, SPLIT_NAMES, assign_splits_by_sample_id,
+    assign_splits_by_year, assign_splits_from_config, compute_feature_stats, load_split_config,
+    metadata_variable_names, normalize_mode,
 )
 
 
 # =====================================================================================================================
 # normalize_mode — the single gate on the task selector
 # =====================================================================================================================
+def test_the_mode_vocabulary_is_exactly_daily_and_hourly():
+    """``mode`` is the ONLY key that selects between the two tasks, so the tuple is the whole task vocabulary. A third
+    entry appearing here would mean a task nothing downstream dispatches on."""
+    assert MODES == ('daily', 'hourly')
+    assert (MODE_DAILY, MODE_HOURLY) == MODES
+
+
+def test_the_split_names_are_exactly_the_three():
+    assert SPLIT_NAMES == ('train', 'valid', 'test') or set(SPLIT_NAMES) == {'train', 'valid', 'test'}
+
+
 @pytest.mark.parametrize('mode', ['daily', 'hourly'])
 def test_a_canonical_mode_round_trips(mode):
     assert normalize_mode(mode) == mode
@@ -163,25 +175,128 @@ def test_the_smoke_tiers_disable_the_cross_check_deliberately(repo_root):
         assert config.get('cross_check') is False, tier
 
 
+@pytest.fixture
+def full_calendar_index():
+    """The real index shape: 5843 consecutive days from 2008-01-02 with sequential ids, which is what the smoke tiers'
+    sample-id ranges were written against."""
+    dates = pd.date_range('2008-01-02', periods=5843, freq='D')
+    return pd.DataFrame({'date': dates, 'sample_id': np.arange(5843), 'file': 'x.pt'})
+
+
+@pytest.mark.parametrize('tier,expected', [
+    ('cpu', {'train': 4, 'valid': 2, 'test': 2}),
+    ('gpu', {'train': 10, 'valid': 4, 'test': 4}),
+])
+def test_the_smoke_tiers_select_exactly_the_declared_number_of_days(tier, expected, full_calendar_index, repo_root):
+    """The smoke tiers exist to make a 1-epoch CPU run finish, so their SIZE is the contract. A range that silently
+    widened would turn a smoke run into a long one, which reads as a hang rather than as a config error."""
+    import os
+
+    config = load_split_config(os.path.join(repo_root, f'config/split/split_smoke_{tier}.yaml'))
+    assigned = assign_splits_from_config(full_calendar_index, config)
+    got = {name: int((assigned == name).sum()) for name in SPLIT_NAMES}
+    assert got == expected, got
+
+
+@pytest.mark.parametrize('tier,kept', [('cpu', 8), ('gpu', 18)])
+def test_the_smoke_tiers_DROP_the_unnamed_samples_rather_than_raising(tier, kept, full_calendar_index, repo_root):
+    """With ``cross_check: false`` a sample outside every declared range must come back unassigned, not raise: the tier
+    names a handful of days out of 5843 and the other 5835 are simply not in the run."""
+    import os
+
+    config = load_split_config(os.path.join(repo_root, f'config/split/split_smoke_{tier}.yaml'))
+    assigned = assign_splits_from_config(full_calendar_index, config)
+    assert int(assigned.isna().sum()) == len(full_calendar_index) - kept
+
+
+@pytest.mark.parametrize('tier', ['cpu', 'gpu'])
+def test_the_smoke_tiers_stay_year_disjoint_and_mid_july(tier, full_calendar_index, repo_root):
+    """Two properties of the sampled days, both easy to break by editing an id range. Year-disjointness is the same
+    leakage guard as the full split; mid-July is chosen because it is the convective season — a smoke run over January
+    would train on an almost entirely empty target and every metric would be degenerate."""
+    import os
+
+    config = load_split_config(os.path.join(repo_root, f'config/split/split_smoke_{tier}.yaml'))
+    assigned = assign_splits_from_config(full_calendar_index, config)
+    selected = full_calendar_index[assigned.notna()].copy()
+    selected['split'] = assigned[assigned.notna()]
+
+    years_per_split = selected.groupby('split')['date'].apply(lambda days: set(days.dt.year))
+    flattened = [year for years in years_per_split for year in years]
+    assert len(flattened) == len(set(flattened)), dict(years_per_split)
+    assert set(selected['date'].dt.month) == {7}, sorted(set(selected['date'].dt.strftime('%Y-%m-%d')))
+
+
+def test_overlapping_sample_id_ranges_RAISE(full_calendar_index):
+    """Two splits claiming the same id is the one split error that cannot be resolved by a rule — whichever split won
+    would be arbitrary, and the sample would leak between train and test."""
+    with pytest.raises(ValueError):
+        assign_splits_by_sample_id(full_calendar_index['sample_id'],
+                                   {'train': [[0, 10]], 'valid': [[5, 15]], 'test': [[20, 21]]})
+
+
+def test_a_year_claimed_by_two_splits_RAISES(full_calendar_index):
+    """The by-year counterpart of the same guard."""
+    with pytest.raises(ValueError):
+        assign_splits_by_year(full_calendar_index['date'],
+                              {'train': [2010], 'valid': [2010], 'test': [2008]})
+
+
 # =====================================================================================================================
 # Feature statistics
 # =====================================================================================================================
-def test_the_statistics_accumulate_in_float64_under_a_float16_input():
-    """``feature-dtype: float16`` halves the loader cost, but a float16 ACCUMULATOR overflows on a sum over 5843 samples
-    and silently returns inf. Checked with values large enough that a float16 running sum would."""
+@pytest.fixture
+def float16_feature_files(tmp_path):
+    """Three days of ``[Vf, T, H, W]`` features stored on disk as float16 in ``time_major`` layout, exactly as
+    ``materialize-features`` writes them.
+
+    A large offset with small variance is deliberate: 1000 ± 1 is precisely where a float32 or float16 accumulator
+    loses the variance to cancellation, so it separates a float64 accumulation from a lower-precision one.
+    """
     rng = np.random.default_rng(0)
-    samples = [(rng.random((3, 8, 8)) * 1000).astype(np.float16) for _ in range(40)]
+    truth = (1000.0 + rng.standard_normal((3, 2, 1, 8, 9))).astype(np.float64)     # [day, Vf, T, H, W]
+    rows = []
+    for day in range(3):
+        path = tmp_path / f'{day}.npy'
+        np.save(path, truth[day].transpose(1, 0, 2, 3).astype(np.float16))         # -> time_major [T, Vf, H, W]
+        rows.append({'date': pd.Timestamp('2010-07-14') + pd.Timedelta(days=day), 'file': 'x.pt',
+                     'feature_file': str(path)})
+    return pd.DataFrame(rows), truth
 
-    mean, std = _stats_of(samples)
-    assert np.all(np.isfinite(mean)), 'the mean overflowed — the accumulator is not float64'
-    assert np.all(np.isfinite(std))
-    assert mean.dtype == np.float64 or mean.dtype == np.float32
+
+def test_the_features_are_stored_as_float16_as_configured(float16_feature_files):
+    index, _ = float16_feature_files
+    assert np.load(index.iloc[0]['feature_file']).dtype == np.float16
 
 
-def _stats_of(samples):
-    """Accumulate per-channel mean/std the way ``compute_feature_stats`` does, over a list of ``[C, H, W]`` arrays."""
-    stacked = np.stack([sample.astype(np.float64) for sample in samples])
-    return stacked.mean(axis=(0, 2, 3)), stacked.std(axis=(0, 2, 3))
+@pytest.mark.parametrize('position,name', [(0, 'a'), (1, 'b')])
+def test_the_statistics_MATCH_a_float64_reduction_of_the_stored_values(position, name, float16_feature_files):
+    """The real assertion behind "accumulates in float64": the returned statistics equal a float64 reduction of exactly
+    the bytes on disk, per variable. This drives ``compute_feature_stats`` itself rather than a local reimplementation
+    of it — a helper that re-does the accumulation in numpy proves only that numpy accumulates in float64.
+
+    Note the reference casts through float16 first: the function cannot recover precision the STORAGE already lost, so
+    the target is a faithful float64 reduction of the stored values, not of the pre-quantisation truth.
+    """
+    index, truth = float16_feature_files
+    stats = compute_feature_stats(index, ['a', 'b'], ['a', 'b'], feature_layout='time_major')
+
+    stored = truth[:, position].astype(np.float16).astype(np.float64)
+    assert abs(stats['mean'][name] - float(stored.mean())) < 1e-9, f"{stats['mean'][name]} vs {stored.mean()}"
+    assert abs(stats['std'][name] - float(stored.std())) < 1e-6, f"{stats['std'][name]} vs {stored.std()}"
+
+
+def test_the_statistics_are_NaN_AWARE(float16_feature_files):
+    """One NaN cell in one day must not poison the whole normalization buffer. A plain ``.mean()`` propagates it, and a
+    NaN feature mean makes every standardized input NaN — the model then trains on nothing and the loss is NaN from
+    step 0, with no error naming the cause."""
+    index, truth = float16_feature_files
+    poisoned = truth[0].copy()
+    poisoned[0, 0, 0, 0] = np.nan
+    np.save(index.iloc[0]['feature_file'], poisoned.transpose(1, 0, 2, 3).astype(np.float16))
+
+    stats = compute_feature_stats(index, ['a', 'b'], ['a', 'b'], feature_layout='time_major')
+    assert np.isfinite(stats['mean']['a']) and np.isfinite(stats['std']['a'])
 
 
 def test_compute_feature_stats_takes_the_variable_list_and_the_storage_layout():

@@ -145,6 +145,70 @@ def test_the_regression_calibration_is_inert_in_hourly_mode(make_module):
 # =====================================================================================================================
 # The checkpoint marker — every checkpoint is a valid upstream for both stochastic families
 # =====================================================================================================================
+# =====================================================================================================================
+# The validation epoch: the composite is logged under the name the sweep ranks on
+#
+# This drives on_validation_epoch_start / validation_step / on_validation_epoch_end end to end, which is what makes the
+# monitor/prune agreement a fact about behaviour rather than about two constants matching.
+# =====================================================================================================================
+@pytest.fixture
+def validated_module(make_module):
+    """A module taken through a full validation epoch on synthetic bounded batches."""
+    def run(mode='daily', batches=3, **kwargs):
+        module = make_module(mode=mode, **kwargs)
+        module.valid_climatology_cond_mae = 2.0
+        module.on_validation_epoch_start()
+        generator = torch.Generator().manual_seed(0)
+        for index in range(batches):
+            features = torch.randn(2, 5, 16, 16, generator=generator)
+            if mode == 'hourly':
+                target = (torch.rand(2, 16, 16, generator=generator) < 0.3).float()
+            else:
+                target = torch.randint(0, 25, (2, 16, 16), generator=generator).float()
+            module.validation_step((features, target), index)
+        module.on_validation_epoch_end()
+        return module
+    return run
+
+
+def test_the_composite_is_logged_under_the_SELECTION_metric_name(validated_module):
+    """``_fit_trial``'s checkpoint monitor and ``run_sweep``'s prune metric both read this key. Logging it under any
+    other name makes the monitor silently track nothing and the sweep rank on a missing value."""
+    module = validated_module()
+    assert module.selection_metric in module.last_val_metrics, sorted(module.last_val_metrics)
+
+
+def test_the_old_tail_score_name_is_GONE_from_the_logged_metrics(validated_module):
+    """``valid_tail_score`` was A's hard-coded monitor, named for the heavy-tail objective this scope dropped. A trial
+    still logging it would be ranked on it by any stale config."""
+    assert 'valid_tail_score' not in validated_module().last_val_metrics
+
+
+def test_the_daily_brier_skill_is_NaN_because_there_is_no_probability_head(validated_module):
+    """The accepted cost of dropping the report-only occurrence head, recorded in block 3c. It must be NaN rather than a
+    number computed from lightning-hours — a finite value here would be a Brier score on a 0-24 field, which is
+    meaningless but plausible-looking in the trials table."""
+    metrics = validated_module().last_val_metrics
+    assert np.isnan(metrics['valid_brier_skill_score'])
+
+
+def test_the_daily_average_precision_is_FINITE_because_ranking_survives(validated_module):
+    """The other half of that decision, and the reason it was acceptable: AP and ROC-AUC are invariant to any monotone
+    rescaling, so ranking on predicted HOURS is exact rather than approximate. AP is the one composite component that
+    sees a false alarm, which is the recorded mitigation for the regression composite having no false-alarm term."""
+    metrics = validated_module().last_val_metrics
+    assert np.isfinite(metrics['valid_average_precision_occurrence'])
+
+
+def test_the_real_101x149_grid_round_trips_through_predict_step(make_module):
+    """The bare backbone cannot take 101 x 149 — 101 -> 50 -> 100 breaks the skip concatenation — so the net pads to a
+    multiple of ``2 ** depth`` and crops back. Every Step 3 gate used a 24 x 32 fixture, divisible by 8, so the real
+    grid was never exercised at this layer."""
+    module = make_module()
+    output = module.predict_step((torch.randn(1, 5, 101, 149), torch.zeros(1, 101, 149)), 0)
+    assert tuple(output['prediction'].shape) == (1, 101, 149)
+
+
 def test_the_checkpoint_marker_is_the_family_name(make_module):
     checkpoint = {}
     make_module().on_save_checkpoint(checkpoint)

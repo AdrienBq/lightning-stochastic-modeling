@@ -52,6 +52,23 @@ def test_a_plain_scalar_is_neither_an_input_nor_an_output(repo_root):
     assert 'ensemble-size' not in inputs and 'ensemble-size' not in outputs
 
 
+def test_a_REAL_tune_stage_has_its_config_parameters_classified_as_inputs(repo_root):
+    """Driven from the shipped pipeline rather than a fixture, because the failure mode is config-side: ``model-config``
+    and ``metrics-config`` must fingerprint as inputs so that editing a search space or the metric suite busts the cache.
+    A hand-built dict would keep passing after the real config renamed a key."""
+    import os
+
+    from src.utils.io.parse_config import parse_config
+
+    config = parse_config(os.path.join(repo_root, 'config/deterministic_unet/deterministic_unet.yaml'))
+    tune = next(params for stage in config['stages'] for name, params in stage.items() if name == 'tune')
+
+    inputs, outputs = lazy.classify_params(dict(tune), repo_root)
+    assert 'model-config' in inputs, sorted(inputs)
+    assert 'metrics-config' in inputs, sorted(inputs)
+    assert 'ensemble-size' not in inputs and 'ensemble-size' not in outputs, 'a scalar must be neither'
+
+
 # =====================================================================================================================
 # ⚠️ THE stale-path degradation
 # =====================================================================================================================

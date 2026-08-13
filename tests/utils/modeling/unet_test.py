@@ -25,6 +25,43 @@ HEIGHT, WIDTH = 24, 32
 UNET = {'base_channels': 8, 'depth': 2, 'kernel_size': 3, 'blocks_per_level': 1, 'upsampling': 'bilinear_conv',
         'dropout': 0.0, 'normalization': 'group', 'activation': 'relu', 'bottleneck_attention': False}
 
+PUBLIC_SURFACE = ('enable_mc_dropout', 'Fp32BilinearUpsample', 'PlattScaling', 'MonotoneCalibration',
+                  'REGRESSION_CALIBRATION_STRUCTURES', 'UNetBackbone', 'ConvBlock', 'BottleneckAttention',
+                  'DeterministicUnetNet')
+
+
+@pytest.mark.parametrize('name', PUBLIC_SURFACE)
+def test_the_merged_surface_is_all_present(name):
+    """The union of both branches, which is what made this file the delicate part of the merge: D contributed only
+    ``enable_mc_dropout`` and A contributed the two calibration layers and the fp32 upsample."""
+    from src.utils.modeling import unet as unet_module
+
+    assert hasattr(unet_module, name)
+
+
+@pytest.mark.source_invariant
+def test_the_typing_imports_match_what_the_signatures_still_NEED():
+    """Block 3d-0 made ``forward`` return a single tensor instead of ``Tuple[Tensor, Optional[Tensor]]``, which orphaned
+    ``Tuple``. ``Optional`` stays, because ``regression_calibration`` is still optional. A leftover import is harmless in
+    itself; it is the marker that the second head's machinery was removed by deletion rather than by rewiring."""
+    import ast
+
+    from src.utils.modeling import unet as unet_module
+
+    tree = ast.parse(open(unet_module.__file__).read())
+    typing_names = {alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+                    and node.module == 'typing' for alias in node.names}
+    assert 'Tuple' not in typing_names, 'forward returns a single tensor now'
+    assert 'Optional' in typing_names, 'regression_calibration is still optional'
+
+
+def test_the_old_net_name_is_GONE():
+    """``DistrRegressionNet`` was named for a distributional head this project does not have — one output head, chosen by
+    mode. The rename is what makes the checkpoint family marker meaningful."""
+    from src.utils.modeling import unet as unet_module
+
+    assert not hasattr(unet_module, 'DistrRegressionNet')
+
 
 @pytest.fixture
 def net():
@@ -108,6 +145,30 @@ def test_enable_mc_dropout_flips_dropout_and_nothing_else(net):
             assert submodule.training, 'dropout must be active'
         elif isinstance(submodule, (nn.GroupNorm, nn.BatchNorm2d, nn.Conv2d, nn.Linear)):
             assert not submodule.training, f'{type(submodule).__name__} must stay in eval mode'
+
+
+@pytest.mark.parametrize('seed', [0, 1, 2])
+def test_the_mc_spread_does_not_SWAMP_the_input_sensitivity(seed):
+    """The bound that separates a useful MC ensemble from noise: the spread across members of ONE input must be smaller
+    than the difference between two different inputs' ensemble means. If dropout noise exceeded the signal, the spread
+    term of every ensemble metric would measure the dropout rate rather than the model's uncertainty.
+
+    Parametrized over seeds deliberately. The gate this replaces bounded the pairwise member difference by the mean
+    magnitude of the prediction, which holds at only 3 of 5 seeds — the ReLU output is mostly zeros, so it deflates the
+    magnitude without deflating the difference. That bound passed at the gate's own seed and was not a property.
+    """
+    torch.manual_seed(seed)
+    backbone = UNetBackbone(in_channels=3, unet_config={**UNET, 'dropout': 0.2}).eval()
+    enable_mc_dropout(backbone)
+    first, second = torch.randn(2, 3, 12, 16), torch.randn(2, 3, 12, 16)
+    with torch.no_grad():
+        members = torch.stack([backbone(first) for _ in range(16)])
+        other = torch.stack([backbone(second) for _ in range(16)])
+
+    within = (members - members.mean(dim=0)).abs().mean()
+    between = (members.mean(dim=0) - other.mean(dim=0)).abs().mean()
+    assert within > 0, 'the members must not be identical'
+    assert within < between, f'dropout noise ({within:.4f}) swamps input sensitivity ({between:.4f})'
 
 
 def test_mc_dropout_makes_two_forward_passes_differ(net):

@@ -168,6 +168,28 @@ def test_resolve_occurrence_event_rejects_a_reintroduced_threshold():
 # =====================================================================================================================
 # NEW: the two model-independent selection denominators — dataset-level, so they need a prepared directory
 # =====================================================================================================================
+@pytest.mark.source_invariant
+def test_the_suite_RECORDS_which_scores_are_hourly_only(repo_root):
+    """``brier_skill_score``, ``explained_deviance`` and ``dice`` need a calibrated probability, which a daily run has
+    no head for. They were annotated "occurrence head, when enabled" until block 3c dropped that head — so the note had
+    to become "hourly mode only", with the daily consequence stated where a reader meets the key."""
+    import os
+
+    text = open(os.path.join(repo_root, 'config/eval/metrics.yaml')).read()
+    assert 'HOURLY ONLY' in text
+
+
+@pytest.mark.source_invariant
+def test_the_suite_records_that_the_RANKING_scores_survive_a_daily_run(repo_root):
+    """The other half of that note, and the reason dropping the probability head was acceptable: AP and ROC-AUC are
+    invariant to any monotone rescaling, so ranking on predicted HOURS is exact rather than approximate. Without this
+    written down beside the hourly-only note, a reader concludes the whole categorical group is lost on daily."""
+    import os
+
+    text = open(os.path.join(repo_root, 'config/eval/metrics.yaml')).read()
+    assert 'monotone' in text and 'roc_auc' in text
+
+
 def test_build_baselines_aligns_with_the_evaluation_items(prepared_split, metrics_config):
     split_index, prepared_config = prepared_split()
     eval_items = split_index[split_index['split'] == 'valid'].reset_index(drop=True)

@@ -124,6 +124,69 @@ def test_no_upstream_leaves_finetuning_as_sampled():
     assert trial['finetuning']['enabled'] is False
 
 
+@pytest.mark.parametrize('family', ['deterministic_unet', 'mc_dropout', 'diffusion'])
+def test_no_occurrence_head_block_survives(family, search_spaces):
+    """The gate/occurrence-head was dropped in block 3c: the bounded 0-24 target needs no dry-cell gate, and the
+    report-only probability head went with it. A surviving block would be sampled into every trial and silently
+    ignored, costing search budget on a dimension nothing reads."""
+    assert 'occurrence_head' not in search_spaces[family]
+
+
+@pytest.mark.source_invariant
+@pytest.mark.parametrize('family', ['deterministic_unet', 'mc_dropout', 'diffusion'])
+def test_no_space_still_carries_the_dangling_average_precision_WEIGHT(family, repo_root):
+    """It was a commented-out weight left behind when the composite was re-decided, sitting directly under the live
+    weights — read as authoritative by anyone skimming the block. ``average_precision_occurrence`` IS still returned, as
+    an unweighted diagnostic, which is the recorded mitigation for the regression composite having no false-alarm term.
+    """
+    import os
+
+    text = open(os.path.join(repo_root, f'config/{family}/search_space.yaml')).read()
+    assert 'average_precision_occurrence: 0.40' not in text
+
+
+@pytest.mark.source_invariant
+def test_the_prose_no_longer_documents_a_THIRD_weighting(repo_root):
+    """The comment above the ``selection:`` block used to describe ``0.40 AP + 0.30 + 0.30`` — a weighting the block
+    below never had, and a different one again from the 0.50/0.50 the weights themselves said. Three sources, three
+    answers; the prose is the one a reader trusts first."""
+    import os
+
+    text = open(os.path.join(repo_root, 'config/deterministic_unet/search_space.yaml')).read()
+    assert '0.40 * average_precision_occurrence' not in text
+
+
+@pytest.mark.source_invariant
+def test_the_mc_dropout_prose_names_the_RENAMED_ensemble_builder(repo_root):
+    """Its comment claimed ``build_finetune_loss`` was removed and folded into ``build_regression_loss``. It was not:
+    ``mc_dropout_module`` computes ``loss_reg + weight * loss_crps``, so the two are used TOGETHER in one expression and
+    have different signatures. The builder was RENAMED to ``build_ensemble_loss`` for what it actually is."""
+    import os
+
+    text = open(os.path.join(repo_root, 'config/mc_dropout/search_space.yaml')).read()
+    assert 'build_finetune_loss is removed' not in text
+    assert 'build_ensemble_loss' in text
+
+
+def test_upstream_model_path_is_KEYWORD_ONLY():
+    """The signature exists to prevent one specific silent bug. Branch A's call site was
+    ``apply_constraints(trial, rng)`` — and a ``numpy`` ``Generator`` is TRUTHY, so passed positionally into this
+    parameter it would have forced ``finetuning.enabled = True`` on every trial of every family, with no error and no
+    log line. Keyword-only makes that call a ``TypeError`` instead."""
+    import inspect
+
+    parameter = inspect.signature(apply_constraints).parameters['upstream_model_path']
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_a_positional_second_argument_RAISES():
+    """The executable half of the guard above, with the exact value that made it necessary."""
+    import numpy as np
+
+    with pytest.raises(TypeError):
+        apply_constraints({'finetuning': {'enabled': False}}, np.random.default_rng(0))
+
+
 def test_the_unet_block_comes_back_BYTE_IDENTICAL_under_a_warm_start():
     """Rule 2's docstring says the sampled ``unet`` block "is ignored", and that is a LOG LINE about an obligation owed
     by ``MCDropoutModule.from_upstream`` — the body of ``if 'unet' in trial:`` is a bare ``logger.info``. Nothing is

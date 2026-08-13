@@ -283,6 +283,155 @@ def test_hourly_mode_returns_a_probability(make_mc, batch):
     assert float(output['prediction'].min()) >= 0.0 and float(output['prediction'].max()) <= 1.0
 
 
+# =====================================================================================================================
+# training_step, per phase — the two-term finetune loss is what this family exists for
+# =====================================================================================================================
+def test_the_train_phase_returns_a_finite_loss_carrying_a_gradient(make_mc, batch):
+    """Phase 1 is an ordinary pointwise fit, identical to the deterministic family's."""
+    module = make_mc()
+    module.train()
+    module.set_phase('train')
+    loss = module.training_step(batch(), 0)
+    assert torch.isfinite(loss) and loss.requires_grad
+
+
+def test_the_finetune_phase_returns_a_finite_loss_carrying_a_gradient(make_mc, batch):
+    """Phase 2 draws an MC ensemble inside the training step, so it is the one place a live gradient flows through
+    ``_to_prediction_differentiable`` — the unclamped path. A clamp there would zero the gradient for exactly the
+    over-predicting members the ensemble term needs to move."""
+    module = make_mc()
+    module.train()
+    module.set_phase('finetune')
+    loss = module.training_step(batch(), 0)
+    assert torch.isfinite(loss) and loss.requires_grad
+
+
+def test_the_finetune_loss_ADDS_the_ensemble_term_to_the_pointwise_one(make_mc, batch):
+    """``loss_reg + finetune_loss_weight * loss_crps`` — the expression that settled the ``build_ensemble_loss``
+    question: the two builders are used TOGETHER, so folding the ensemble loss into ``build_regression_loss`` was never
+    possible. If the ensemble term were dropped, phase 2 would be phase 1 at a lower learning rate: it would fit, write a
+    checkpoint, and score plausibly, with no calibration of the spread at all.
+    """
+    module = make_mc()
+    module.train()
+    torch.manual_seed(0)
+    one_batch = batch()
+
+    module.set_phase('train')
+    pointwise = float(module.training_step(one_batch, 0))
+    module.set_phase('finetune')
+    combined = float(module.training_step(one_batch, 0))
+
+    assert abs(combined - pointwise) > 1e-6, 'the ensemble term contributed nothing'
+
+
+def test_only_the_MC_family_reduces_its_learning_rate_for_a_second_phase(make_mc, mc_trial, normalization,
+                                                                        target_stats):
+    """``finetune_lr_factor`` exists because phase 2 starts from converged weights. The deterministic family has one
+    fitting phase and therefore no such reduction — checked here so the factor cannot leak into the shared base."""
+    module = make_mc()
+    module.set_phase('train')
+    train_lr = module._learning_rate()
+
+    deterministic = DeterministicUnetModule(mc_trial(), 5, target_stats(), normalization)
+    deterministic.set_phase('train')
+    assert deterministic._learning_rate() == pytest.approx(train_lr)
+
+
+def test_the_composite_is_logged_under_the_selection_metric_name(make_mc):
+    """The same monitor/prune agreement the deterministic family needs, driven through this family's own validation
+    hooks — which draw an ensemble per batch rather than a single pass."""
+    module = make_mc()
+    module.valid_climatology_cond_mae = 2.0
+    module.on_validation_epoch_start()
+    generator = torch.Generator().manual_seed(0)
+    for index in range(2):
+        features = torch.randn(2, 5, 16, 16, generator=generator)
+        target = torch.randint(0, 25, (2, 16, 16), generator=generator).float()
+        module.validation_step((features, target), index)
+    module.on_validation_epoch_end()
+
+    assert module.selection_metric in module.last_val_metrics, sorted(module.last_val_metrics)
+
+
+def test_the_hourly_selection_metric_is_the_CLASSIFICATION_composite(make_mc):
+    """The mode drives it here exactly as in the deterministic family — the composite is not a per-family choice."""
+    module = make_mc(mode='hourly', loss={'name': 'brier'})
+    assert module.selection_metric == 'valid_classification_score'
+
+
+@pytest.mark.source_invariant
+def test_the_target_space_prediction_is_the_MC_MEAN_not_a_single_pass(make_mc):
+    """The override that makes the shared validation accumulation correct for this family. Inheriting the base's single
+    forward pass would score MC-dropout's validation on one dropout draw — noisier than the deterministic baseline and
+    not what the family reports at test time."""
+    import inspect
+
+    source = inspect.getsource(MCDropoutModule._target_space_prediction)
+    assert 'mc_forward' in source
+
+
+@pytest.mark.source_invariant
+def test_the_shared_machinery_is_NOT_redefined_by_either_family():
+    """Block 3d extracted ``UnetModuleBase`` so the phase machinery, the loss dispatch and the validation accumulation
+    have ONE implementation. A family redefining one of them would drift silently — the base's version would still exist
+    and still look authoritative.
+
+    ⚠️ ``_check_phase_available`` and ``_learning_rate`` are deliberately NOT in this list: MC-dropout overrides both, to
+    reject the finetune phase when ``finetuning.enabled`` is false and to apply ``finetune_lr_factor``. Overriding a hook
+    is the mechanism; re-implementing the shared body is the defect.
+    """
+    import ast
+    import inspect
+
+    from src.utils.modeling import deterministic_module, mc_dropout_module
+
+    shared = ('forward', '_head_output', '_to_prediction', 'on_validation_epoch_end',
+              '_validation_reg_calibration', 'set_phase', 'configure_optimizers')
+    for module in (deterministic_module, mc_dropout_module):
+        tree = ast.parse(inspect.getsource(module))
+        defined = {node.name for klass in tree.body if isinstance(klass, ast.ClassDef)
+                   for node in klass.body if isinstance(node, ast.FunctionDef)}
+        for name in shared:
+            assert name not in defined, f'{module.__name__} redefines the shared {name}'
+
+
+def test_a_warm_started_module_writes_ITS_OWN_marker_not_the_upstreams(
+        upstream_checkpoint, mc_trial, normalization, target_stats):
+    """It loaded a ``deterministic_unet`` checkpoint's weights, so the marker is the one thing it must NOT inherit — the
+    registry would then load the finetuned MC-dropout weights as a deterministic module and report no ensemble metrics
+    at all."""
+    module = MCDropoutModule.from_upstream(upstream_checkpoint, mc_trial(), 5, target_stats(), normalization)
+    checkpoint = {}
+    module.on_save_checkpoint(checkpoint)
+    assert checkpoint['module_class'] == 'mc_dropout'
+
+
+def test_the_calibration_phase_is_APPENDED_after_the_finetune_phase(make_mc):
+    """Three phases, in order. A calibration phase inserted before the finetune one would fit the calibrator against
+    weights the finetune phase then moves."""
+    module = make_mc(calibration={'occurrence': 'none',
+                                  'regression': {'structure': 'power_law', 'objective': 'pointwise',
+                                                 'num_sigmoids': 4, 'huber_delta': 1.0}})
+    assert module.training_phases() == ('train', 'finetune', 'regression_calibration')
+
+
+def test_the_finetune_phase_belongs_to_THIS_family_alone(make_mc):
+    assert 'finetune' in MCDropoutModule.PHASES
+    assert 'finetune' not in DeterministicUnetModule.PHASES
+
+
+def test_the_two_families_are_SIBLINGS_not_parent_and_child():
+    """Both derive from the shared base, and neither from the other. If MC-dropout inherited from the deterministic
+    family it would inherit its POINT ``predict_step`` — satisfying the ensemble contract while reporting no members."""
+    from src.utils.modeling.unet_module_base import UnetModuleBase
+
+    assert issubclass(MCDropoutModule, UnetModuleBase)
+    assert issubclass(DeterministicUnetModule, UnetModuleBase)
+    assert not issubclass(MCDropoutModule, DeterministicUnetModule)
+    assert not issubclass(DeterministicUnetModule, MCDropoutModule)
+
+
 def test_the_finetune_phase_uses_a_reduced_learning_rate(make_mc):
     """``finetune_lr_factor`` exists so the CRPS phase refines rather than undoing the point-fit phase."""
     module = make_mc()

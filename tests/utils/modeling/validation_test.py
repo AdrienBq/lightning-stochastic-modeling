@@ -63,12 +63,118 @@ def test_every_component_key_is_returned_on_every_call(fixture):
     assert set(components) == COMPONENT_KEYS
 
 
+def test_the_two_default_weightings_are_the_DECIDED_ones():
+    """These numbers resolved a three-way disagreement in the repo: the YAML's weights said 0.50/0.50, the YAML's own
+    prose said ``0.40 AP + 0.30 + 0.30``, and ``validation.py``'s docstring said 0.60/0.40. The docstring was right.
+
+    ⚠️ The classification composite keeps ``psd_full_fidelity`` at its full 0.30 despite the Block 2r2 finding that the
+    structure scores are BIASED against a calibrated probability field — a calibrated map is intrinsically smoother than
+    the 0/1 field it is compared against. Accepted deliberately, so the weight is pinned rather than left to drift.
+    """
+    assert DEFAULT_SELECTION_WEIGHTS == {
+        'valid_regression_score': {'mae_cond_ss_climatology': 0.60, 'psd_full_fidelity': 0.40},
+        'valid_classification_score': {'average_precision_occurrence': 0.50, 'brier_skill_score': 0.20,
+                                       'psd_full_fidelity': 0.30},
+    }
+
+
+def test_every_shipped_space_declares_the_regression_composite_and_its_weights(search_spaces):
+    """All nine pipelines are daily, so all three spaces must name the regression composite — and their weights must
+    equal the module default for it, or a family would rank on a different score from its siblings while the comparison
+    table presented the numbers as equivalent."""
+    for family, space in search_spaces.items():
+        selection = space['selection']
+        assert selection['metric'] == 'valid_regression_score', family
+        assert selection['components'] == DEFAULT_SELECTION_WEIGHTS['valid_regression_score'], family
+        assert selection_metric_for_mode('daily', selection['metric']) == 'valid_regression_score', family
+
+
 def test_search_space_weights_are_exactly_the_emitted_keys(search_spaces):
     """The check that would have caught the 0.50/0.50-vs-prose drift: a weight naming a component the function does
     not emit contributes nothing silently, and the trial ranks on a composite missing that term."""
     for family, space in search_spaces.items():
         weights = set(space['selection']['components'])
         assert weights <= COMPONENT_KEYS, f'{family} weights unknown components: {sorted(weights - COMPONENT_KEYS)}'
+
+
+def test_every_component_is_FINITE_when_all_its_inputs_are_supplied(fixture):
+    """The complement of the NaN tests below: given the probability and the climatology denominators, nothing is NaN. A
+    silently NaN component contributes 0 to the composite, so a trial would rank on a partial score without any signal
+    that a term dropped out."""
+    prediction, observation, _, _, climatology = fixture
+    probability = np.clip(prediction / 24.0, 0.0, 1.0)
+    occurrence = (observation > 0).astype(np.float32)
+
+    components = compute_selection_components(
+        prediction, observation, climatology_cond_mae=climatology,
+        occurrence_probability=probability, occurrence_event=(0.0, True),
+        climatology_brier=float(np.mean((occurrence.mean() - occurrence) ** 2)),
+    )
+    not_finite = {key: value for key, value in components.items() if not np.isfinite(value)}
+    assert not not_finite, not_finite
+
+
+def test_the_average_precision_IS_finalize_ranking_metrics_on_the_same_inputs(fixture):
+    """One implementation, not two — the ``crps_ensemble`` divergence lesson applied to the ranking path. AP carries
+    0.50 of the classification composite, so a second implementation drifting from the reported one would change which
+    trial wins without changing any reported number."""
+    from src.utils.metrics import scores
+
+    prediction, observation, _, _, climatology = fixture
+    probability = np.clip(prediction / 24.0, 0.0, 1.0)
+    occurrence = (observation > 0).astype(np.float32)
+
+    components = compute_selection_components(
+        prediction, observation, climatology_cond_mae=climatology,
+        occurrence_probability=probability, occurrence_event=(0.0, True),
+    )
+
+    edges = scores.ranking_bin_edges()
+    partials = scores.ranking_partials(probability.ravel(), occurrence.ravel(), edges)
+    expected = scores.finalize_ranking_metrics(partials, edges)['average_precision']
+    assert components['average_precision_occurrence'] == pytest.approx(expected, abs=1e-12)
+
+
+def test_the_brier_skill_score_IS_one_minus_the_ratio_to_its_denominator(fixture):
+    """The definition, pinned against the arithmetic. The denominator is the per-cell day-of-year climatology, which is
+    STRONGER than the constant base rate ``r2_score`` implicitly uses — so ``r2 > 0`` with ``brier_skill_score < 0``
+    means the model beats the base rate but not the climatology."""
+    from src.utils.metrics import scores
+
+    prediction, observation, _, _, climatology = fixture
+    probability = np.clip(prediction / 24.0, 0.0, 1.0)
+    occurrence = (observation > 0).astype(np.float32)
+    denominator = 0.05
+
+    components = compute_selection_components(
+        prediction, observation, climatology_cond_mae=climatology,
+        occurrence_probability=probability, occurrence_event=(0.0, True),
+        climatology_brier=denominator,
+    )
+    expected = 1.0 - scores.brier_score(probability, occurrence) / denominator
+    assert components['brier_skill_score'] == pytest.approx(expected, abs=1e-9)
+
+
+def test_ets_h6_matches_an_INDEPENDENT_contingency_table_at_six_hours(fixture):
+    """``ets_h6`` was re-keyed from A's ``ets_p99`` so that the trials table uses the same threshold definition as
+    ``config/eval/metrics.yaml`` — an absolute 6-hour band rather than a distribution quantile. This computes the table
+    from scratch at that threshold, so the re-keying is checked rather than assumed."""
+    from src.utils.metrics import scores
+
+    prediction, observation, _, _, _ = fixture
+    components = compute_selection_components(prediction, observation)
+
+    expected = scores.categorical_scores(*scores.contingency_counts(prediction, observation, 6.0))['ets']
+    assert components['ets_h6'] == pytest.approx(expected, abs=1e-9)
+
+
+def test_compute_selection_components_takes_NO_target_stats(fixture):
+    """It dropped the argument in block 3b-2 along with ``positive_quantiles`` — the last consumer of that block of
+    ``target_stats.json``. A caller still passing it positionally would land the dict in the next parameter."""
+    import inspect
+
+    parameters = inspect.signature(compute_selection_components).parameters
+    assert 'target_stats' not in parameters, sorted(parameters)
 
 
 def test_mae_cond_skill_is_nan_without_its_denominator(fixture):
