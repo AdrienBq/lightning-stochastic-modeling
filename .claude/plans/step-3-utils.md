@@ -504,6 +504,78 @@ repo is computed on the arrays rather than on the rendered picture:
   axis and inverted x, and `metrics.yaml` ⇄ `write_report` parity in **both** directions (no unconfigured builder,
   no undispatched figure, `qq_plot` absent from both).
 
+## 5a. Tests — ✅ DONE (598 passing, 613 collected, 14 skipped)
+
+`tests/` **mirrors `src/`**: every directory under `src/` has the same directory here, and every non-`__init__` module a
+`<module>_test.py` beside it. 32 test files for the 27 modules plus the two `__init__.py` that carry real code
+(`plotting`'s `show_plot_and_save`, `stages`' seeding hook, as `init_test.py`) and three Step-4 placeholders.
+
+`<module>_test.py` **singular** is deliberate — it is one of pytest's two default patterns, so no `python_files`
+override is needed and there is no config whose absence silently collects zero tests and exits 0.
+
+`tests/completeness_test.py` is a meta-test that makes the layout enforceable rather than aspirational: the mirror is
+complete in **both** directions (no module without a test file, no test file outliving its module), and every function
+in `src/` is referenced by some test. The second is `xfail` until 5c — it currently reports **137 of 291 untested**,
+which is 5c's work-list.
+
+### Where A's 1479 lines went
+
+All four of A's non-stage files were ported. `test_ensemble_scores.py` split across `metrics/scores_test.py` +
+`evaluation_test.py`; `test_residual_diagnostics.py` across `metrics/diagnostics_test.py` +
+`modeling/diffusion_module_test.py` + `metrics/reporting_test.py`; `test_probabilistic_eval_compat.py` across
+`modeling/registry_test.py` (the cross-family `predict_step` parity — making the families interchangeable is
+registry.py's job) + `mc_dropout_module_test.py` + `mc_dropout_eval_test.py`. A's two stage-level files became the
+three skipped placeholders, with their paths **pre-fixed** for Step 2's contract so Step 4 deletes one `pytestmark`
+line per file rather than re-deriving the adaptation.
+
+**Five of A's tests were deliberately dropped**, each replaced by a positive test of what superseded it:
+`test_resolve_map_norm_quantize_and_cap` + the two `quantize` layout tests (the whole map-colour configuration surface
+is gone under the 02a grammar) and `test_mc_dropout_loads_for_eval_despite_unimplemented_finetune_loss` (it asserted
+`registry._mc_dropout_eval_overrides` exists; the replacement asserts `build_ensemble_loss('afcrps_psd')` now builds,
+so the workaround's premise is gone). A's four-pair `combine_curves` test lost its `qq` pair with `quantile_quantile`.
+
+### Findings — the code was right, my premises were wrong, ~12 times
+
+Worth recording because several are things the plan documents *incorrectly*:
+
+1. **`mc_forward` DOES clamp.** The ceiling is in `_to_prediction`, applied per member — so A's `<= 24` assertion
+   survives for a different reason than A's `scaled_sigmoid`. Only `_to_prediction_differentiable` skips it.
+2. **`from_upstream` OVERRIDES architecture rather than rejecting it**, and raises on `in_channels` / `mode` /
+   missing hyperparameters. This file's block 3d text says it "raises naming the offending field" for
+   `base_channels` / `depth` / `activation` — the code is right and the text is stale, since rejecting those would
+   fail 26 warm-start trials in 27. `WARM_START_ARCHITECTURE_KEYS`' comment ("must agree") also overstates: it only
+   drives the override *log*.
+3. **adaLN-Zero makes a fresh `FlowVelocityNet` emit exactly zero velocity**, so any "changing the input changes the
+   output" test is vacuously false at initialisation. Now pinned as a property, with a `perturbed_net` fixture for the
+   sensitivity tests.
+4. **`UNetBackbone` cannot take the real 101 × 149 grid** — 101 → 50 → 100 breaks the skip concat. `DeterministicUnetNet`
+   pads to a multiple of `2 ** depth` and crops back. **Every Step 3 gate used a 24 × 32 fixture, divisible by 8, so
+   this was never exercised**; the test now runs the real grid at depths 3–5.
+5. **`ConvBlock` emits `Dropout2d` only when `dropout > 0`** — the layer is omitted, not inert. Which is exactly why
+   `MCDropoutModule` must reject `dropout_p <= 0`.
+6. **No shipped search space offers a binary loss** — all three are daily spaces, consistent with the config's own note
+   that an hourly space "just sets `loss.name` to one of focal_bce / dice / brier / crps_binary".
+7. **`apply_constraints` mutates in place.** Harmless at its call site (`trials.csv` records the repaired trial), but
+   the optuna path diverges from its own record: `study.ask()` registers the sampled gamma, the repair forces it to 0,
+   and `study.tell` attributes the score to the phantom value. Unreachable today (focal_bce only). Documented.
+8. **`build_ensemble_loss` ignores `enabled`** — the phase gate lives in the module.
+9. **`DiffusionModule` keeps its marker as a module-level constant**, not a class attribute, being standalone. So the
+   marker contract must be checked through `on_save_checkpoint`, not `cls.CHECKPOINT_MARKER`.
+10. **Stage modules are not importable as `src.stages.X`** — `from __init__ import root_path` resolves only with
+    `src/stages/` on `sys.path`. That is the convention (it triggers the seeding hook), and `tests/stages/conftest.py`
+    replicates it at *module* scope, because the test files import their stage during collection.
+11. **`run._coerce_bool` falls back to the default for `None` only** — any unrecognised string becomes `False`, so a
+    typo'd `lazy: ture` silently disables the cache. Documented; `False` is the safe direction for every flag it governs.
+12. **`show_plot_and_save` with a placeholder-less pattern silently writes every figure to one file.**
+
+### Notes
+
+- `reporting_test.py` was 216 s before the cartopy renders were shared via module-scoped fixtures; 96 s after. The
+  whole suite is ~150 s.
+- Three files are **thin by design** and say so (`banner`, `stages/hello_world`, `stages/setup` — untouched template
+  code); 5c gives their functions real tests under the every-function requirement.
+- The nine `gate_block*.py` scripts still pass **788 / 0** unchanged, so nothing here required a source edit.
+
 ---
 
 ## Settled: the output head, per mode
