@@ -32,7 +32,7 @@ stages:
         evaluation: outputs/mc_dropout_smoke_cpu/evaluation
         reports: outputs/mc_dropout_smoke_cpu/reports
 
-    - prepare_regression:
+    - prepare_modeling:
         data-path: '{{$DATA_ROOT}}'
         split-config: config/split/split_smoke_cpu.yaml
         output-path: outputs/mc_dropout_smoke_cpu/prepared/daily
@@ -80,7 +80,7 @@ stages:
         num-workers: 0
         progress-bar: true
 
-    - evaluate_regression:
+    - evaluate:
         input-path: outputs/mc_dropout_smoke_cpu/prepared/daily
         model-path: outputs/mc_dropout_smoke_cpu/best/best_model.ckpt
         output-path: outputs/mc_dropout_smoke_cpu/evaluation

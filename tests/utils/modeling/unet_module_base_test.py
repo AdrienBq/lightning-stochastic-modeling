@@ -95,7 +95,7 @@ def test_an_ensemble_loss_on_a_family_that_cannot_provide_members_raises(
 # Mode-derived state
 # =====================================================================================================================
 def test_the_mode_comes_from_target_stats_not_a_constructor_argument():
-    """``prepare_regression`` writes ``mode`` into ``target_stats.json``, so the factory signature
+    """``prepare_modeling`` writes ``mode`` into ``target_stats.json``, so the factory signature
     ``(trial, in_channels, target_stats, normalization)`` needed no new argument for the task split."""
     parameters = list(inspect.signature(UnetModuleBase.__init__).parameters)
     assert parameters == ['self', 'trial', 'in_channels', 'target_stats', 'normalization']

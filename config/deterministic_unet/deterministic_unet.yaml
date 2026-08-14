@@ -26,10 +26,10 @@ description: 'Deterministic U-net: the baseline, and the upstream model for resi
 #
 # Stages (all shared; none is family-specific):
 #   setup              -> create the output tree
-#   prepare_regression -> tensorize predictors + the daily 0-24 lightning-hours target for the shared year split
+#   prepare_modeling -> tensorize predictors + the daily 0-24 lightning-hours target for the shared year split
 #   tune               -> the unified tuning harness, dispatched by `model-family`
 #   retrain_best       -> refit the winning trial's configuration
-#   evaluate_regression-> THE common evaluation, identical for all three families
+#   evaluate-> THE common evaluation, identical for all three families
 #
 # Target: `mode: daily` -- the number of hours in the day with lightning, per cell, BOUNDED 0-24 (informally
 # "daily lightning hours"; the mode is the only thing that selects it, there is no target-variable key). It is a
@@ -55,7 +55,7 @@ stages:
     # standardization is fitted by the tuning stage and baked into the checkpoint (the dataset-side scalers/
     # directory is deprecated).
     # ------------------------------------------------------------------------------------------------------------
-    - prepare_regression:
+    - prepare_modeling:
         data-path: '{{$DATA_ROOT}}'         # dataset root; NEVER hardcode a path. The token is {{$VAR}} -- an
                                             # unset variable substitutes to the empty string, so a missing
                                             # DATA_ROOT fails at the stage, not silently.
@@ -132,7 +132,7 @@ stages:
     # in one table with identical metric-key columns. Writes a flat JSON of scalars (auto-logged to mlflow via
     # metrics-path) and a report directory of figures + CSVs (auto-logged via report-path).
     # ------------------------------------------------------------------------------------------------------------
-    - evaluate_regression:
+    - evaluate:
         input-path: outputs/deterministic_unet/prepared/daily
         model-path: outputs/deterministic_unet/best/best_model.ckpt
         output-path: outputs/deterministic_unet/evaluation

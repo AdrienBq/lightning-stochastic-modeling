@@ -2,7 +2,7 @@
 
 Every module writes a ``module_class`` marker into its checkpoints (``on_save_checkpoint``).
 :func:`load_model_module` reads that marker and loads the matching class, so THE shared evaluation stage — and the
-upstream-prediction pass of ``prepare_regression`` — can consume a checkpoint of any family without knowing which.
+upstream-prediction pass of ``prepare_modeling`` — can consume a checkpoint of any family without knowing which.
 
 Three resolution paths, in priority order:
   1. an explicit ``model_family`` argument (authoritative; the evaluation stage exposes it as ``--model-family``);

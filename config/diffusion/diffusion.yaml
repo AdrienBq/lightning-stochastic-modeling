@@ -22,7 +22,7 @@ description: 'Flow-matching parameterization of lightning, optionally residual o
 #
 # TWO MODES, selected by whether an upstream checkpoint is supplied to the preparation stage:
 #   FULL-TARGET (UPSTREAM_MODEL unset) : the model learns the entire target.
-#   RESIDUAL / knowledge-guided        : prepare_regression additionally runs the upstream deterministic U-net over
+#   RESIDUAL / knowledge-guided        : prepare_modeling additionally runs the upstream deterministic U-net over
 #     every item and stores its target-space prediction as per-day upstream/<date>.npy maps, flagging the directory
 #     residual. The diffusion then conditions on that prediction (appended as the LAST conditioning channel, passed
 #     as a third batch item) and learns the DISCREPANCY, returning clamp(upstream + residual). The raw targets are
@@ -52,7 +52,7 @@ stages:
     # 1) Data preparation. Identical to the other two families, plus the optional upstream pass that turns the
     # directory into a residual one.
     # ------------------------------------------------------------------------------------------------------------
-    - prepare_regression:
+    - prepare_modeling:
         data-path: '{{$DATA_ROOT}}'         # dataset root; NEVER hardcode a path
         split-config: config/split/split.yaml     # the shared year-based split (see CLAUDE.md "Data")
         output-path: outputs/diffusion/prepared/daily
@@ -123,7 +123,7 @@ stages:
     # always in the target space and directly comparable to the other two families. In residual mode the six
     # residual_* report figures populate as well; they self-skip otherwise.
     # ------------------------------------------------------------------------------------------------------------
-    - evaluate_regression:
+    - evaluate:
         input-path: outputs/diffusion/prepared/daily
         model-path: outputs/diffusion/best/best_model.ckpt
         output-path: outputs/diffusion/evaluation

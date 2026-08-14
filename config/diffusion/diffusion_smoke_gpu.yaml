@@ -34,7 +34,7 @@ stages:
         evaluation: outputs/diffusion_smoke_gpu/evaluation
         reports: outputs/diffusion_smoke_gpu/reports
 
-    - prepare_regression:
+    - prepare_modeling:
         data-path: '{{$DATA_ROOT}}'
         split-config: config/split/split_smoke_gpu.yaml
         output-path: outputs/diffusion_smoke_gpu/prepared/daily
@@ -87,7 +87,7 @@ stages:
         precision: bf16-mixed
         progress-bar: true
 
-    - evaluate_regression:
+    - evaluate:
         input-path: outputs/diffusion_smoke_gpu/prepared/daily
         model-path: outputs/diffusion_smoke_gpu/best/best_model.ckpt
         output-path: outputs/diffusion_smoke_gpu/evaluation

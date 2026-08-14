@@ -1,4 +1,4 @@
-"""Tests for src/stages/evaluate_regression.py — ⏳ **STEP 4 PLACEHOLDER, entirely skipped.**
+"""Tests for src/stages/evaluate.py — ⏳ **STEP 4 PLACEHOLDER, entirely skipped.**
 
 The module does not exist yet: ``src/stages/`` holds only the plumber template's ``hello_world.py`` / ``run.py`` /
 ``setup.py``. This file exists so the mirror states Step 4's obligation rather than hiding it, and so the port of branch
@@ -24,7 +24,7 @@ import sys
 
 import pytest
 
-pytestmark = pytest.mark.skip(reason='src/stages/evaluate_regression.py is Step 4; delete this line to enable')
+pytestmark = pytest.mark.skip(reason='src/stages/evaluate.py is Step 4; delete this line to enable')
 
 
 def _env(name, default=None):
@@ -35,7 +35,7 @@ def _env(name, default=None):
 def _run_stage(repo_root, prepared, model_path, model_family, out_dir, report_dir, metrics_path):
     """Invoke the real evaluation stage exactly as the pipeline does, from the repo root."""
     command = [
-        sys.executable, 'src/stages/evaluate_regression.py',
+        sys.executable, 'src/stages/evaluate.py',
         '--input_path', prepared,
         '--model_path', model_path,
         '--output_path', out_dir,
@@ -92,7 +92,7 @@ def test_the_stage_scores_each_family(family, repo_root, tmp_path):
 
 def test_all_available_families_are_scored_by_the_SAME_metric_suite(repo_root, tmp_path):
     """The invariant the whole shared-evaluation design exists for. Two families reporting different metric keys means
-    ``evaluate_regression`` grew a family-specific path."""
+    ``evaluate`` grew a family-specific path."""
     prepared = _env('PROB_EVAL_PREPARED')
     available = {family: _env(f'PROB_EVAL_{family.upper()}')
                  for family in ('diffusion', 'mc_dropout', 'deterministic_unet')}

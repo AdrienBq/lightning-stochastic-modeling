@@ -37,7 +37,7 @@ def make_diffusion(diffusion_trial, target_stats):
 # residual_target comes from the DATA, never from a hyperparameter
 # =====================================================================================================================
 def test_residual_mode_is_read_from_the_prepared_data(make_diffusion):
-    """It is a property of the prepared DIRECTORY: the mode exists only if ``prepare_regression`` was given
+    """It is a property of the prepared DIRECTORY: the mode exists only if ``prepare_modeling`` was given
     ``upstream-model-path``, which is what materialises the upstream channel and the third batch item. Sampling it per
     trial would make half of every sweep ask for a mode the data cannot provide."""
     assert make_diffusion(residual=True).residual_target is True

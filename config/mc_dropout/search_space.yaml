@@ -19,8 +19,8 @@
 #     the upstream checkpoint's weights are loaded into an identically-shaped MC-dropout U-net and ONLY the
 #     finetuning phase runs. This is a WEIGHT initialization, not a conditioning channel -- the crucial difference
 #     from the diffusion family, whose residual mode needs the upstream PREDICTION materialized by
-#     prepare_regression. MC-dropout needs the upstream WEIGHTS, so its switch sits on `tune` and its
-#     prepare_regression call is the plain full-target one.
+#     prepare_modeling. MC-dropout needs the upstream WEIGHTS, so its switch sits on `tune` and its
+#     prepare_modeling call is the plain full-target one.
 #
 #   Two consequences for THIS file in warm-start mode:
 #     * the `unet:` block below is NOT searched -- base_channels, depth, activation, bottleneck_attention,

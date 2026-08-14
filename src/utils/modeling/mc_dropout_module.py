@@ -13,7 +13,7 @@ TWO WAYS TO GET HERE, decided by whether the ``tune`` stage was given an ``upstr
   WARM START (``UPSTREAM_MODEL`` set) — phase 1 is REPLACED by the deterministic U-net:
     :meth:`MCDropoutModule.from_upstream` loads that checkpoint's weights, and ONLY ``finetune`` runs. This is a
     WEIGHT initialization, not a conditioning channel — the crucial difference from the diffusion family, whose
-    residual mode needs the upstream PREDICTION materialised by ``prepare_regression``.
+    residual mode needs the upstream PREDICTION materialised by ``prepare_modeling``.
 
 ⚠️ ``from_upstream`` IS THE WHOLE WARM-START MECHANISM, and it is a classmethod on purpose. It sets
 ``warm_started`` on the same object it just loaded weights into, so the flag is unreachable without them. Were it a

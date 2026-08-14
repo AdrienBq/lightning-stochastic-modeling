@@ -1,7 +1,7 @@
 # =====================================================================================================================
 # Train / validation / test split — SHARED by every model family.
 #
-# This is the single source of truth for the split, loaded by prepare_regression so that every downstream stage
+# This is the single source of truth for the split, loaded by prepare_modeling so that every downstream stage
 # (tuning, retraining, evaluation) and every family reproduces the SAME partition. It transcribes the split
 # documented in CLAUDE.md ("Data" section).
 #

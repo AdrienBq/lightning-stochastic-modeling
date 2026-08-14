@@ -39,7 +39,7 @@ The three families are:
 
 Both stochastic families are driven by the same `UPSTREAM_MODEL` environment variable, but read it at different
 stages and for different things: MC-dropout takes the upstream's **weights** (in `tune`), diffusion takes its
-**predictions** as an extra conditioning channel (in `prepare_regression`). Leave it unset and each family trains
+**predictions** as an extra conditioning channel (in `prepare_modeling`). Leave it unset and each family trains
 standalone.
 
 Because ~99.93 % of cells (hourly) are zero, evaluation leads with base-rate-robust categorical scores (ETS, SEDI)

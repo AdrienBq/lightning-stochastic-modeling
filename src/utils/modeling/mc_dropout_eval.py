@@ -1,7 +1,7 @@
 """Evaluation adapter that lets an MC-dropout checkpoint be scored by THE shared evaluation stage, identically to a
 diffusion model.
 
-``evaluate_regression`` drives every family through one duck-typed contract:
+``evaluate`` drives every family through one duck-typed contract:
   * eval-time knobs set on the loaded module — ``eval_ensemble_size`` (``> 1`` enables the probabilistic suite),
     ``eval_occurrence_event`` (the metrics.yaml occurrence event), ``eval_ensemble_seed``, ``target_stats``;
   * ``predict_step(batch, batch_idx)`` returning, in the target space:

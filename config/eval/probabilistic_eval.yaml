@@ -18,7 +18,7 @@ description: 'Cross-family comparison: one evaluation, one metric table, one set
 # report, then puts them side by side. No training and no preparation happens here: run
 # config/deterministic_unet/deterministic_unet.yaml, config/mc_dropout/mc_dropout.yaml and config/diffusion/diffusion.yaml first, then this.
 #
-# What makes it a proof: every `evaluate_regression` call below is the SAME stage with the SAME metrics-config.
+# What makes it a proof: every `evaluate` call below is the SAME stage with the SAME metrics-config.
 # registry.load_model_module dispatches the family from the checkpoint marker (with _sniff_family as the legacy
 # fallback) and wraps MC-dropout in MCDropoutEnsembleModule so it satisfies the shared ensemble contract. Therefore
 # tabulate_metrics MUST emit one CSV whose metric-key COLUMNS ARE IDENTICAL across the three families. If they are
@@ -48,7 +48,7 @@ stages:
     # sampling/ensemble knobs, and nothing else.
     # ------------------------------------------------------------------------------------------------------------
     # 1a) Deterministic U-net -- the baseline
-    - evaluate_regression:
+    - evaluate:
         input-path: outputs/deterministic_unet/prepared/daily
         model-path: outputs/deterministic_unet/best/best_model.ckpt
         output-path: outputs/comparison/evaluation/deterministic_unet
@@ -65,7 +65,7 @@ stages:
         progress-bar: true
 
     # 1b) MC-dropout
-    - evaluate_regression:
+    - evaluate:
         input-path: outputs/mc_dropout/prepared/daily
         model-path: outputs/mc_dropout/best/best_model.ckpt
         output-path: outputs/comparison/evaluation/mc_dropout
@@ -82,7 +82,7 @@ stages:
         progress-bar: true
 
     # 1c) Flow-matching diffusion
-    - evaluate_regression:
+    - evaluate:
         input-path: outputs/diffusion/prepared/daily
         model-path: outputs/diffusion/best/best_model.ckpt
         output-path: outputs/comparison/evaluation/diffusion

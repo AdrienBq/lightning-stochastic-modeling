@@ -5,7 +5,7 @@
 # minutes, while still exercising every code path. It is NOT a scientifically meaningful partition.
 #
 # Two deliberate choices:
-#   1. method: by_sample_id — the only way to slice below one year. `prepare_regression` caps days with a GLOBAL
+#   1. method: by_sample_id — the only way to slice below one year. `prepare_modeling` caps days with a GLOBAL
 #      `max_samples` (index.head(N)), which on the year split would keep only the earliest days, i.e. test-only, and
 #      the stage RAISES when any split is empty. Naming explicit id ranges avoids that entirely.
 #   2. MID-JULY days — the peak of the convective season. Winter days are all-zero, which drives the occurrence base

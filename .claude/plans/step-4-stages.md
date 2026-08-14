@@ -53,8 +53,13 @@ invariant CLAUDE.md states as *"One evaluation for all families. Never add a fam
 3. **`compute_high_lightning_days` becomes a utility, not a stage.** Into `src/utils/io/data.py` beside
    `index_samples` / `load_dataset_metadata`, which already parse the same `metadata.csv`, so the CSV-reading knowledge
    stays in one file. No `src/stages/` entry, no mirrored stage test.
-4. **`hello_world` is deleted** — template scaffold with no consumer. Removes `src/stages/hello_world.py` and
-   `tests/stages/hello_world_test.py`.
+4. ~~**`hello_world` is deleted**~~ — ⛔ **REVERSED in block 4a, after the check the decision asked for.** The
+   criterion was "template scaffold with no consumer", and it has two: `README.md` links `config/hello_world.yaml`
+   twice as *the* worked example of the pipeline-config format, and `run_project.py`'s own docstring points at it for
+   the `lazy` / `ensure_determinism` keys. It is also the only pipeline in the repo that runs with **no `$DATA_ROOT`
+   at all** — the cheapest possible smoke of the orchestrator itself, which is exactly what Step 0 used as its gate.
+   Its config documents four top-level keys the family pipelines never show (`banner_font`,
+   `lazy_content_max_file_mb`, `lazy_content_max_dir_mb`, and the bare-minimum `stages` form). **Kept.**
 5. **A synthetic-root end-to-end test; the smoke configs stay where they are.** See §"End-to-end verification". The
    real-`$DATA_ROOT` smoke run remains a human-invoked gate.
 
@@ -192,9 +197,12 @@ ensemble scalars `NaN`. Verify `_DISPLAY_NAMES` covers the three shipped labels 
 
 ### Deletions and the utility move
 
-- `src/stages/hello_world.py` + `tests/stages/hello_world_test.py`.
+- ~~`src/stages/hello_world.py`~~ — kept, see decision 4.
 - `compute_high_lightning_days` → `src/utils/io/data.py` as `high_lightning_days(data_path, quantile=0.95)`, tested in
   the existing `data_test.py`.
+  ⚠️ It carries a documented leak caveat: the quantile is taken over **every** day in `metadata.csv`, test years
+  included. That is right for describing the dataset and wrong for anything feeding a model. Documented rather than
+  changed (filtering would make it the wrong tool for its actual job), and a test asserts the caveat survives edits.
 - Not ported: D's `prepare_*` / `tune_*` / `evaluate_*`; A's `evaluate_distr_regression` and
   `prepare_distr_regression` shims, and `tune_diffusion` / `retrain_best_diffusion`.
 

@@ -116,6 +116,44 @@ def metadata_variable_names(metadata: dict) -> List[str]:
     return [metadata[f'variable_{i}'] for i in range(1, num_variables + 1)]
 
 
+def high_lightning_days(data_path: str, quantile: float = 0.95) -> pd.DataFrame:
+    """The days whose domain-wide stroke count reaches a quantile of the dataset's own marginal — "the extremes".
+
+    Reads ``num_lightnings`` from ``metadata.csv`` (the total raw ATDnet stroke count per day over the whole domain)
+    and returns the days at or above its ``quantile``, most active first. Analysis helper: it answers a question about
+    the DATA, not about a model, and no pipeline stage calls it — which is why it lives here beside the other
+    ``metadata.csv`` readers rather than being a stage of its own.
+
+    ⚠️ The quantile is taken over EVERY day in ``metadata.csv``, train/valid/test alike. That is deliberate for
+    describing the dataset, and wrong for anything that feeds a model: selecting on a threshold computed with the test
+    years in it leaks. Filter to the train split first if a result is going to inform a modelling choice.
+
+    Args:
+        data_path: Path to the dataset directory (holding ``metadata.csv``).
+        quantile: Quantile of the daily domain-wide stroke count, in ``[0, 1]``.
+
+    Returns:
+        DataFrame with ``date``, ``num_lightnings``, ``pixels_with_lightning`` and ``quantile_threshold`` (the
+        resolved stroke count), sorted by ``num_lightnings`` descending. The threshold column is constant and is
+        carried so a written-out CSV records what produced it.
+    """
+    if not 0.0 <= float(quantile) <= 1.0:
+        raise ValueError(f'quantile must lie in [0, 1]; got {quantile}.')
+    metadata = pd.read_csv(os.path.join(data_path, METADATA_CSV_FILENAME), parse_dates=['date'])
+
+    threshold = int(round(float(metadata['num_lightnings'].quantile(quantile))))
+    logger.info(
+        f'{quantile:.0%} quantile of num_lightnings: {threshold} strokes (over {len(metadata)} days).'
+    )
+
+    columns = ['date', 'num_lightnings', 'pixels_with_lightning']
+    days = metadata[metadata['num_lightnings'] >= threshold][columns].copy()
+    for column in ('num_lightnings', 'pixels_with_lightning'):
+        days[column] = days[column].round().astype(int)
+    days['quantile_threshold'] = threshold
+    return days.sort_values('num_lightnings', ascending=False).reset_index(drop=True)
+
+
 def index_samples(data_path: str) -> pd.DataFrame:
     """Build an index of available samples by joining ``metadata.csv`` with the files in ``samples/``.
 
@@ -420,7 +458,7 @@ def compute_feature_stats(
 
 
 def load_prepared_artifacts(prepared_path: str) -> Tuple[dict, pd.DataFrame, dict]:
-    """Load the artifacts written by the preparation stage (``prepare_regression`` / ``prepare_classification``).
+    """Load the artifacts written by the preparation stage (``prepare_modeling`` / ``prepare_classification``).
 
     Args:
         prepared_path: Output directory of the preparation stage.

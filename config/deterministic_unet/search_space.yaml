@@ -4,7 +4,7 @@
 #
 # This family is the deterministic U-net: the baseline, AND the upstream model whose prediction the residual
 # diffusion corrects. It carries the SHARED SKELETON only — no ensemble knobs (it is deterministic, so
-# evaluate_regression emits no ensemble_members) and no flow-matching knobs.
+# evaluate emits no ensemble_members) and no flow-matching knobs.
 #
 # Conventions:
 #   * categorical hyperparameters:  {type: categorical, choices: [...]}

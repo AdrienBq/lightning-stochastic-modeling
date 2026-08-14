@@ -295,7 +295,7 @@ def test_run_metric_suite_produces_the_continuous_group_for_both_tasks(task, dai
 @pytest.fixture(scope='module')
 def suite_arrays():
     """A sparse bounded observation, a noisy prediction, an occurrence probability and both baselines — the argument set
-    ``evaluate_regression`` assembles. Module-scoped: the PSD pass over it is the expensive part."""
+    ``evaluate`` assembles. Module-scoped: the PSD pass over it is the expensive part."""
     rng = np.random.default_rng(0)
     n, h, w = 6, 24, 28
     observation = np.zeros((n, h, w))

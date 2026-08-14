@@ -564,7 +564,7 @@ def test_an_UNINTERPRETABLE_layout_raises_rather_than_guessing(tmp_path):
 # ---------------------------------------------------------------------------------------------------------------------
 @pytest.fixture
 def prepared_directory(tmp_path):
-    """The three files ``prepare_regression`` writes, plus the optional feature/upstream columns."""
+    """The three files ``prepare_modeling`` writes, plus the optional feature/upstream columns."""
     import json
 
     def build(mode='daily', feature_files=False, upstream_files=False):
@@ -701,3 +701,98 @@ def test_a_MISSING_upstream_column_raises_rather_than_returning_zero_statistics(
     index, _ = upstream_index(days=2)
     with pytest.raises(ValueError, match='upstream_file'):
         compute_upstream_stats(index.drop(columns=['upstream_file']))
+
+
+# =====================================================================================================================
+# high_lightning_days — "the extremes" (Step 4 block 4a)
+#
+# Moved here from branch D's `compute_high_lightning_days` STAGE. It answers a question about the DATA rather than
+# about a model, and no pipeline calls it, so it belongs beside the other `metadata.csv` readers rather than in
+# `src/stages/`: the CSV-parsing knowledge stays in one file.
+# =====================================================================================================================
+@pytest.fixture
+def daily_totals(tmp_path):
+    """A ``metadata.csv`` with a known distribution of domain-wide daily stroke counts."""
+    def build(totals):
+        rows = ['date,id,num_lightnings,pixels_with_lightning']
+        rows += [f'2015-07-{day + 1:02d},{day},{total},{day + 1}' for day, total in enumerate(totals)]
+        (tmp_path / 'metadata.csv').write_text('\n'.join(rows) + '\n')
+        return str(tmp_path)
+    return build
+
+
+def test_the_extremes_are_the_days_above_the_quantile(daily_totals):
+    from src.utils.io.data import high_lightning_days
+
+    days = high_lightning_days(daily_totals([0, 10, 20, 30, 40, 50, 60, 70, 80, 90]), quantile=0.5)
+
+    assert int(days['quantile_threshold'].iloc[0]) == 45, 'the linear-interpolated median of the ten totals'
+    assert list(days['num_lightnings']) == [90, 80, 70, 60, 50]
+
+
+def test_a_day_sitting_EXACTLY_on_the_threshold_is_KEPT(daily_totals):
+    """The cut is ``>=``, and on a discrete stroke count landing exactly on the quantile is a common case rather than a
+    corner one — an exclusive cut would drop the day that defines the selection."""
+    from src.utils.io.data import high_lightning_days
+
+    days = high_lightning_days(daily_totals([10, 20, 30]), quantile=0.5)
+
+    assert int(days['quantile_threshold'].iloc[0]) == 20
+    assert list(days['num_lightnings']) == [30, 20], 'the day AT the threshold is included'
+
+
+def test_the_result_is_ordered_MOST_ACTIVE_first(daily_totals):
+    """It is read as a shortlist, so the ordering is the useful part."""
+    from src.utils.io.data import high_lightning_days
+
+    days = high_lightning_days(daily_totals([5, 900, 40, 100, 3, 700]), quantile=0.5)
+    assert list(days['num_lightnings']) == sorted(days['num_lightnings'], reverse=True)
+
+
+def test_the_resolved_threshold_TRAVELS_with_the_rows(daily_totals):
+    """Carried as a column so a written-out CSV records what produced it — a shortlist with no threshold on it cannot
+    be reproduced or compared against another quantile's."""
+    from src.utils.io.data import high_lightning_days
+
+    days = high_lightning_days(daily_totals(list(range(0, 1000, 10))), quantile=0.95)
+    assert days['quantile_threshold'].nunique() == 1
+    assert int(days['quantile_threshold'].iloc[0]) > 0
+
+
+def test_the_counts_come_back_as_INTEGERS(daily_totals):
+    """They are stroke counts and pixel counts. Float-formatted counts in the CSV read as measurements."""
+    from src.utils.io.data import high_lightning_days
+
+    days = high_lightning_days(daily_totals([1, 2, 3, 400, 500]), quantile=0.5)
+    assert days['num_lightnings'].dtype.kind == 'i'
+    assert days['pixels_with_lightning'].dtype.kind == 'i'
+
+
+@pytest.mark.parametrize('quantile,expected_rows', [(0.0, 5), (1.0, 1)])
+def test_the_degenerate_quantiles_still_return_a_usable_frame(quantile, expected_rows, daily_totals):
+    """``0.0`` selects everything and ``1.0`` selects the single most active day; neither is an error."""
+    from src.utils.io.data import high_lightning_days
+
+    days = high_lightning_days(daily_totals([1, 2, 3, 4, 5]), quantile=quantile)
+    assert len(days) == expected_rows
+
+
+@pytest.mark.parametrize('quantile', [-0.1, 1.5])
+def test_a_quantile_OUTSIDE_the_unit_interval_raises(quantile, daily_totals):
+    """pandas would raise its own less specific error; catching it here names the argument."""
+    from src.utils.io.data import high_lightning_days
+
+    with pytest.raises(ValueError, match=r'\[0, 1\]'):
+        high_lightning_days(daily_totals([1, 2, 3]), quantile=quantile)
+
+
+def test_the_docstring_WARNS_that_the_quantile_spans_every_split():
+    """⚠️ The one property worth guarding beyond the arithmetic. The quantile is taken over train/valid/test alike,
+    which is right for describing the dataset and a LEAK for anything that feeds a model. Documented rather than
+    changed, because filtering here would silently make it the wrong tool for describing the dataset — but the caveat
+    has to survive an edit, hence this test."""
+    from src.utils.io.data import high_lightning_days
+
+    docstring = high_lightning_days.__doc__
+    assert 'leak' in docstring.lower()
+    assert 'train' in docstring

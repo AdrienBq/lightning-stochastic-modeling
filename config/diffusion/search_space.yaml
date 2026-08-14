@@ -22,7 +22,7 @@
 # the observation and an upstream deterministic_unet prediction, and returns clamp(upstream + residual, 0, max_hours).
 #
 # ⛔ THERE IS NO `residual_target:` KEY, and there must not be. It is a property of the PREPARED DIRECTORY, not a
-# ⛔ hyperparameter: the mode exists only if prepare_regression was given `upstream-model-path`, which is what
+# ⛔ hyperparameter: the mode exists only if prepare_modeling was given `upstream-model-path`, which is what
 # ⛔ materialises upstream/<date>.npy, appends the upstream prediction as the LAST conditioning channel and makes the
 # ⛔ dataset yield a third batch item (x_cond, y, upstream). Sampling it per trial would make roughly half of every
 # ⛔ sweep's trials ask for a mode the data cannot provide, and they would fail on the channel count rather than
@@ -41,7 +41,7 @@
 # ---------------------------------------------------------------------------------------------------------------------
 flow:
     n_steps: {type: int, low: 8, high: 32}              # Euler ODE integration steps during validation scoring;
-                                                        # evaluate_regression overrides with `sampling-steps`
+                                                        # evaluate overrides with `sampling-steps`
     hidden_dim: {type: categorical, choices: [128, 256]} # token (model) width
     n_blocks: {type: int, low: 2, high: 6}              # DiTBlock count. Named n_blocks rather than `depth`
                                                         # because `depth` already means the down/upsampling level

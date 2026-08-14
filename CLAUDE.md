@@ -15,11 +15,11 @@ Three model families share one pipeline and report **the same metrics through on
 |---|---|
 | `deterministic_unet` | Deterministic U-net — the baseline, and the *upstream* model for the other two |
 | `mc_dropout` | Stochastic via MC-dropout at inference. **Warm-starts** from the upstream's *weights* (`UPSTREAM_MODEL` set on `tune`) and runs the finetuning phase alone; unset ⇒ two-phase fit from scratch (train → finetune) |
-| `diffusion` | Flow matching. Optionally **residual**: conditions on the upstream's *prediction* (`UPSTREAM_MODEL` set on `prepare_regression`) and predicts a correction on top of it |
+| `diffusion` | Flow matching. Optionally **residual**: conditions on the upstream's *prediction* (`UPSTREAM_MODEL` set on `prepare_modeling`) and predicts a correction on top of it |
 
 ⚠️ Both stochastic families read `UPSTREAM_MODEL`, but at **different stages and for different things** —
 MC-dropout wants the upstream's *weights* (a warm start, read by `tune`), diffusion wants its *predictions* (an
-extra conditioning channel, materialised by `prepare_regression`).
+extra conditioning channel, materialised by `prepare_modeling`).
 
 ## Current scope: classification-first, no target transform
 
@@ -68,7 +68,7 @@ $DATA_ROOT/
 
 ## Design invariants
 
-- **One evaluation for all families.** `evaluate_regression` is the single eval stage;
+- **One evaluation for all families.** `evaluate` is the single eval stage;
   `registry.load_model_module` dispatches by checkpoint marker (with `_sniff_family` as the legacy fallback).
   Never add a family-specific evaluation path.
 - **The ensemble contract.** `predict_step(batch, idx)` returns a dict with `observation` `[B,H,W]`, `prediction`

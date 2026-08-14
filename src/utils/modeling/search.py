@@ -96,7 +96,7 @@ def apply_constraints(trial: dict, *, upstream_model_path: Optional[str] = None)
 
     In practice the rule fires for ``mc_dropout`` ONLY — it is the only family whose ``tune`` stage takes an
     ``upstream-model-path``, because MC-dropout warm-starts from the upstream's WEIGHTS. Diffusion's upstream sits on
-    ``prepare_regression`` instead, where the upstream's PREDICTION is materialised once as the last conditioning
+    ``prepare_modeling`` instead, where the upstream's PREDICTION is materialised once as the last conditioning
     channel, so its sweep never sees this argument.
 
     The second thing the warm-start branch does is **log** that the sampled ``unet:`` block will be ignored. That is

@@ -33,7 +33,7 @@ stages:
         evaluation: outputs/deterministic_unet_smoke_gpu/evaluation
         reports: outputs/deterministic_unet_smoke_gpu/reports
 
-    - prepare_regression:
+    - prepare_modeling:
         data-path: '{{$DATA_ROOT}}'
         split-config: config/split/split_smoke_gpu.yaml
         output-path: outputs/deterministic_unet_smoke_gpu/prepared/daily
@@ -81,7 +81,7 @@ stages:
         precision: bf16-mixed
         progress-bar: true
 
-    - evaluate_regression:
+    - evaluate:
         input-path: outputs/deterministic_unet_smoke_gpu/prepared/daily
         model-path: outputs/deterministic_unet_smoke_gpu/best/best_model.ckpt
         output-path: outputs/deterministic_unet_smoke_gpu/evaluation

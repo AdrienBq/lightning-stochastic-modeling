@@ -35,9 +35,9 @@ description: 'MC-dropout stochastic parameterization of lightning from ERA5 rean
 #   The upstream comes from config/deterministic_unet/deterministic_unet.yaml -- run that pipeline first.
 #
 # !! Note how this DIFFERS from the diffusion family, which reads the same environment variable at a different stage.
-# !! Diffusion's residual mode needs the upstream PREDICTION, so prepare_regression materializes it as per-day
+# !! Diffusion's residual mode needs the upstream PREDICTION, so prepare_modeling materializes it as per-day
 # !! upstream/<date>.npy maps and appends it as a conditioning channel. MC-dropout needs the upstream WEIGHTS, which
-# !! is a checkpoint read once at fit time -- so the switch sits on `tune` and prepare_regression below is the plain
+# !! is a checkpoint read once at fit time -- so the switch sits on `tune` and prepare_modeling below is the plain
 # !! full-target preparation, unchanged from the deterministic pipeline.
 #
 # Warm-starting requires the upstream to be shape- and norm-compatible, which is why
@@ -69,7 +69,7 @@ stages:
     # family-agnostic; only the model differs). Kept as a separate directory so the two pipelines can run and be
     # cached independently.
     # ------------------------------------------------------------------------------------------------------------
-    - prepare_regression:
+    - prepare_modeling:
         data-path: '{{$DATA_ROOT}}'         # dataset root; NEVER hardcode a path
         split-config: config/split/split.yaml     # the shared year-based split (see CLAUDE.md "Data")
         output-path: outputs/mc_dropout/prepared/daily
@@ -100,7 +100,7 @@ stages:
                                             # skip phase 1, run the finetuning phase only. Unset/empty -> the full
                                             # two-phase fit from scratch. Unlike diffusion, this is the model's
                                             # WEIGHTS, not a conditioning channel, so it is read here and not by
-                                            # prepare_regression. In warm-start mode the search space's `unet:` block
+                                            # prepare_modeling. In warm-start mode the search space's `unet:` block
                                             # is ignored (architecture comes from the checkpoint) and
                                             # finetuning.enabled is forced true.
         n-trials: 30                        # fewer than the deterministic family: each trial pays for two phases
@@ -141,7 +141,7 @@ stages:
     # config/eval/metrics.yaml (CRPS, almost-fair CRPS, spread-skill ratio, rank histogram) is populated here whereas it
     # is skipped for the deterministic family.
     # ------------------------------------------------------------------------------------------------------------
-    - evaluate_regression:
+    - evaluate:
         input-path: outputs/mc_dropout/prepared/daily
         model-path: outputs/mc_dropout/best/best_model.ckpt
         output-path: outputs/mc_dropout/evaluation
