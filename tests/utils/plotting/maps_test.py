@@ -51,6 +51,20 @@ def test_geographic_context_can_never_degrade_to_plain_axes():
     assert maps.geographic_context() != (None, None)
 
 
+@pytest.mark.source_invariant
+def test_the_cartopy_unavailable_WARNING_PATH_is_gone_entirely():
+    """Not just unused — absent. The optional-cartopy version logged a warning and carried on with plain axes, and a
+    warning in a pipeline log is not a stop: the run completed and wrote figures in raw pixel indices. Removing the
+    logger removes the only way that path could come back quietly."""
+    import tokenize
+
+    with open(maps.__file__, 'rb') as handle:
+        identifiers = {token.string for token in tokenize.tokenize(handle.readline)
+                       if token.type == tokenize.NAME}
+    assert 'logger' not in identifiers
+    assert 'logging' not in identifiers
+
+
 def test_cartopy_is_imported_at_module_scope():
     tree = ast.parse(inspect.getsource(maps))
     module_level = {alias.name for node in tree.body if isinstance(node, ast.Import) for alias in node.names}

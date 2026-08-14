@@ -195,6 +195,28 @@ def test_the_loss_that_motivated_the_eval_override_now_builds():
     assert callable(loss)
 
 
+def test_the_loader_is_RENAMED_to_load_model_module():
+    """``load_regression_module`` named the one family that existed when it was written. It is now the single dispatch
+    point for all three, and the name was the last place the old framing survived in code."""
+    from src.utils.modeling import registry
+
+    assert not hasattr(registry, 'load_regression_module')
+    assert callable(registry.load_model_module)
+
+
+@pytest.mark.source_invariant
+def test_no_config_and_no_doc_still_names_the_OLD_loader(repo_root):
+    """The rename had to reach the documents too: ``CLAUDE.md`` lists this function in its design invariants, so a stale
+    name there sends the next reader looking for a function that does not exist."""
+    import glob
+    import os
+
+    offenders = [path for path in glob.glob(os.path.join(repo_root, 'config/**/*.yaml'), recursive=True)
+                 if 'load_regression_module' in open(path).read()]
+    assert not offenders, offenders
+    assert 'load_model_module' in open(os.path.join(repo_root, 'CLAUDE.md')).read()
+
+
 def test_the_eval_override_helper_is_gone():
     """Pinned so it cannot creep back: the workaround and the raise it worked around must be removed together, or the
     next reader will assume the raise is still possible."""

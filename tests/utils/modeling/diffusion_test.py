@@ -198,6 +198,45 @@ def test_sampling_returns_a_target_shaped_map(net):
     assert torch.isfinite(drawn).all()
 
 
+def test_sampling_integrates_a_CONSTANT_velocity_field_exactly():
+    """The ODE solver, checked against arithmetic rather than against itself. A constant velocity of 3 over ``t`` in
+    ``[0, 1]`` must displace the state by exactly 3, at any step count — so an off-by-one in the step size or a missing
+    final step shows up as a wrong displacement rather than as a plausible-looking sample."""
+    class ConstantVelocity(torch.nn.Module):
+        def forward(self, x, t, cond):
+            return torch.full_like(x, 3.0)
+
+    cond = torch.zeros(2, 5, 8, 8)
+    for steps in (1, 4, 20):
+        drawn = sample(ConstantVelocity(), cond, (8, 8), num_steps=steps,
+                       generator=torch.Generator().manual_seed(0))
+        # x(0) is a seeded randn of the target shape, so it can be reproduced INDEPENDENTLY of sample() — deriving it
+        # as `drawn - 3` instead would make the assertion a tautology.
+        start = torch.randn(2, 8, 8, generator=torch.Generator().manual_seed(0))
+
+        assert torch.allclose(drawn - start, torch.full_like(start, 3.0), atol=1e-5), steps
+
+
+@pytest.mark.source_invariant
+def test_no_transform_machinery_survives_in_the_flow_module():
+    """Generation happens in the RAW target space. Branch A had a ``log_warp`` generation-space switch, which was the
+    target transform under another name — so the whole file must be free of it, not merely not use it."""
+    from src.utils.modeling import diffusion as diffusion_module
+
+    source = open(diffusion_module.__file__).read()
+    assert 'transforms' not in source
+    assert 'log_warp' not in source
+
+
+@pytest.mark.source_invariant
+def test_the_module_docstring_STATES_that_generation_is_in_the_raw_target_space():
+    """The single most consequential fact about this file, and the one a reader coming from a diffusion background will
+    assume otherwise — every published flow-matching setup generates in some normalized or warped space."""
+    from src.utils.modeling import diffusion as diffusion_module
+
+    assert 'RAW TARGET SPACE' in (diffusion_module.__doc__ or '')
+
+
 def test_sampling_is_reproducible_under_a_generator(net):
     """The evaluation stage seeds per batch so a re-run of the same checkpoint reports the same numbers."""
     model = net()

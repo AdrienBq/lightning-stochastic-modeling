@@ -169,6 +169,21 @@ def test_resolve_occurrence_event_rejects_a_reintroduced_threshold():
 # NEW: the two model-independent selection denominators — dataset-level, so they need a prepared directory
 # =====================================================================================================================
 @pytest.mark.source_invariant
+def test_the_suite_reaches_the_SHARED_modules_rather_than_reimplementing_them():
+    """``evaluation.py`` is the single eval stage for all three families, so every score it reports must come from
+    ``scores.py`` and every mode/split decision from ``io.data``. A local reimplementation here is how the reported number
+    and the trained objective drift apart — the ``crps_ensemble`` collision this merge exists to prevent."""
+    import ast
+
+    from src.utils.metrics import evaluation as evaluation_module
+
+    tree = ast.parse(open(evaluation_module.__file__).read())
+    imported = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module}
+    assert any(name.startswith('src.utils.io.data') for name in imported), sorted(imported)
+    assert any(name.startswith('src.utils.metrics') for name in imported), sorted(imported)
+
+
+@pytest.mark.source_invariant
 def test_the_suite_RECORDS_which_scores_are_hourly_only(repo_root):
     """``brier_skill_score``, ``explained_deviance`` and ``dice`` need a calibrated probability, which a daily run has
     no head for. They were annotated "occurrence head, when enabled" until block 3c dropped that head — so the note had
@@ -271,3 +286,265 @@ def test_run_metric_suite_produces_the_continuous_group_for_both_tasks(task, dai
 
     for key in ('rmse', 'mae', 'bias'):
         assert key in flat and np.isfinite(flat[key]), f'{key} missing for the {task} task'
+
+
+# =====================================================================================================================
+# The SHIPPED suite, end to end — the one call every family's evaluation makes
+# =====================================================================================================================
+@pytest.fixture(scope='module')
+def suite_arrays():
+    """A sparse bounded observation, a noisy prediction, an occurrence probability and both baselines — the argument set
+    ``evaluate_regression`` assembles. Module-scoped: the PSD pass over it is the expensive part."""
+    rng = np.random.default_rng(0)
+    n, h, w = 6, 24, 28
+    observation = np.zeros((n, h, w))
+    for index in range(n):
+        active = rng.random((h, w)) < 0.02
+        observation[index][active] = rng.integers(1, 20, size=active.sum())
+    prediction = np.clip(observation + rng.normal(0, 1.5, observation.shape), 0, 24)
+    probability_map = np.clip(0.5 * (observation > 0) + 0.2 * rng.random(observation.shape), 0, 1)
+    occurrence_probability = np.full(observation.shape, float((observation > 0).mean()))
+    baselines = {'zero': np.zeros_like(observation),
+                 'climatology': np.full_like(observation, observation.mean())}
+    return prediction, observation, probability_map, baselines, occurrence_probability
+
+
+@pytest.fixture(scope='module')
+def daily_suite(suite_arrays, metrics_config):
+    prediction, observation, probability, baselines, occurrence = suite_arrays
+    return run_metric_suite(metrics_config, prediction, observation, probability, baselines, occurrence, {})
+
+
+EXPECTED_DAILY_KEYS = (
+    'rmse', 'mae', 'bias', 'rmse_cond_pos', 'mae_cond_pos', 'r2', 'r2_occurrence',
+    'pod_occurrence', 'far_occurrence', 'csi_occurrence', 'ets_occurrence', 'hss_occurrence', 'sedi_occurrence',
+    'frequency_bias_occurrence', 'roc_auc_occurrence', 'average_precision_occurrence',
+    'roc_auc_h3', 'average_precision_h3',
+    'mse_ss_zero', 'mse_ss_climatology', 'mae_cond_ss_zero', 'mae_cond_ss_climatology',
+    'brier_skill_score', 'explained_deviance',
+    'rank_corr_occurrence', 'psd_ratio_full', 'psd_full_fidelity', 'psd_high_fidelity',
+    'log_spectral_distance', 'fss_occurrence_s1', 'fss_useful_scale_occurrence',
+    'sharpness_ratio', 'variance_ratio', 'mae_bin_occurrence_h3',
+)
+
+
+def test_the_shipped_suite_emits_every_expected_key(daily_suite):
+    """Driven from ``config/eval/metrics.yaml`` itself, so this is the test that catches a score silently dropping out
+    of the report — the failure mode where every number present is correct and one is simply absent."""
+    flat, _ = daily_suite
+    missing = [key for key in EXPECTED_DAILY_KEYS if key not in flat]
+    assert not missing, missing
+
+
+def test_every_selection_component_the_sweep_WEIGHTS_is_in_the_report(daily_suite):
+    """The trials table and the report have to name the same quantities, or a trial's winning score cannot be located in
+    its own report."""
+    flat, _ = daily_suite
+    for key in ('mae_cond_ss_climatology', 'psd_full_fidelity', 'average_precision_occurrence',
+                'brier_skill_score'):
+        assert key in flat, key
+
+
+def test_no_removed_metric_family_LEAKS_back_into_the_report(daily_suite):
+    """PIT needed ``target_stats['gamma_shape']``, the quantile ratios needed the positive marginal's tail, and Tweedie
+    is unbounded-count machinery. All three went with the transform and the scope change — a key reappearing means one
+    of those paths was reconnected."""
+    flat, _ = daily_suite
+    leaked = [key for key in flat if key.startswith(('pit_', 'q_ratio_', 'tweedie'))]
+    assert not leaked, leaked
+
+
+def test_the_curves_carry_the_roc_pr_and_confusion_payloads(daily_suite):
+    """Both figures were added in Block 2 and both are driven off ``curves`` rather than recomputed, so a missing payload
+    makes the figure self-skip — which the report only records as a warning."""
+    _, curves = daily_suite
+    assert 'roc_pr' in curves and 'confusion' in curves
+    assert 'occurrence' in curves['roc_pr']
+
+
+def test_the_occurrence_ranking_uses_the_PROBABILITY_and_the_hour_bands_do_not(daily_suite):
+    """The ranking field is chosen per threshold: the occurrence event gets the model's probability when it has one, and
+    an hour band has no probability to use, so it ranks on the predicted hours. Both are exact — AP and ROC-AUC are
+    invariant to any monotone rescaling — and the flag is recorded so the report can say which was used."""
+    _, curves = daily_suite
+    assert curves['roc_pr']['occurrence']['from_probability'] is True
+    assert curves['roc_pr']['h3']['from_probability'] is False
+
+
+def test_the_confusion_counts_sum_to_the_CELL_COUNT(daily_suite, suite_arrays):
+    """A contingency table that does not partition the grid means some cells were dropped by a mask or double-counted by
+    an overlapping cut."""
+    _, curves = daily_suite
+    _, observation, _, _, _ = suite_arrays
+    counts = curves['confusion']['occurrence']
+    assert sum(counts.values()) == pytest.approx(observation.size, abs=1e-6), counts
+
+
+def test_the_daily_FSS_keeps_its_PER_THRESHOLD_keys(daily_suite):
+    """Daily FSS is the thresholded hour-band form, so its keys carry the threshold. The threshold-FREE keys belong to
+    the hourly task, where the prediction is already a fraction — emitting those here would mean neighbourhood means of
+    HOURS were being read as a Brier skill score."""
+    flat, _ = daily_suite
+    assert 'fss_occurrence_s1' in flat
+    assert 'fss_s1' not in flat
+
+
+@pytest.fixture(scope='module')
+def suite_without_a_probability(suite_arrays, metrics_config):
+    prediction, observation, _, baselines, occurrence = suite_arrays
+    return run_metric_suite(metrics_config, prediction, observation, None, baselines, occurrence, {})
+
+
+def test_explained_deviance_is_ABSENT_without_a_probabilistic_forecast(suite_without_a_probability):
+    """It is a Bernoulli log-loss skill score, so it needs a calibrated probability — which a daily run has no head for.
+    Absent is the right answer; a number computed from lightning-hours would not be."""
+    flat, _ = suite_without_a_probability
+    assert 'explained_deviance' not in flat
+
+
+def test_brier_skill_score_is_STILL_defined_without_one(suite_without_a_probability):
+    """The asymmetry that is easy to get wrong: ``brier_skill_score`` falls back to the occurrence probability the
+    caller supplies (a climatological rate), so it survives where ``explained_deviance`` does not."""
+    flat, _ = suite_without_a_probability
+    assert 'brier_skill_score' in flat
+
+
+def test_the_reliability_curve_is_absent_without_a_probabilistic_forecast(suite_without_a_probability):
+    _, curves = suite_without_a_probability
+    assert 'reliability' not in curves
+
+
+# =====================================================================================================================
+# The HOURLY configuration of the same suite — kind: probability, and the FSS form switch
+# =====================================================================================================================
+def _hourly_config(metrics_config):
+    """``metrics.yaml`` retargeted for the hourly task, exactly as its own note prescribes: the categorical group cuts
+    the PROBABILITY at 0.5, and every group that bins or conditions on observed intensity is pointed at the occurrence
+    event instead of an hour band."""
+    import copy
+
+    config = copy.deepcopy(metrics_config)
+    config['thresholds'] = {'occurrence': {'kind': 'occurrence'},
+                            'p50': {'kind': 'probability', 'value': 0.5}}
+    config['metrics']['categorical']['thresholds'] = ['p50']
+    for group, key in (('continuous', 'r2'), ('continuous', 'estimation_tendency'),
+                       ('calibration', 'rank_correlation')):
+        config['metrics'][group][key]['thresholds'] = ['occurrence']
+    config['metrics']['continuous']['mae_stratified']['bins'] = ['occurrence']
+    config['metrics']['spatial']['fss']['thresholds'] = ['occurrence']
+    return config
+
+
+@pytest.fixture(scope='module')
+def hourly_suite(metrics_config):
+    rng = np.random.default_rng(0)
+    observation = (rng.random((6, 24, 28)) < 0.05).astype(np.float64)
+    prediction = np.clip(0.35 * observation + 0.1 * rng.random(observation.shape), 0, 1)
+    baselines = {'zero': np.zeros_like(observation),
+                 'climatology': np.full_like(observation, observation.mean())}
+    flat, curves = run_metric_suite(_hourly_config(metrics_config), prediction, observation, prediction,
+                                    baselines, np.full_like(observation, observation.mean()), {})
+    return flat, curves, prediction, observation
+
+
+def test_the_hourly_run_switches_FSS_to_its_THRESHOLD_FREE_form(hourly_suite):
+    """When the prediction is already a probability its neighbourhood mean IS a fraction, so no cut is needed — and in
+    that form FSS is exactly a fractions Brier skill score at that scale, which carries strictly more information than
+    committing to a threshold. Derived from the MODE, not from a config key, so the meaningless combination cannot be
+    requested."""
+    flat, _, _, _ = hourly_suite
+    assert 'fss_s1' in flat
+    assert not [key for key in flat if key.startswith('fss_occurrence')], \
+        [key for key in flat if key.startswith('fss')]
+
+
+def test_the_hourly_categorical_group_uses_the_PROBABILITY_decision_cut(hourly_suite):
+    """The whole point of ``kind: probability``. Under a shared ``occurrence`` cut the prediction side becomes ``p > 0``,
+    which fires on every cell with any non-zero probability: POD would be ~1 and FAR ~ the base rate — a full contingency
+    table of nonsense, with no error raised. A real decision cut gives POD < 1."""
+    flat, _, _, _ = hourly_suite
+    assert flat['pod_p50'] < 1.0, flat['pod_p50']
+    assert np.isfinite(flat['csi_p50'])
+
+
+def test_the_hourly_run_emits_the_ranking_metrics_and_explained_deviance(hourly_suite):
+    """``explained_deviance`` appears here and is absent on daily for one reason: on the hourly task the prediction IS
+    the calibrated probability, so the Bernoulli log-loss skill score is well defined."""
+    flat, _, _, _ = hourly_suite
+    assert 'average_precision_p50' in flat and 'roc_auc_p50' in flat
+    assert 'explained_deviance' in flat
+
+
+def test_a_shared_occurrence_cut_on_a_probability_field_WARNS(metrics_config, caplog):
+    """The runtime guard for the degenerate configuration above, caught at the point it would produce garbage rather than
+    left to be noticed in a report. It names the fix — ``kind: probability`` — because the config edit is not obvious from
+    the symptom."""
+    import copy
+    import logging
+
+    rng = np.random.default_rng(0)
+    observation = (rng.random((4, 16, 16)) < 0.05).astype(np.float64)
+    prediction = np.clip(0.35 * observation + 0.1 * rng.random(observation.shape), 0, 1)
+
+    config = copy.deepcopy(_hourly_config(metrics_config))
+    config['metrics']['categorical']['thresholds'] = ['occurrence']       # the degenerate choice
+
+    with caplog.at_level(logging.WARNING, logger='src.utils.metrics.evaluation'):
+        run_metric_suite(config, prediction, observation, prediction,
+                         {'zero': np.zeros_like(observation)}, None, {})
+
+    assert any('kind: probability' in record.message for record in caplog.records), \
+        [record.message for record in caplog.records]
+
+
+# =====================================================================================================================
+# dice_coefficient, wired as SOFT dice and guarded on the probability
+# =====================================================================================================================
+def test_dice_occurrence_is_emitted_from_the_OCCURRENCE_PROBABILITY(daily_suite, suite_arrays):
+    """It was unreachable before Block 2r2 — no config requested it and ``evaluation.py`` never called it — while ``dice``
+    was already a trainable loss alias. Wiring it makes the reported score the eval-time complement of ``dice_loss``."""
+    from src.utils.metrics import scores
+
+    flat, _ = daily_suite
+    _, observation, probability, _, _ = suite_arrays
+    assert 'dice_occurrence' in flat
+
+    expected = scores.dice_coefficient(probability, (observation > 0).astype(float))
+    assert flat['dice_occurrence'] == pytest.approx(expected, abs=1e-9)
+
+
+def test_dice_is_ABSENT_on_the_hour_bands(daily_suite):
+    """Guarded on ``use_probability``: on an hour band the field is in HOURS, where ``2*sum(p*o) / (sum(p) + sum(o))``
+    mixes units and means nothing. The key is simply not emitted there."""
+    flat, _ = daily_suite
+    assert not [key for key in flat if key.startswith('dice_h')], \
+        [key for key in flat if key.startswith('dice')]
+
+
+def test_dice_is_absent_entirely_without_a_probability_forecast(suite_without_a_probability):
+    flat, _ = suite_without_a_probability
+    assert not [key for key in flat if key.startswith('dice')]
+
+
+def test_the_hourly_dice_reads_the_probability_with_NO_decision_cut(hourly_suite):
+    """``dice`` is in the threshold-free group: it needs the observed EVENT but no prediction cut, because soft Dice is
+    defined directly on the probability. Binarising it first would throw away the calibration the score is measuring."""
+    from src.utils.metrics import scores
+
+    flat, _, prediction, observation = hourly_suite
+    assert 'dice_p50' in flat
+    expected = scores.dice_coefficient(prediction, (observation > 0).astype(float))
+    assert flat['dice_p50'] == pytest.approx(expected, abs=1e-9)
+
+
+def test_the_persistence_baseline_is_REJECTED(suite_arrays, metrics_config):
+    """Removed deliberately: this is a diagnostic ERA5 -> lightning mapping, not a temporal forecast, so "yesterday's
+    field" is not a baseline the task admits. Rejecting it by name beats silently scoring against something meaningless.
+    """
+    import pandas as pd
+
+    from src.utils.metrics.evaluation import build_baselines
+
+    items = pd.DataFrame({'date': pd.date_range('2010-07-14', periods=6), 'hour': [np.nan] * 6})
+    with pytest.raises(ValueError, match='persistence'):
+        build_baselines(['persistence'], {}, pd.DataFrame(), items, 'daily', 24)

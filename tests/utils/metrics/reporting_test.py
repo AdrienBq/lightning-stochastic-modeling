@@ -24,6 +24,7 @@ import pandas as pd
 import pytest
 
 from src.utils.metrics import diagnostics, reporting
+from src.utils.plotting import maps
 
 H = W = 16
 MEMBERS = 4
@@ -127,6 +128,46 @@ def test_an_unmatched_plot_date_is_skipped_rather_than_fatal(tmp_path):
     produced = os.listdir(str(tmp_path))
     assert any(name.endswith('.png') for name in produced)
     assert not any('1999-01-01' in name for name in produced)
+
+
+@pytest.fixture(scope='module')
+def both_layout_sizes(tmp_path_factory):
+    """Render the SAME three days under both layouts once, and return ``{name: bytes}`` for each.
+
+    Module-scoped for the usual reason (see the note above): this is two full cartopy reports, and the two tests below
+    read different properties of the same output.
+    """
+    directory = tmp_path_factory.mktemp('layout_sizes')
+    prediction, observation, members, items, _ = _report_arrays(n_items=3, seed=3)
+
+    def render(name, **kwargs):
+        target = directory / name
+        target.mkdir()
+        reporting.maps_most_extreme_days(prediction, observation, items, str(target), **kwargs)
+        return {entry: os.path.getsize(os.path.join(str(target), entry))
+                for entry in os.listdir(str(target)) if entry.endswith('.png')}
+
+    return render('deterministic'), render('stochastic', ensemble_members=members)
+
+
+def test_the_rendered_maps_are_not_BLANK_canvases(both_layout_sizes):
+    """Every figure call in ``write_report`` is wrapped in a warn-only ``try/except``, so a figure that fails halfway
+    can still leave a file behind. A blank 16x16 cartopy canvas is a few kB; a real map with coastlines and a colorbar is
+    tens of kB — the file SIZE is the cheapest available proof that something was actually drawn."""
+    plain, _ = both_layout_sizes
+    assert plain, 'nothing rendered'
+    assert min(plain.values()) > 20000, plain
+
+
+def test_the_stochastic_layout_renders_LARGER_files_for_the_same_days(both_layout_sizes):
+    """Six panels against two, on the same selected days — so the stochastic layout must select the same set (selection
+    is by observed activity and error, neither of which the ensemble changes) and render every one of them bigger. A
+    stochastic run that quietly fell back to the deterministic figure would pass every file-name test."""
+    plain, ensemble = both_layout_sizes
+
+    assert set(plain) == set(ensemble), (sorted(plain), sorted(ensemble))
+    bigger = [name for name in plain if ensemble[name] > plain[name]]
+    assert len(bigger) == len(plain), {name: (plain[name], ensemble[name]) for name in plain}
 
 
 def test_the_title_is_the_date_only(deterministic_report):
@@ -275,6 +316,219 @@ def test_write_report_renders_every_configured_figure(report_arrays, metrics_con
     assert not missing, f'missing {missing} of {sorted(produced)}'
     assert any(name.startswith('maps_') and name.endswith('.png') for name in produced)
     assert 'metrics.csv' in produced, 'the flat metrics table is written whenever csv is requested'
+
+
+# =====================================================================================================================
+# The two panel layouts, inspected as FIGURES rather than as files
+#
+# The file-level tests above prove a day rendered; these prove WHAT was rendered. Both fixtures build one figure and
+# are module-scoped, because a 6-panel cartopy figure is seconds.
+# =====================================================================================================================
+def _map_and_colorbar_axes(figure):
+    """Split a report figure's axes into map panels (cartopy GeoAxes carry ``coastlines``) and colorbars."""
+    maps = [axis for axis in figure.axes if hasattr(axis, 'coastlines')]
+    return maps, [axis for axis in figure.axes if not hasattr(axis, 'coastlines')]
+
+
+@pytest.fixture(scope='module')
+def deterministic_figure():
+    import matplotlib.pyplot as plt
+
+    projection, data_crs = maps.geographic_context()
+    prediction, observation, _, _, _ = _report_arrays(n_items=1, seed=3)
+    figure = reporting._deterministic_day_figure(observation[0], prediction[0], '2015-07-14',
+                                                 projection, data_crs)
+    yield figure
+    plt.close(figure)
+
+
+@pytest.fixture(scope='module')
+def stochastic_figure():
+    import matplotlib.pyplot as plt
+
+    projection, data_crs = maps.geographic_context()
+    _, observation, members, _, _ = _report_arrays(n_items=1, seed=0)
+    day = members[0]
+    figure = reporting._stochastic_day_figure(observation[0], day.mean(axis=0), day.std(axis=0), day,
+                                              '2015-07-14', projection, data_crs,
+                                              np.random.default_rng(0))
+    yield figure, day
+    plt.close(figure)
+
+
+def test_the_deterministic_layout_is_two_map_panels_and_two_shared_colorbars(deterministic_figure):
+    """Observed and predicted, side by side, with ONE pair of colorbars serving both — which is what makes the two
+    panels comparable by eye. A per-panel colour axis would rescale each independently and make a quiet day look like
+    an active one."""
+    panels, colorbars = _map_and_colorbar_axes(deterministic_figure)
+    assert len(panels) == 2
+    assert len(colorbars) == 2
+    assert tuple(deterministic_figure.get_size_inches()) == (11.0, 5.5)
+
+
+def test_the_observed_panel_is_ONE_layer_and_the_predicted_panel_is_a_DIFF(deterministic_figure):
+    """The asymmetry is the point of the layout: the observation has nothing to be over or under, so it is drawn in the
+    warm palette alone, while the prediction is drawn as two masked layers against it."""
+    panels, _ = _map_and_colorbar_axes(deterministic_figure)
+    assert len(panels[0].get_images()) == 1
+    assert len(panels[1].get_images()) == 2
+
+
+def test_the_stochastic_layout_is_a_two_by_three_grid_with_three_colorbars(stochastic_figure):
+    """Six panels — observed, mean, spread, and three members — and three colorbars: the shared diff pair plus the
+    spread panel's own, which is on a different quantity and cannot share theirs."""
+    figure, _ = stochastic_figure
+    panels, colorbars = _map_and_colorbar_axes(figure)
+    assert len(panels) == 6
+    assert len(colorbars) == 3
+    assert tuple(figure.get_size_inches()) == (15.0, 10.0)
+
+
+def test_the_spread_panel_is_a_CONTINUOUS_viridis_layer_starting_at_zero(stochastic_figure):
+    """Ensemble spread is not a signed error, so it gets neither the diff encoding nor the lightning-hours bins. Starting
+    the colour axis at 0 is what makes "no spread" read as no spread rather than as the bottom of a rescaled range."""
+    figure, _ = stochastic_figure
+    panels, _ = _map_and_colorbar_axes(figure)
+    spread_axis = panels[2]
+
+    assert len(spread_axis.get_images()) == 1
+    image = spread_axis.get_images()[0]
+    assert image.get_cmap().name == 'viridis'
+    assert image.get_clim()[0] == 0.0
+
+
+def test_the_spread_colour_axis_is_derived_from_THE_DAY(stochastic_figure):
+    """It was a hardcoded 8 (inventory issue #2), which saturates every active day to one colour and makes every quiet
+    day look uniformly calm. Now it is the day's own maximum spread."""
+    figure, members = stochastic_figure
+    panels, _ = _map_and_colorbar_axes(figure)
+    image = panels[2].get_images()[0]
+    assert image.get_clim()[1] == pytest.approx(float(members.std(axis=0).max()), abs=1e-9)
+
+
+def test_the_three_member_panels_are_DIFF_maps(stochastic_figure):
+    """Each member is scored against the same observation, so each is a two-layer diff — which is what lets a reader see
+    that the members disagree about WHERE, not just by how much."""
+    figure, _ = stochastic_figure
+    panels, _ = _map_and_colorbar_axes(figure)
+    assert all(len(axis.get_images()) == 2 for axis in panels[3:6])
+
+
+def test_a_SHORT_ensemble_blanks_the_spare_panel_without_erroring():
+    """``ensemble-size`` is a config value and the layout is fixed at three member panels, so M = 2 must leave the third
+    empty rather than raise — an evaluation run should not die on a legal smoke-tier setting."""
+    import matplotlib.pyplot as plt
+
+    projection, data_crs = maps.geographic_context()
+    _, observation, members, _, _ = _report_arrays(n_items=1, seed=0)
+    day = members[0][:2]
+    figure = reporting._stochastic_day_figure(observation[0], day.mean(axis=0), day.std(axis=0), day,
+                                              '2015-07-14', projection, data_crs,
+                                              np.random.default_rng(0))
+    panels, _ = _map_and_colorbar_axes(figure)
+
+    member_axes = panels[3:6]
+    assert sum(len(axis.get_images()) == 2 for axis in member_axes) == 2
+    assert sum(len(axis.get_images()) == 0 for axis in member_axes) == 1
+    plt.close(figure)
+
+
+# =====================================================================================================================
+# The PSD figure: kilometres, and large scales on the LEFT
+# =====================================================================================================================
+def test_the_psd_x_axis_is_DESCENDING_so_large_scales_sit_on_the_left(tmp_path):
+    """Read left to right as "synoptic to convective", which is how a meteorologist reads a spectrum. Ascending
+    wavelength would put the 27 km pixel scale on the left and invert the whole story."""
+    curves = {'psd': {'wavelengths': np.array([32.0, 16.0, 8.0, 4.0, 2.0]),
+                      'obs': np.array([1e3, 5e2, 2e2, 8e1, 3e1]),
+                      'model': np.array([9e2, 4e2, 1e2, 5e1, 2e1])}}
+
+    # `_save_figure` closes the figure, so capture it on the way past. Rebuilding an axis here and calling
+    # invert_xaxis on it would test matplotlib rather than `_psd_curves` — which is what the gate this replaces did.
+    captured = []
+    original = reporting._save_figure
+
+    def spy(figure, *args, **kwargs):
+        captured.append((figure.axes[0].get_xlim(), figure.axes[0].get_xscale()))
+        return original(figure, *args, **kwargs)
+
+    reporting._save_figure = spy
+    try:
+        reporting._psd_curves(curves, str(tmp_path), ['png'])
+    finally:
+        reporting._save_figure = original
+
+    assert captured, '_psd_curves never saved a figure'
+    (left, right), scale = captured[0]
+    assert left > right, (left, right)
+    assert scale == 'log'
+
+
+@pytest.mark.source_invariant
+def test_the_psd_axis_is_LABELLED_in_kilometres():
+    """The pixel axis is what the FFT produces and the kilometre axis is what a reader can interpret. Both are in the
+    table; only kilometres are on the figure."""
+    import inspect
+
+    source = inspect.getsource(reporting._psd_curves)
+    assert 'invert_xaxis' in source
+    assert 'Wavelength [km]' in source
+    assert 'Wavelength [pixels]' not in source
+
+
+def test_the_psd_curves_use_the_02a_colours():
+    """Fixed rather than taken from the matplotlib cycle, so the observed and model curves mean the same thing in every
+    figure of every report."""
+    assert reporting.PSD_OBS_COLOR == 'steelblue'
+    assert reporting.PSD_MODEL_COLOR == 'darkorange'
+
+
+# =====================================================================================================================
+# The figure set is exactly the inventory's fourteen
+# =====================================================================================================================
+def test_the_configured_figure_list_has_no_DUPLICATES(metrics_config):
+    """A repeated name renders the same figure twice and, for the per-day maps, would overwrite its own files."""
+    configured = metrics_config['reporting']['figures']
+    assert len(configured) == len(set(configured)), configured
+
+
+def test_all_FOURTEEN_inventory_figures_are_wired(metrics_config):
+    """The count is the check: a figure the inventory decided to keep but nobody wired appears nowhere and raises
+    nothing, because ``write_report`` warns and continues on an unknown name."""
+    assert len(metrics_config['reporting']['figures']) == 14, metrics_config['reporting']['figures']
+
+
+def test_the_never_implemented_qq_plot_is_gone_from_BOTH_the_config_and_the_code(metrics_config):
+    """It was declared in the config and never implemented, so it self-skipped on every run — a figure that looked
+    configured and produced nothing. Removed from both sides in §4."""
+    import inspect
+
+    assert 'qq_plot' not in metrics_config['reporting']['figures']
+    assert 'qq_plot' not in inspect.getsource(reporting)
+
+
+def test_the_map_figure_is_named_maps_most_extreme_days(metrics_config):
+    """Renamed from ``maps_worst_best_days``: the selection is by four categories, not two, so the old name described a
+    figure that no longer existed."""
+    configured = metrics_config['reporting']['figures']
+    assert 'maps_most_extreme_days' in configured
+    assert 'maps_worst_best_days' not in configured
+
+
+@pytest.mark.source_invariant
+def test_LogNorm_survives_ONLY_for_the_confusion_matrix():
+    """``colorbar_scale: log`` was removed from the map path with the 02a grammar: on a field that is 99.93 % zero a log
+    colour axis makes an almost-empty map look populated. ``LogNorm`` is still imported, for the confusion matrix, whose
+    counts genuinely span four orders of magnitude — so the import must remain while no map function uses it."""
+    import ast
+
+    from src.utils.metrics import reporting as reporting_module
+
+    tree = ast.parse(open(reporting_module.__file__).read())
+    users = [node.name for node in tree.body
+             if isinstance(node, ast.FunctionDef)
+             and 'LogNorm' in {inner.id for inner in ast.walk(node) if isinstance(inner, ast.Name)}]
+    assert users == ['_confusion_matrix'], users
 
 
 def test_every_configured_figure_has_a_dispatch_entry(metrics_config):

@@ -489,8 +489,9 @@ found one real deviation:
 **Known gap, deliberately left open** (inventory-figures.md §4): `make_lightning_cmap` has no probability scale, so
 an hourly run's maps collapse to two colours (`nanmax(obs) == 1` ⇒ levels `[0, 0.5, 1]`). By decision, not oversight.
 
-**Gate** (`gate_block4.py`, 98 checks) — the emphasis is on what no metric can catch, because every score in this
-repo is computed on the arrays rather than on the rendered picture:
+**Gate** (`gate_block4.py`, 98 checks — *migrated into `tests/utils/plotting/maps_test.py` and deleted in 5b; see
+[`inventory-gate-migration.md`](inventory-gate-migration.md)*) — the emphasis is on what no metric can catch, because
+every score in this repo is computed on the arrays rather than on the rendered picture:
 
 - **The north-edge claim, proved end to end by rasterising.** Two probes light one array row each, north and south,
   and their painted centroids are compared in image coordinates. Mutation-tested: flipping `origin` to `'lower'`
@@ -510,7 +511,7 @@ repo is computed on the arrays rather than on the rendered picture:
   axis and inverted x, and `metrics.yaml` ⇄ `write_report` parity in **both** directions (no unconfigured builder,
   no undispatched figure, `qq_plot` absent from both).
 
-## 5a. Tests — ✅ DONE (598 passing, 613 collected, 14 skipped)
+## 5a. Tests — ✅ DONE (598 passing, 613 collected, 14 skipped — 815 / 830 after 5b)
 
 `tests/` **mirrors `src/`**: every directory under `src/` has the same directory here, and every non-`__init__` module a
 `<module>_test.py` beside it. 32 test files for the 27 modules plus the two `__init__.py` that carry real code
@@ -521,8 +522,8 @@ override is needed and there is no config whose absence silently collects zero t
 
 `tests/completeness_test.py` is a meta-test that makes the layout enforceable rather than aspirational: the mirror is
 complete in **both** directions (no module without a test file, no test file outliving its module), and every function
-in `src/` is referenced by some test. The second is `xfail` until 5c — it currently reports **137 of 291 untested**,
-which is 5c's work-list.
+in `src/` is referenced by some test. The second is `xfail` until 5c — at the end of 5a it reported **137 of 291
+untested**, which is 5c's work-list. *(5b took it to 89; see below.)*
 
 ### Where A's 1479 lines went
 
@@ -581,6 +582,111 @@ Worth recording because several are things the plan documents *incorrectly*:
 - Three files are **thin by design** and say so (`banner`, `stages/hello_world`, `stages/setup` — untouched template
   code); 5c gives their functions real tests under the every-function requirement.
 - The nine `gate_block*.py` scripts still pass **788 / 0** unchanged, so nothing here required a source edit.
+  *(Superseded by 5b: the gates are now deleted — see below.)*
+
+---
+
+## 5b. The gate migration — ✅ DONE (641 / 641 sites accounted for; the scratchpad is gone)
+
+Blocks 1–4 were verified only by nine `gate_block*.py` scripts in a session scratchpad. 5b migrated them into the
+mirror and **deleted them**. The record of what happened to each check is
+[`inventory-gate-migration.md`](inventory-gate-migration.md): one row per call site, machine-validated so that every
+`file_test.py::test_name` it names resolves against `tests/` by AST.
+
+**641 sites — 218 migrated, 423 dropped with a stated reason, 2 substituted.**
+
+### Measuring them first changed the block
+
+| the plan assumed | measured |
+|---|---|
+| 788 checks | **641 call sites** — 788 is the RUNTIME count, inflated by 70 sites inside loops |
+| "roughly half" parse source (~400, later ~205) | **63**. The earlier figures came from a line-window heuristic that mislabelled any check sitting below an AST sweep; classifying by what the check's CONDITION references gives 63 |
+| a large retype | an audit plus a focused body of new tests — 5a had already absorbed most of the behavioural half |
+
+The overlap measurement is what settled it: comparing which of each module's public names the gate exercises against
+which the mirror exercises, **the mirror reached more surface than the gate in 5 of 9 cases**, and the headline checks
+(the sklearn ranking regimes, the rasterised north-edge probe, the 55–60 °N crop, the 19-config sweep) were already
+there.
+
+### The two substitutions — both gate checks that could not fail
+
+Recorded as substitutions rather than migrations because the claim changed, not just its location.
+
+1. **`gate_block3b1:76`** bounded the pairwise MC-member difference by the mean magnitude of the prediction. That is
+   not a property: the ReLU output is ~half zeros, which deflates the magnitude without deflating the difference, and
+   the inequality is **false at 2 of 5 seeds**. It passed in the gate only because the RNG state there is downstream of
+   the net construction and the input draw rather than a fresh `manual_seed(0)` — the number it pinned was an artifact
+   of statement order. Its label's actual claim ("same weights, only masks vary") is structural and already covered.
+   Replaced by the nearby claim that IS a property: MC spread must not swamp input sensitivity (holds at all 5 seeds,
+   ~0.28 vs ~0.47).
+2. **`gate_block4:394`** asserted that `_psd_curves` inverts its x axis — by building its **own** axis, calling
+   `invert_xaxis` on it, and checking the limits came back descending. That tests matplotlib. Verified: deleting
+   `axis.invert_xaxis()` from `reporting.py` leaves the gate's check passing. Replaced by one that spies on
+   `_save_figure` to read the limits off the figure `_psd_curves` actually built, and does fail under that deletion.
+
+### Five gate checks were literal tautologies
+
+`gate_block1:76`, `gate_block3a:35`, `gate_block3b1:33`, `gate_block3b2:35` and `gate_block3c:35` are
+`check(label, True)` — the condition is the constant. Four were import smoke checks whose real content is that the
+module imports at all, which the mirror gets from its module-scope imports (a broken import fails collection). Dropped
+as vacuous, each with the real claim's home named.
+
+### One 5a test was vacuous, and is now not
+
+`test_the_statistics_accumulate_in_float64_under_a_float16_input` never called `compute_feature_stats`. It called a
+local `_stats_of` helper that redid the accumulation in numpy — so it proved that **numpy** accumulates in float64.
+Replaced by one that drives the function against a float64 reduction of the bytes on disk, and mutation-verified:
+forcing the accumulator to float16 fails it, where the old test would have passed.
+
+### What the migration actually added
+
+The Lightning hooks, which the gates drove and the mirror never called: `validation_step` /
+`on_validation_epoch_start` / `_end` end to end for all three families, MC-dropout's two-phase `training_step`
+(including that the finetune loss really **adds** its ensemble term — without it phase 2 is phase 1 at a lower
+learning rate, which fits, checkpoints and scores plausibly), diffusion's `_flow_loss` determinism and
+`prepare_full_validation`, the calibration phases freezing everything but their own layer, the two report layouts
+inspected as figures rather than as file names, and the shipped `metrics.yaml` suite driven end to end in both its
+daily and hourly configurations.
+
+Also closed a documented divergence risk nothing covered: **the numpy validation mirror agrees with the torch
+calibration objective**. `_validation_reg_calibration` re-implements `log1p_huber` in numpy for the validation monitor
+and nothing checked the two agree — the `crps_ensemble` hazard in a place the merge did not look. Mutation-verified.
+
+Function coverage went **137 → 89 of 291 untested**; the 89 are 5c's work-list, and they are the functions neither A's
+tests nor the gates ever reached (21 of them are `reporting.py`'s private panel builders, which both drive through
+`write_report` rather than directly).
+
+### The `source_invariant` marker
+
+The 63 source-parsing checks are merge guards: they assert that code removed in the three-branch merge stayed removed.
+They are carried as **34 tests** tagged `@pytest.mark.source_invariant` (registered in `pytest.ini`), so
+`pytest -m 'not source_invariant'` shows what the suite proves without them and one grep finds every one.
+⚠️ **They are to be deleted as a group at the end of the rebuild** — the obligation is recorded in
+[`rebuild-plan.md`](rebuild-plan.md)'s verification section, not only in the marker's help text.
+
+### Verification
+
+Both suites were run on the same source before the gates were deleted: **the nine gates still reported 788 / 0**, so
+nothing in 5a or 5b required a source edit. The suite is **815 passed / 14 skipped / 1 xfailed**, identical across two
+consecutive runs (192.9 s and 192.6 s — up from 137 s; the cartopy layout tests are the cost).
+
+**Nine mutations, one per gate, each applied and reverted** to prove the migrated assertions are not vacuous:
+
+| gate | mutation | caught by |
+|---|---|---|
+| 1 | float64 accumulator → float16 | `test_the_statistics_MATCH_a_float64_reduction_of_the_stored_values` |
+| 2 | `mae` retagged `regression` (the Block 2r mistake) | the taxonomy tests — while the weaker "every score has a tag" test passes, which is why both exist |
+| 3a | the upstream channel appended FIRST | `test_the_appended_channel_IS_the_upstream_returned_separately` |
+| 3b1 | `_weighted_masked_mean` divides by the cell count | `test_every_regression_loss_normalises_by_the_effective_WEIGHT_not_the_cell_count` (6 failures) |
+| 3b2 | the composite reverts to 0.50 / 0.50 | `test_the_two_default_weightings_are_the_DECIDED_ones` |
+| 3c | the numpy mirror drops its `log1p` | `test_the_numpy_VALIDATION_MIRROR_agrees_with_the_torch_calibration_objective` |
+| 3d | `from_upstream` keeps the SAMPLED architecture | `test_from_upstream_takes_its_ARCHITECTURE_from_the_checkpoint` |
+| 3e | the ODE loop runs `num_steps - 1` times | `test_sampling_integrates_a_CONSTANT_velocity_field_exactly` |
+| 4 | `draw_map` draws `origin='lower'` | `test_ROW_ZERO_IS_NORTH` + the two half-axis probes + the AST kwarg check |
+
+⚠️ The gate-4 mutation is worth recording: the first attempt replaced the FIRST `origin='upper'` in `maps.py`, which
+is **inside a docstring**, so the code never changed and the tests correctly passed. A mutation that does not mutate
+proves nothing — verify the edit landed on the executed line before believing a "not caught".
 
 ---
 

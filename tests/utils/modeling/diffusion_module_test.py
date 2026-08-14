@@ -141,6 +141,120 @@ def test_requesting_the_residual_on_a_full_target_run_is_ignored(make_diffusion,
 # =====================================================================================================================
 # Trial-shape translation and the sweep contract
 # =====================================================================================================================
+# =====================================================================================================================
+# The objective is the FLOW loss, and the trial's loss: block is deliberately not read
+# =====================================================================================================================
+@pytest.mark.source_invariant
+@pytest.mark.parametrize('builder', ['build_regression_loss', 'build_binary_loss'])
+def test_the_module_never_reaches_for_a_POINTWISE_loss_builder(builder):
+    """This family's objective is the flow-matching velocity MSE — a loss on the velocity field, not on the target. The
+    ``loss:`` block in its search space exists so the three spaces stay structurally comparable, and is NOT the training
+    objective. A pointwise builder appearing here would mean the flow loss had been quietly supplemented."""
+    from src.utils.modeling import diffusion_module
+
+    source = open(diffusion_module.__file__).read()
+    assert builder not in source
+
+
+@pytest.mark.source_invariant
+def test_the_search_space_SAYS_its_loss_block_is_not_the_objective(repo_root):
+    """Because the key is there and reads like every other family's. Without the warning next to it, the obvious
+    conclusion from the YAML is that ``loss.name`` selects this family's objective too."""
+    import os
+
+    text = open(os.path.join(repo_root, 'config/diffusion/search_space.yaml')).read()
+    assert 'NOT THE TRAINING OBJECTIVE' in text
+
+
+def test_the_training_step_returns_a_finite_loss_carrying_a_gradient(make_diffusion, batch):
+    """One phase, one objective. The velocity MSE is computed at a randomly sampled time per item, so this also exercises
+    ``_sample_time`` and ``_standardize_conditioning``."""
+    module = make_diffusion()
+    module.train()
+    loss = module.training_step(batch(), 0)
+    assert torch.isfinite(loss) and loss.requires_grad
+
+
+def test_the_flow_loss_is_DETERMINISTIC_under_a_seeded_generator(make_diffusion, batch):
+    """The loss draws both the noise and the time, so without seeding two evaluations of the same batch disagree — which
+    would make the validation curve unreadable and the monitor's "best" epoch arbitrary."""
+    module = make_diffusion()
+    module.train()
+    features, target = batch()
+
+    conditioning = module._standardize_conditioning(features)
+    first = module._flow_loss(target, conditioning, generator=torch.Generator().manual_seed(0))
+    again = module._flow_loss(target, conditioning, generator=torch.Generator().manual_seed(0))
+    assert float(first.detach()) == pytest.approx(float(again.detach()), abs=1e-9)
+
+
+# =====================================================================================================================
+# The validation epoch: the flow loss is monitored, the composite is what the sweep ranks on
+# =====================================================================================================================
+@pytest.fixture
+def validated_diffusion(make_diffusion):
+    def run(batches=2, scoring=True):
+        module = make_diffusion()
+        module.valid_climatology_cond_mae = 2.0
+        if scoring:
+            module.prepare_full_validation()
+        module.on_validation_epoch_start()
+        generator = torch.Generator().manual_seed(0)
+        for index in range(batches):
+            features = torch.randn(2, COND_CHANNELS, 16, 16, generator=generator)
+            target = torch.randint(0, 25, (2, 16, 16), generator=generator).float()
+            module.validation_step((features, target), index)
+        module.on_validation_epoch_end()
+        return module
+    return run
+
+
+def test_the_flow_loss_is_ALWAYS_reported(validated_diffusion):
+    """Every epoch, scoring pass or not: it is the monitored metric, so a missing value means the checkpoint callback has
+    nothing to compare."""
+    assert 'valid_flow_loss' in validated_diffusion(scoring=False).last_val_metrics
+
+
+def test_the_composite_is_reported_on_a_SCORING_pass(validated_diffusion):
+    """Generating an ensemble per validation batch is expensive, so the target-space composite is computed only on
+    scoring epochs. It must still land under the selection metric's name — the sweep ranks on the composite and never on
+    ``valid_flow_loss``, which is a velocity-space quantity and not comparable across architectures."""
+    module = validated_diffusion(scoring=True)
+    assert module.selection_metric in module.last_val_metrics
+    assert 'valid_tail_score' not in module.last_val_metrics
+
+
+def test_prepare_full_validation_FORCES_the_scoring_pass(make_diffusion):
+    """The hook ``run_sweep`` calls before the final validation of a trial, so the recorded composite is a real scoring
+    pass rather than whatever the epoch schedule happened to land on."""
+    module = make_diffusion()
+    module.prepare_full_validation()
+    assert module._force_full_validation
+
+
+def test_the_validation_and_evaluation_seeds_DIFFER(make_diffusion):
+    """Both are fixed, deliberately, and they must not be the same fixed value: reusing the validation seed at evaluation
+    would score the test split on the same noise draws the model was selected under."""
+    module = make_diffusion()
+    assert module.valid_seed != module.eval_ensemble_seed
+
+
+def test_the_ensemble_is_REPRODUCIBLE_at_a_fixed_seed(make_diffusion, batch):
+    """Two evaluation runs of one checkpoint must report the same CRPS. Each ODE draw starts from fresh noise, so without
+    a fixed seed the number moves run to run."""
+    module = make_diffusion()
+    one_batch = batch()
+    first = module.predict_step(one_batch, 0)
+    repeated = module.predict_step(one_batch, 0)
+    assert torch.allclose(first['prediction'], repeated['prediction'], atol=1e-6)
+
+
+def test_an_unknown_phase_raises(make_diffusion):
+    module = make_diffusion()
+    with pytest.raises(ValueError):
+        module.set_phase('finetune')
+
+
 def test_n_blocks_is_translated_to_the_networks_depth():
     """``flow.n_blocks`` is named that way because ``depth`` already means the down/upsampling level count in the other
     families' ``unet`` block. The module translates rather than the config compromising."""

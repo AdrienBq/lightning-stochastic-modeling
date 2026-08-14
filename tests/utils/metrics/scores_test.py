@@ -334,6 +334,215 @@ def test_explained_deviance_is_zero_at_climatology_and_one_at_perfection():
     assert scores.explained_deviance(near_perfect, labels, base_rate) > 0.99
 
 
+# =====================================================================================================================
+# The Task: taxonomy — merge guards on the docstrings, because a wrong tag makes a reader SKIP a working score
+# =====================================================================================================================
+def _task_tags():
+    """``{public score name: its Task: tag}``, parsed from ``scores.py``'s docstrings."""
+    import ast
+    import re
+
+    tree = ast.parse(open(scores.__file__).read())
+    tags = {}
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and not node.name.startswith('_'):
+            match = re.search(r'^Task: (\w+)', ast.get_docstring(node) or '', flags=re.MULTILINE)
+            tags[node.name] = match.group(1) if match else None
+    return tags
+
+
+@pytest.mark.source_invariant
+def test_every_public_score_declares_its_TASK():
+    """The two tasks have genuinely different valid score sets and nothing else says so."""
+    untagged = [name for name, tag in _task_tags().items() if tag is None]
+    assert not untagged, untagged
+
+
+@pytest.mark.source_invariant
+def test_the_regression_only_set_is_exactly_the_THREE_limited_by_their_bins_or_conditions():
+    """Not "has a tag" — WHICH functions are regression-only. Block 2r got this wrong by assuming the classification
+    prediction was a 0/1 field, and tagged five working scores as degenerate. That is the worst kind of error: a reader
+    trusts the tag and skips a score that applies.
+
+    These three are limited by their BINS or CONDITIONS, not by the prediction: ``estimation_tendency`` conditions on
+    ``obs > 0``, ``stratified_mae`` bins by observed intensity, and ``rank_correlation`` does both and is misleadingly
+    scaled besides.
+    """
+    tags = _task_tags()
+    regression_only = {name for name, tag in tags.items() if tag == 'regression'}
+    assert regression_only == {'estimation_tendency', 'rank_correlation', 'stratified_mae'}, sorted(regression_only)
+
+
+@pytest.mark.source_invariant
+def test_the_five_probability_valid_continuous_scores_are_tagged_BOTH():
+    """The retag Block 2r2 made. Reverting any one of them fails here rather than passing a "has a tag" check — and the
+    sharpest pair is ``rmse`` and ``mae``, two functions apart in the file and completely divergent on a binary
+    observation: ``rmse ** 2`` IS the Brier score (proper), while ``mae`` is minimised by the all-zero forecast."""
+    tags = _task_tags()
+    for name in ('rmse', 'mae', 'bias', 'r2_score', 'conditional_error'):
+        assert tags[name] == 'both', f'{name} is tagged {tags[name]!r}'
+
+
+@pytest.mark.source_invariant
+def test_dice_coefficient_is_tagged_for_the_CLASSIFICATION_task():
+    """It reads a probability directly, as soft Dice, so it belongs to the occurrence head rather than to the hour
+    bands."""
+    assert _task_tags()['dice_coefficient'] == 'classification'
+
+
+@pytest.mark.source_invariant
+@pytest.mark.parametrize('module_name', ['scores', 'evaluation', 'reporting', 'diagnostics'])
+def test_no_removed_metric_identifier_survives_as_CODE(module_name):
+    """The merge guard for the metric suite. Every one of these was a real function that a decision removed: the target
+    transform's PIT block, the quantile-ratio pair behind the deleted figures, Tweedie and the unbounded-count scores,
+    and branch D's rival ensemble accumulator.
+
+    Tokenized rather than grepped: these files' comments legitimately NAME what was removed in order to explain the
+    absence, so a text search flags the prose that documents the decision.
+    """
+    import importlib
+    import tokenize
+
+    module = importlib.import_module(f'src.utils.metrics.{module_name}')
+    with open(module.__file__, 'rb') as handle:
+        identifiers = {token.string for token in tokenize.tokenize(handle.readline)
+                       if token.type == tokenize.NAME}
+
+    banned = {'tweedie_deviance_score', 'uniform_histogram_ks', 'quantile_ratios', 'quantile_quantile',
+              'psd_full_fidelity', 'gamma_shape', 'gamma_scale', 'GammaFTransform', 'LogStandardizeTransform',
+              'EnsembleProbabilisticAccumulator', 'regression_metric_suite', 'target_variable'}
+    survivors = identifiers & banned
+    assert not survivors, sorted(survivors)
+
+
+def test_the_ranking_metrics_are_NaN_when_the_observation_has_one_class():
+    """Both are undefined without a positive and a negative. NaN propagates into the composite as a 0 contribution,
+    which is the intended degradation — a returned 0.5 or 0.0 would read as "no skill" rather than "not computable"."""
+    rng = np.random.default_rng(0)
+    probability = rng.random(2000)
+    assert np.isnan(scores.roc_auc(probability, np.zeros(2000)))
+    assert np.isnan(scores.average_precision(probability, np.zeros(2000)))
+
+
+def test_explained_deviance_is_NEGATIVE_for_an_anti_informative_forecast():
+    """It is a skill score against the climatology, so a forecast that inverts the signal must score below zero rather
+    than clipping at it — the sign is what tells a reader the model is worse than saying nothing."""
+    rng = np.random.default_rng(1)
+    labels = (rng.random(20000) < 0.02).astype(float)
+    probability = 1.0 / (1.0 + np.exp(-rng.normal(labels * 1.6, 1.0)))
+    climatology = np.full_like(probability, labels.mean())
+
+    assert scores.explained_deviance(1.0 - probability, labels, climatology) < 0
+
+
+def test_a_DISCRIMINATING_but_miscalibrated_forecast_scores_well_on_AUC_and_badly_here():
+    """The pair that makes reporting both worthwhile. ROC-AUC sees only the RANKING, so an inverted-but-informative
+    forecast still ranks; ``explained_deviance`` is a proper log-loss skill score and sees the calibration. A model can
+    therefore look strong on the AUCs and be useless as a probability — which is precisely the failure the Platt phase
+    exists to fix."""
+    rng = np.random.default_rng(1)
+    labels = (rng.random(20000) < 0.02).astype(float)
+    probability = 1.0 / (1.0 + np.exp(-rng.normal(labels * 1.6, 1.0)))
+    climatology = np.full_like(probability, labels.mean())
+
+    assert scores.roc_auc(probability, labels) > 0.5
+    assert scores.explained_deviance(probability, labels, climatology) < 0
+
+
+def test_roc_auc_EXCEEDS_average_precision_on_a_sparse_target():
+    """The imbalance signature, and the reason the classification composite weights AP at 0.50 and not ROC-AUC: on a
+    ~2 % base rate ROC-AUC is flattered by the enormous true-negative count, while AP is not."""
+    rng = np.random.default_rng(1)
+    labels = (rng.random(20000) < 0.02).astype(float)
+    # a logistic forecast with real OVERLAP between the classes. A perfectly separating one pins both metrics at 1.0,
+    # which is where the imbalance signature disappears.
+    probability = 1.0 / (1.0 + np.exp(-rng.normal(labels * 1.6, 1.0)))
+
+    assert scores.roc_auc(probability, labels) > scores.average_precision(probability, labels)
+
+
+def test_score_max_is_a_MONOTONE_RESCALE_so_the_metric_is_invariant():
+    """``score_max`` maps a 0-24 hour prediction into [0, 1] so the binned accumulator can use its fixed edges. Any fixed
+    monotone map leaves AUC and AP exactly invariant and changes only bin resolution — which is what makes the rescale a
+    free implementation detail rather than a modelling choice."""
+    rng = np.random.default_rng(2)
+    hours = rng.integers(0, 25, 20000).astype(float)
+    labels = (hours > 0).astype(float)
+
+    assert scores.roc_auc(hours / 24.0, labels) == pytest.approx(
+        scores.roc_auc(hours, labels, score_max=24.0), abs=1e-12)
+
+
+def test_the_SUBSAMPLING_helpers_are_gone():
+    """``_subsampled_ranking_inputs`` capped the ranking path at 2e6 cells — 12 % of the daily test split and 0.51 % of
+    the hourly one. So ``average_precision_occurrence``, weight 0.50 in the classification composite, was a random
+    sample. The binned accumulator replaced it, and the sklearn curve wrappers went with it: one implementation, not an
+    exact one for tests and a binned one for production."""
+    for name in ('_subsampled_ranking_inputs', 'roc_curve_points', 'precision_recall_curve_points'):
+        assert not hasattr(scores, name), name
+
+
+def test_finalize_ranking_metrics_is_NaN_with_one_class_and_returns_empty_curves():
+    """The streaming counterpart of the wrapper behaviour above, since the accumulator can legitimately see a batch with
+    no positives."""
+    edges = scores.ranking_bin_edges()
+    partials = scores.ranking_partials(np.random.default_rng(0).random(500), np.zeros(500), edges)
+    finalized = scores.finalize_ranking_metrics(partials, edges)
+
+    assert np.isnan(finalized['roc_auc']) and np.isnan(finalized['average_precision'])
+
+
+def test_psd_full_fidelity_is_a_KEY_not_a_function():
+    """It is the ``psd_fidelity`` of the full-band ratio, computed in the evaluation loop. A second function of that name
+    is exactly how the two would drift — and this key carries 0.40 of the regression composite."""
+    assert not hasattr(scores, 'psd_full_fidelity')
+
+
+def test_bernoulli_logloss_stays_FINITE_at_a_confident_mistake():
+    """A probability of exactly 0 on an observed event is an infinite log-loss, which would poison
+    ``explained_deviance`` for the whole split. The implementation clips, so one over-confident cell degrades the score
+    instead of destroying it."""
+    assert np.isfinite(scores.bernoulli_logloss(np.array([0.0, 1.0]), np.array([1.0, 0.0])))
+
+
+def test_dice_coefficient_is_ONE_on_a_perfect_overlap_and_low_when_disjoint():
+    """The two anchors of the coefficient, on binary fields where it reduces to ``2TP / (2TP + FP + FN)``."""
+    labels = (np.random.default_rng(0).random(500) < 0.2).astype(float)
+    assert scores.dice_coefficient(labels, labels) == pytest.approx(1.0, abs=1e-6)
+    assert scores.dice_coefficient(np.array([1.0, 0.0]), np.array([0.0, 1.0])) < 0.5
+
+
+def test_estimation_tendency_DEGENERATES_on_a_binary_observation(sparse_probability_forecast):
+    """Why it stays tagged ``regression``: it is conditioned on ``obs > 0``, so on a binary target ``pred - obs = p - 1``
+    is never positive. ``under`` is ~1 and ``over`` is 0 for ANY model — degenerate by construction of the CONDITION, not
+    of the prediction."""
+    probability, labels = sparse_probability_forecast
+    tendency = scores.estimation_tendency(probability, labels)
+    assert tendency['over'] == 0.0
+    assert tendency['under'] > 0.99
+
+
+def test_stratified_mae_leaves_every_hour_band_but_the_first_EMPTY(sparse_probability_forecast):
+    """The other bin-driven reason for a ``regression`` tag: it bins by OBSERVED intensity, and a 0/1 target has exactly
+    one non-empty band. The remaining bands are NaN rather than 0, so they read as absent rather than as perfect."""
+    probability, labels = sparse_probability_forecast
+    bands = scores.stratified_mae(probability, labels, [('occurrence', 0.0), ('h3', 3.0), ('h6', 6.0)])
+    populated = sum(not np.isnan(value) for value in bands.values())
+    assert populated == 1, bands
+
+
+def test_the_unconditioned_spearman_is_the_AFFINE_IMAGE_of_roc_auc(sparse_probability_forecast):
+    """Not merely redundant with ``roc_auc`` — actively misleading. The scaling is ~``sqrt(base_rate)``, so a
+    near-perfect AUC of 0.998 reads as a Spearman of 0.049. That is the second reason it stays tagged ``regression``."""
+    probability, labels = sparse_probability_forecast
+    spearman = scores.rank_correlation(probability, labels, condition=np.ones(labels.shape, dtype=bool))
+
+    positives, negatives = labels.sum(), labels.size - labels.sum()
+    auc = scores.roc_auc(probability, labels)
+    expected = (2.0 * auc - 1.0) * np.sqrt(3.0 * positives * negatives / labels.size ** 2)
+    assert spearman == pytest.approx(expected, rel=1e-5)
+
+
 def test_dice_coefficient_is_soft_dice_on_probabilities():
     """``2*sum(p*o)/(sum(p)+sum(o))`` needs no binarization, so on a probability field it IS soft Dice — the
     eval-time complement of ``dice_loss``, which is what makes the reported score match the trained objective."""
@@ -454,6 +663,20 @@ def test_threshold_free_fss_equals_the_fractions_brier_skill_score():
         denominator += float((f_pred ** 2 + f_obs ** 2).sum())
 
     assert np.isclose(scores.fss(probability, obs, None, scale), 1.0 - numerator / denominator, rtol=1e-10)
+
+
+def test_the_threshold_free_useful_scale_reuses_the_threshold_free_fss_at_every_scale():
+    """``fss_useful_scale`` reuses the per-scale ``fss`` it already computed rather than recomputing — the same reuse the
+    thresholded form gets. Checked in the threshold-free form too, because that path takes different branches in both
+    functions and could reuse the wrong one silently."""
+    rng = np.random.default_rng(0)
+    observation = (rng.random((4, 24, 24)) < 0.08).astype(np.float64)
+    probability = np.clip(0.4 * observation + 0.15 * rng.random(observation.shape), 0, 1)
+    scale_list = [1, 3, 5]
+
+    _, by_scale = scores.fss_useful_scale(probability, observation, None, scale_list)
+    for scale in scale_list:
+        assert by_scale[scale] == pytest.approx(scores.fss(probability, observation, None, scale), abs=1e-12), scale
 
 
 def test_threshold_free_fss_reproduces_the_thresholded_value_on_a_binarised_field():

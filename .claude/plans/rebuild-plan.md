@@ -23,6 +23,7 @@ to no single step.
 | [`inventory-scores.md`](inventory-scores.md) | 40 scores, 8 categories |
 | [`inventory-figures.md`](inventory-figures.md) | The 02a visual spec, 13 pipeline figures, issues |
 | [`inventory-architecture.md`](inventory-architecture.md) | Stages, modeling layer, ensemble contract, portability, 15-item transform-removal checklist |
+| [`inventory-gate-migration.md`](inventory-gate-migration.md) | All 641 checks of the nine deleted `gate_block*.py`, and where each one went (Step 3 block 5b) |
 
 **Block order** a → b → c → d → e. Each step ends with the verification gate below and a plan update.
 
@@ -62,7 +63,16 @@ to no single step.
 ## Verification (per block; real CPU smoke, 1 epoch, 2 days)
 
 1. Import/parse: `python -c "import ..."` for touched modules; `parse_config` on every YAML.
-2. Unit tests: `pytest` on the relevant ported tests.
+2. **Unit tests: `pytest` — `tests/` is the verification of record.** It mirrors `src/` (one `<module>_test.py` per
+   module) and `tests/completeness_test.py` enforces both the mirror and the every-function requirement. The nine
+   `gate_block*.py` scripts that verified Steps 3's blocks 1–4 were **deleted in block 5b**, after each of their 641
+   check sites was migrated or dropped with a stated reason — the record is
+   [`inventory-gate-migration.md`](inventory-gate-migration.md).
+   > ⚠️ **At the END of the rebuild, delete the `source_invariant` tests as a group.** They assert on SOURCE TEXT
+   > rather than behaviour — that an identifier removed by the three-branch merge stayed removed, that a function
+   > delegates rather than re-implements. They are merge guards and have no value once the merge is history.
+   > `pytest -m 'not source_invariant'` shows what the suite proves without them; `grep -rn source_invariant tests/`
+   > finds every one. Retire the whole set, not a file at a time.
 3. Smoke run: the affected `*_smoke_cpu.yaml` via
    `python run_project.py config/<family>/<family>_smoke_cpu.yaml <EXPERIMENT>` (CPU, `n-trials 1`,
    `max-epochs 1`, the 8-day mid-July split, **`ensemble-size 2`** — never 1, see below); assert declared
