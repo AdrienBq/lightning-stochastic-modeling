@@ -113,10 +113,11 @@ def test_no_test_file_outlives_its_module(repo_root):
     expected = {test_path for _, test_path in source_modules(repo_root)}
     expected |= {os.path.join(repo_root, TESTS, name)
                  for name in ('completeness_test.py',)}                      # this file mirrors nothing
-    # Step 4 still owes three stage modules; their test files exist and are skipped (see stages/*_test.py).
-    # `prepare_modeling` left this list in block 4a — its module now exists, so the mirror covers it normally.
+    # Step 4 still owes two stage modules; their test files exist and are skipped (see stages/*_test.py).
+    # `prepare_modeling` left this list in 4a, `tune`/`retrain_best` were never on it, and `evaluate` left in 4c —
+    # each one's module now exists, so the mirror covers it normally.
     expected |= {os.path.join(repo_root, TESTS, 'stages', f'{stem}_test.py')
-                 for stem in ('evaluate', 'tabulate_metrics', 'combine_curves')}
+                 for stem in ('tabulate_metrics', 'combine_curves')}
 
     orphans = [os.path.relpath(path, repo_root)
                for path in _iter_source_files(os.path.join(repo_root, TESTS))
@@ -169,10 +170,11 @@ def test_function_census_is_stable(repo_root):
     above — and so the count MOVES in the same commit as the code, making the diff a statement of what was added.
 
     History: 291 at the end of Step 3. Step 4 block 4a added `prepare_modeling`'s 14 functions and
-    `data.high_lightning_days` (306); block 4b added `tune`'s 2 and `retrain_best`'s 2 (310).
+    `data.high_lightning_days` (306); block 4b added `tune`'s 2 and `retrain_best`'s 2 (310); block 4c added
+    `evaluate`'s 3 (313).
     """
     total = sum(1 for _ in _all_functions(repo_root))
-    assert total == 310, f'the testable surface moved from 310 to {total}; re-scope the coverage work-list'
+    assert total == 313, f'the testable surface moved from 313 to {total}; re-scope the coverage work-list'
 
 
 def test_exemption_list_has_not_grown(repo_root):
