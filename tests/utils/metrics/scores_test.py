@@ -686,3 +686,208 @@ def test_threshold_free_fss_reproduces_the_thresholded_value_on_a_binarised_fiel
 
     binarised = (prediction >= 0.5).astype(np.float64)
     assert np.isclose(scores.fss(binarised, obs, None, 3), scores.fss(prediction, obs, 0.5, 3), rtol=1e-12)
+
+
+# =====================================================================================================================
+# Block 5c — the internals the public scores are built from
+#
+# These are reached through their callers everywhere above. Tested directly here because each one is a place where a
+# shared quantity is computed ONCE and reused, so an error in it propagates identically into every score that depends
+# on it — and a suite where every CRPS-derived number is wrong by the same factor looks self-consistent.
+# =====================================================================================================================
+def test_the_crps_spread_term_equals_the_BRUTE_FORCE_pairwise_expectation():
+    """``_crps_terms`` uses the O(M log M) order-statistic estimator of ``(1/2) E|X - X'|`` because the ensemble stack
+    cannot be held pairwise in memory. That optimisation is the thing worth checking: it must agree exactly with the
+    definition on a small ensemble, or every CRPS in the suite is wrong by a consistent amount and nothing looks odd.
+    """
+    rng = np.random.default_rng(0)
+    members = rng.gamma(2.0, 2.0, size=(7, 5))                     # [M, cells]
+    observation = rng.gamma(2.0, 2.0, size=5)
+
+    mae_term, spread_term = scores._crps_terms(members, observation)
+
+    brute_mae = np.abs(members - observation[None]).mean(axis=0)
+    brute_spread = 0.5 * np.abs(members[:, None, :] - members[None, :, :]).mean(axis=(0, 1))
+
+    assert np.allclose(mae_term, brute_mae)
+    assert np.allclose(spread_term, brute_spread), f'{spread_term} vs {brute_spread}'
+
+
+def test_the_crps_terms_are_ORDER_INVARIANT_in_the_members():
+    """The ensemble has no member ordering — draw 3 is not "after" draw 2. A term that depended on it would make CRPS
+    depend on the order ``predict_step`` happened to stack the draws in."""
+    rng = np.random.default_rng(1)
+    members = rng.normal(size=(6, 4))
+    observation = rng.normal(size=4)
+
+    straight = scores._crps_terms(members, observation)
+    shuffled = scores._crps_terms(members[[3, 0, 5, 1, 4, 2]], observation)
+    assert np.allclose(straight[0], shuffled[0]) and np.allclose(straight[1], shuffled[1])
+
+
+def test_a_ONE_MEMBER_ensemble_has_zero_spread_so_crps_degenerates_to_mae():
+    """Not an error, which is the hazard CLAUDE.md flags for ``ensemble-size``: a single member gives a finite CRPS
+    that is silently just the MAE, with no sign the spread term contributed nothing."""
+    members = np.array([[2.0, 5.0]])
+    mae_term, spread_term = scores._crps_terms(members, np.array([1.0, 1.0]))
+    assert np.allclose(spread_term, 0.0)
+    assert np.allclose(mae_term, [1.0, 4.0])
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# The FSS internals
+# ---------------------------------------------------------------------------------------------------------------------
+def test_identical_fields_contribute_a_ZERO_fss_numerator():
+    """FSS is ``1 - num/den``, so a perfect forecast has to give ``num = 0`` exactly at every scale."""
+    rng = np.random.default_rng(0)
+    field = (rng.random((16, 16)) < 0.1).astype(np.float64)
+    for scale in (1, 3, 5):
+        numerator, denominator = scores._fractions_skill(field, field, scale)
+        assert numerator == 0.0
+        assert denominator > 0.0
+
+
+def test_the_fractions_helper_accepts_BOOLEAN_and_FLOAT_fields_interchangeably():
+    """The documented reason it casts: the thresholded form passes boolean exceedance masks and the probabilistic form
+    passes float fractions. A boolean neighbourhood mean that stayed boolean would collapse every fraction to 0 or 1
+    and destroy the whole point of FSS."""
+    rng = np.random.default_rng(0)
+    boolean = rng.random((12, 12)) < 0.2
+    observed = rng.random((12, 12)) < 0.2
+
+    from_bool = scores._fractions_skill(boolean, observed, 3)
+    from_float = scores._fractions_skill(boolean.astype(np.float64), observed.astype(np.float64), 3)
+    assert from_bool == from_float
+
+
+def test_a_larger_neighbourhood_SMOOTHS_the_fraction_mismatch():
+    """The property the useful-scale search rests on: a displaced forecast is penalised less as the neighbourhood grows
+    past the displacement. A numerator that did not fall with scale would make ``fss_useful_scale`` meaningless."""
+    prediction = np.zeros((21, 21))
+    observation = np.zeros((21, 21))
+    prediction[10, 10] = 1.0
+    observation[10, 13] = 1.0                                       # the same event, displaced by 3 pixels
+
+    numerators = [scores._fractions_skill(prediction, observation, scale)[0] for scale in (1, 3, 9)]
+    assert numerators[0] > numerators[1] > numerators[2]
+
+
+def test_a_threshold_BINARISES_both_sides_and_None_passes_them_through():
+    """The switch between the regression and classification forms of FSS. ``None`` is not "no threshold, use zero" — it
+    means the fields ARE already fractions, which is what makes the probabilistic form a fractions Brier skill score."""
+    prediction = np.array([[0.2, 0.8], [6.0, 0.0]])
+    observation = np.array([[0.0, 1.0], [7.0, 0.0]])
+
+    passthrough = scores._fss_fields(prediction, observation, None, strict=True)
+    assert passthrough[0] is prediction and passthrough[1] is observation
+
+    binarised = scores._fss_fields(prediction, observation, 0.5, strict=True)
+    assert binarised[0].dtype == bool and binarised[1].dtype == bool
+    assert binarised[0].tolist() == [[False, True], [True, False]]
+    assert binarised[1].tolist() == [[False, True], [True, False]]
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# The spectral internals
+# ---------------------------------------------------------------------------------------------------------------------
+def test_the_wavelength_grid_is_INFINITE_at_the_dc_component():
+    """The DC term is the field's mean — a structure of infinite wavelength. Left as a zero frequency it would divide
+    by zero and put a NaN into every radial bin that touches it."""
+    grid = scores._wavelength_grid(8, 8)
+    assert np.isinf(grid[0, 0])
+    assert np.all(np.isfinite(grid.ravel()[1:]))
+    assert np.all(grid.ravel()[1:] > 0)
+
+
+def test_the_shortest_resolvable_wavelength_along_an_axis_is_TWO_pixels():
+    """Nyquist. It is what makes the report's kilometre axis honest: two pixels is 55.5 km, and nothing below it is
+    resolved by the grid at all."""
+    grid = scores._wavelength_grid(8, 8)
+    assert abs(grid[0, 4] - 2.0) < 1e-12
+    assert abs(grid[4, 0] - 2.0) < 1e-12
+
+
+def test_the_per_map_psd_rows_AVERAGE_to_the_pooled_spectrum():
+    """The stated contract, and the reason the ensemble band and the pooled curve can be drawn on one axis: they share
+    a wavelength axis AND the rows' column mean is the pooled curve, so the band is centred on the line it surrounds."""
+    rng = np.random.default_rng(0)
+    fields = rng.normal(size=(6, 16, 16))
+
+    pooled_wavelengths, pooled = scores.radial_psd(fields)
+    per_map_wavelengths, per_map = scores.radial_psd_per_map(fields)
+
+    assert np.allclose(pooled_wavelengths, per_map_wavelengths)
+    assert per_map.shape == (6, pooled.size)
+    assert np.allclose(per_map.mean(axis=0), pooled)
+
+
+def test_the_per_map_psd_can_return_the_pooled_2d_spectrum_from_ONE_fft_pass():
+    """The optimisation that exists so the band-ratio scalars and the per-map band do not each pay for a full FFT sweep
+    of the split. It has to give exactly what the separate function gives."""
+    rng = np.random.default_rng(1)
+    fields = rng.normal(size=(5, 16, 16))
+
+    _, _, mean_spectrum = scores.radial_psd_per_map(fields, return_mean_spectrum=True)
+    assert np.allclose(mean_spectrum, scores.mean_power_spectrum(fields))
+
+
+def test_the_per_map_psd_ticks_its_progress_callback_once_per_map():
+    """The evaluation stage's progress bar is driven by this, and a tick per BIN rather than per map would make the bar
+    finish long before the sweep does."""
+    ticks = []
+    scores.radial_psd_per_map(np.random.default_rng(0).normal(size=(4, 8, 8)), progress=lambda: ticks.append(1))
+    assert len(ticks) == 4
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# reliability_curve and skill_score
+# ---------------------------------------------------------------------------------------------------------------------
+def test_a_perfectly_calibrated_forecast_puts_the_reliability_curve_ON_the_diagonal():
+    """The definition of calibration: among the cells given probability p, a fraction p occur. Drawn against the
+    diagonal in the report, so a curve that could not reach it would make every model look miscalibrated."""
+    rng = np.random.default_rng(0)
+    probabilities = rng.random(200_000)
+    occurrences = (rng.random(200_000) < probabilities).astype(np.float64)
+
+    mean_probability, observed_frequency, counts = scores.reliability_curve(probabilities, occurrences, bins=10)
+
+    populated = counts > 0
+    assert np.allclose(mean_probability[populated], observed_frequency[populated], atol=0.02)
+    assert counts.sum() == 200_000
+
+
+def test_an_UNPOPULATED_reliability_bin_is_NaN_rather_than_zero():
+    """At a 0.07 % base rate nearly every high-probability bin is empty. A zero there would draw a curve plunging to the
+    floor and read as catastrophic over-forecasting."""
+    probabilities = np.array([0.01, 0.02, 0.03])
+    occurrences = np.array([0.0, 0.0, 1.0])
+
+    mean_probability, observed_frequency, counts = scores.reliability_curve(probabilities, occurrences, bins=10)
+
+    assert counts[0] == 3 and counts[1:].sum() == 0
+    assert np.isnan(mean_probability[5]) and np.isnan(observed_frequency[5])
+    assert np.isfinite(mean_probability[0])
+
+
+def test_a_probability_of_exactly_ONE_lands_in_the_LAST_bin_not_past_the_end():
+    """``np.digitize`` would put it at index ``bins``, one past the array. The clip is what keeps a confident forecast
+    from being dropped from the diagram entirely."""
+    _, _, counts = scores.reliability_curve(np.array([1.0]), np.array([1.0]), bins=10)
+    assert counts[-1] == 1 and counts.sum() == 1
+
+
+@pytest.mark.parametrize('model,baseline,expected', [
+    (0.5, 1.0, 0.5),                                                # half the baseline's error
+    (1.0, 1.0, 0.0),                                                # no skill
+    (2.0, 1.0, -1.0),                                               # worse than the baseline
+    (0.0, 1.0, 1.0),                                                # perfect
+])
+def test_the_skill_score_is_one_minus_the_error_ratio(model, baseline, expected):
+    assert abs(scores.skill_score(model, baseline) - expected) < 1e-12
+
+
+@pytest.mark.parametrize('baseline', [0.0, -1.0, float('nan'), float('inf')])
+def test_a_DEGENERATE_baseline_gives_NaN_rather_than_an_infinite_skill(baseline):
+    """A climatology with zero error on the evaluated cells is possible on a sparse subgroup, and ``1 - x/0`` would
+    report an infinite skill for a model that is merely being compared against nothing."""
+    assert np.isnan(scores.skill_score(1.0, baseline))

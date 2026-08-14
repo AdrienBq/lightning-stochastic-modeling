@@ -252,8 +252,10 @@ def test_each_curve_figure_self_skips_when_its_curve_is_absent(figure, tmp_path)
 # =====================================================================================================================
 # The six residual figures  (ported)
 # =====================================================================================================================
-@pytest.fixture
+@pytest.fixture(scope='module')
 def residual_curves():
+    """Module-scoped: ``residual_diagnostics`` over a 10-item ensemble is seconds, and eight tests read the same
+    curves without mutating them."""
     rng = np.random.default_rng(0)
     n = 10
     upstream = np.clip(np.abs(rng.normal(6, 3, (n, H, W))), 0, 24)
@@ -268,13 +270,10 @@ def residual_curves():
     return curves, prediction, observation, items
 
 
-def test_residual_figures_render_png_and_pdf(residual_curves, tmp_path):
-    curves, prediction, observation, items = residual_curves
-    reporting.write_report(str(tmp_path), {'figures': RESIDUAL_FIGURES, 'formats': ['png', 'csv']}, {}, curves,
-                           prediction, observation, items)
-    for figure in RESIDUAL_FIGURES:
-        assert os.path.exists(os.path.join(str(tmp_path), f'{figure}.png')), f'{figure}.png'
-        assert os.path.exists(os.path.join(str(tmp_path), f'{figure}.pdf')), f'{figure}.pdf'
+# ⚠️ A's ``test_residual_figures_render_png_and_pdf`` rendered all six through ``write_report``. Superseded by
+# ``test_each_residual_builder_renders_png_and_pdf_when_called_DIRECTLY`` below, which asserts the same files and is
+# strictly stronger: ``write_report`` catches every exception and only warns, so its version reported a broken builder
+# as a missing file with no traceback. Dropping it also saves one full set of cartopy renders.
 
 
 def test_residual_figures_self_skip_without_a_residual_block(tmp_path):
@@ -554,3 +553,367 @@ def test_an_unknown_figure_name_is_skipped_rather_than_fatal(report_arrays, tmp_
     reporting.write_report(str(tmp_path), {'figures': ['not_a_figure'], 'formats': ['png']}, {}, {},
                            prediction, observation, items)
     assert not [name for name in os.listdir(str(tmp_path)) if name.endswith('.png')]
+
+
+# =====================================================================================================================
+# Block 5c — the private builders, driven DIRECTLY
+#
+# Everything above reaches these through ``write_report``, which wraps every figure in a ``try/except Exception`` that
+# only warns. That is the right behaviour for a pipeline and the wrong one for a test: a builder that raises is
+# indistinguishable from a builder that self-skipped, and the traceback is thrown away. Calling them directly is what
+# makes a failure legible.
+# =====================================================================================================================
+def test_the_three_selection_categories_pick_the_right_ends_of_each_ordering():
+    """``_category_selection`` is where "the most extreme days" is defined. Activity and error are ranked
+    independently, because the worst-error day is often NOT the most active one — that divergence is the reason both
+    categories exist rather than one."""
+    totals = np.array([0.0, 50.0, 10.0, 30.0, 20.0])            # ascending order: 0, 2, 4, 3, 1
+    errors = np.array([9.0, 1.0, 2.0, 3.0, 4.0])                # item 0 is the worst error and the LEAST active
+
+    selection = reporting._category_selection(totals, errors, n_samples=2)
+
+    assert selection['most_active'] == [1, 3], 'descending by observed total'
+    assert selection['worst_error'] == [0, 4], 'descending by total absolute error'
+    assert set(selection['median_activity']) <= {2, 4, 3}, 'drawn from the middle of the activity ordering'
+    assert len(selection['median_activity']) == 2
+
+
+def test_the_selection_asks_for_no_more_items_than_exist():
+    """A smoke split is 2 days. Requesting 3 of each category must not index past the end."""
+    selection = reporting._category_selection(np.array([1.0, 2.0]), np.array([1.0, 2.0]), n_samples=3)
+    for indices in selection.values():
+        assert all(0 <= int(index) < 2 for index in indices), selection
+
+
+def test_extremeness_is_defined_by_the_OBSERVED_activity_not_the_predicted():
+    """Otherwise a model that hallucinates a storm chooses which days get plotted, and the report's "most active days"
+    become a picture of the model rather than of the split."""
+    observation = np.zeros((3, 4, 4))
+    observation[1] = 5.0                                        # item 1 is the only real activity
+    prediction = np.zeros((3, 4, 4))
+    prediction[2] = 99.0                                        # item 2 is a hallucination
+    items = pd.DataFrame({'date': ['2015-07-20', '2015-07-21', '2015-07-22'], 'hour': [np.nan] * 3})
+
+    selected = reporting._select_plot_indices(observation, prediction, items, plot_dates=None)
+    most_active = next(index for index, tag in selected if tag == 'most_active')
+    assert most_active == 1
+
+
+def test_a_requested_date_comes_FIRST_and_is_not_repeated_by_a_category():
+    """The dedup is by item index across all four categories, so a day that is both requested and the worst error is
+    rendered once — a second render would overwrite the first file with a different category tag."""
+    prediction, observation, _, items, dates = _report_arrays(n_items=4, seed=1)
+
+    selected = reporting._select_plot_indices(observation, prediction, items, plot_dates=[dates[2]])
+    indices = [index for index, _ in selected]
+
+    assert selected[0] == (2, 'requested')
+    assert len(indices) == len(set(indices)), f'an item was selected twice: {selected}'
+
+
+def test_an_unknown_requested_date_WARNS_and_is_skipped(caplog):
+    """``plot_dates`` is a user-supplied list against whatever split is being evaluated, so a date outside it is a
+    typo or a wrong split — worth a warning, not worth losing the report over."""
+    import logging
+
+    prediction, observation, _, items, _ = _report_arrays(n_items=2)
+    with caplog.at_level(logging.WARNING):
+        selected = reporting._select_plot_indices(observation, prediction, items, plot_dates=['1999-01-01'])
+
+    assert not any(tag == 'requested' for _, tag in selected)
+    assert any('1999-01-01' in record.getMessage() for record in caplog.records)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Saving: the map figures ignore `formats`, the curve figures obey it
+# ---------------------------------------------------------------------------------------------------------------------
+def test_a_map_figure_is_saved_as_BOTH_png_and_pdf_whatever_formats_asks(tmp_path):
+    """Deliberate asymmetry, and the reason there are two save helpers: maps are the publication output and get a
+    vector copy unconditionally, while the curve/table figures follow the configured ``formats``."""
+    import matplotlib.pyplot as plt
+
+    figure = plt.figure()
+    reporting._save_map_figure(figure, str(tmp_path), 'a_map')
+
+    assert os.path.exists(os.path.join(str(tmp_path), 'a_map.png'))
+    assert os.path.exists(os.path.join(str(tmp_path), 'a_map.pdf'))
+    assert not plt.fignum_exists(figure.number), 'a report renders dozens of figures; leaking them exhausts memory'
+
+
+def test_a_curve_figure_writes_no_png_when_png_was_not_requested(tmp_path):
+    import matplotlib.pyplot as plt
+
+    figure = plt.figure()
+    reporting._save_figure(figure, str(tmp_path), 'a_curve', formats=['csv'])
+
+    assert not os.path.exists(os.path.join(str(tmp_path), 'a_curve.png'))
+    assert not plt.fignum_exists(figure.number), 'the figure is closed even when nothing was written'
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# The residual map primitives
+# ---------------------------------------------------------------------------------------------------------------------
+def test_the_diverging_norm_is_SYMMETRIC_about_zero():
+    """A signed residual read through an asymmetric colour axis puts white somewhere other than zero, so a map with no
+    bias looks biased. Symmetry is the whole property."""
+    values = np.array([-1.0, -0.5, 0.2, 3.0])
+    norm = reporting._diverging_norm(values)
+    assert norm.vmin == -norm.vmax
+    assert abs(norm(0.0) - 0.5) < 1e-12, 'zero must land at the centre of the colormap'
+
+
+def test_the_diverging_norm_uses_a_ROBUST_extent(): 
+    """One extreme cell would otherwise set the axis and flatten everything else to white. The 99th percentile of
+    ``|value|`` is what keeps the bulk of the field legible."""
+    values = np.concatenate([np.full(999, 1.0), np.array([1000.0])])
+    assert reporting._diverging_norm(values).vmax < 100.0
+
+
+@pytest.mark.parametrize('values', [np.array([]), np.array([np.nan, np.inf]), np.zeros(10)])
+def test_the_diverging_norm_never_collapses_to_a_zero_width_axis(values):
+    """An all-zero residual map (a model that corrected nothing) or an all-NaN one would otherwise produce
+    ``Normalize(0, 0)``, which matplotlib renders as a single flat colour with a division warning."""
+    norm = reporting._diverging_norm(values)
+    assert norm.vmax > norm.vmin
+
+
+def test_a_solid_colormap_is_one_opaque_colour_with_TRANSPARENT_masked_cells():
+    """The +/-inf surprise categories are drawn as overlays on top of the diverging field, so every cell outside the
+    category has to be see-through — an opaque bad-colour would paint the whole panel."""
+    cmap = reporting._solid_cmap(reporting.SURPRISE_OVER_COLOR)
+    assert cmap.N == 1
+    assert cmap.get_bad()[3] == 0.0, 'masked cells must be fully transparent'
+
+
+def test_a_residual_field_is_drawn_with_the_SAME_geographic_footing_as_the_lightning_maps():
+    """``origin='upper'`` with ``extent=GRID_EXTENT`` is what puts array row 0 at the NORTH edge. The residual maps are
+    a separate code path from ``maps.draw_map``, so this invariant has to be pinned on both or one can drift and mirror
+    its field about the domain's mid-latitude — a change no metric would notice."""
+    class _Recorder:
+        def __init__(self):
+            self.kwargs = None
+
+        def imshow(self, data, **kwargs):
+            self.kwargs = kwargs
+            return 'image'
+
+    recorder = _Recorder()
+    reporting._residual_imshow(recorder, np.zeros((4, 4)), 'viridis', None, 'a-crs')
+
+    assert recorder.kwargs['origin'] == 'upper'
+    assert recorder.kwargs['extent'] == maps.GRID_EXTENT
+    assert recorder.kwargs['transform'] == 'a-crs'
+
+
+def test_a_residual_panel_draws_one_layer_per_NON_EMPTY_special_mask():
+    """The overlays are the ``+/-inf`` surprise categories. An empty category must add no layer at all — a fully-masked
+    imshow still consumes a draw and, more to the point, would make "there are 3 layers" stop meaning "both categories
+    occurred"."""
+    import matplotlib.pyplot as plt
+
+    projection, data_crs = maps.geographic_context()
+    field = np.zeros((8, 8))
+    norm = reporting._diverging_norm(field)
+    empty, populated = np.zeros((8, 8), dtype=bool), np.zeros((8, 8), dtype=bool)
+    populated[0, 0] = True
+
+    figure = plt.figure(figsize=(4, 4))
+    grid = figure.add_gridspec(1, 2)
+    only_base = reporting._residual_map_panel(figure, grid[0, 0], field, norm, projection, data_crs, 'base',
+                                              specials=[(empty, reporting.SURPRISE_OVER_COLOR)])
+    with_overlay = reporting._residual_map_panel(figure, grid[0, 1], field, norm, projection, data_crs, 'overlay',
+                                                 specials=[(populated, reporting.SURPRISE_OVER_COLOR),
+                                                           (empty, reporting.SURPRISE_UNDER_COLOR)])
+
+    assert len(only_base.get_images()) == 1
+    assert len(with_overlay.get_images()) == 2
+    assert only_base.get_title() == 'base'
+    plt.close(figure)
+
+
+def test_the_residual_colorbar_is_labelled_and_carries_the_diverging_map():
+    """It is detached from any axes, so it takes its colormap explicitly — a mismatch with the panel it describes would
+    be invisible in the figure and wrong in every reading of it."""
+    import matplotlib.pyplot as plt
+
+    figure = plt.figure(figsize=(4, 2))
+    cax = figure.add_subplot(1, 1, 1)
+    reporting._diverging_colorbar(figure, cax, reporting._diverging_norm(np.array([-1.0, 1.0])), 'a label')
+
+    assert cax.get_xlabel() == 'a label'
+    assert cax.images or cax.collections or cax.patches, 'the colorbar must actually be drawn into the axes'
+    plt.close(figure)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# The curve figures, per-figure properties
+# ---------------------------------------------------------------------------------------------------------------------
+def test_the_fss_axis_is_pinned_to_zero_ONE_with_the_half_reference(tmp_path):
+    """FSS is a fraction and the useful-scale criterion sits just above 0.5. An autoscaled axis would make an FSS of
+    0.55 fill the panel and read as a strong result."""
+    captured = {}
+    original = reporting._save_figure
+
+    def spy(fig, path, name, formats):
+        captured['axis'] = fig.axes[0]
+        return original(fig, path, name, formats)
+
+    curves = {'fss': {'h6': {1: 0.30, 3: 0.42, 5: 0.55}}}
+    reporting._save_figure = spy
+    try:
+        reporting._fss_vs_scale(curves, str(tmp_path), ['png'])
+    finally:
+        reporting._save_figure = original
+
+    assert os.path.exists(os.path.join(str(tmp_path), 'fss_vs_scale.png'))
+    assert captured['axis'].get_ylim() == (0.0, 1.0)
+    assert any(abs(line.get_ydata()[0] - 0.5) < 1e-9 for line in captured['axis'].lines
+               if len(line.get_ydata()) and line.get_linestyle() == '--')
+
+
+def test_the_reliability_figure_carries_the_perfect_diagonal_and_a_LOG_count_panel(tmp_path):
+    """Two panels, and the second is the one that makes the first readable: at a 0.07 % base rate almost every cell
+    lands in the lowest probability bin, so a linear count axis shows one bar and nothing else. The diagonal is the
+    reference a reliability curve is read against."""
+    captured = {}
+    original = reporting._save_figure
+
+    def spy(fig, path, name, formats):
+        captured['axes'] = list(fig.axes)
+        return original(fig, path, name, formats)
+
+    curves = {'reliability': {'mean_probability': [0.02, 0.3, 0.8], 'observed_frequency': [0.01, 0.35, 0.7],
+                              'counts': [100000, 500, 20]}}
+    reporting._save_figure = spy
+    try:
+        reporting._reliability(curves, str(tmp_path), ['png', 'csv'])
+    finally:
+        reporting._save_figure = original
+
+    reliability_axis, counts_axis = captured['axes']
+    assert any(list(line.get_xdata()) == [0, 1] and list(line.get_ydata()) == [0, 1]
+               for line in reliability_axis.lines), 'the perfect-calibration diagonal is missing'
+    assert counts_axis.get_yscale() == 'log'
+    assert os.path.exists(os.path.join(str(tmp_path), 'reliability_table.csv'))
+
+
+def test_the_pr_panel_carries_a_no_skill_line_at_the_BASE_RATE(tmp_path):
+    """The documented reason both panels are drawn: the ROC diagonal is universal, the PR floor is not. At this base
+    rate a precision of 0.05 is five times no-skill, and only the second panel's own reference line says so."""
+    captured = {}
+    original = reporting._save_figure
+
+    def spy(fig, path, name, formats):
+        captured['axes'] = list(fig.axes)
+        return original(fig, path, name, formats)
+
+    curves = {'roc_pr': {'occurrence': {'fpr': [0.0, 0.4, 1.0], 'tpr': [0.0, 0.9, 1.0],
+                                        'recall': [1.0, 0.5, 0.0], 'precision': [0.01, 0.2, 1.0],
+                                        'roc_auc': 0.93, 'average_precision': 0.18, 'base_rate': 0.01}}}
+    reporting._save_figure = spy
+    try:
+        reporting._roc_pr_curves(curves, str(tmp_path), ['png', 'csv'])
+    finally:
+        reporting._save_figure = original
+
+    roc_axis, pr_axis = captured['axes']
+    assert any(list(line.get_ydata()) == [0, 1] for line in roc_axis.lines), 'the ROC diagonal'
+    assert any(abs(line.get_ydata()[0] - 0.01) < 1e-9 for line in pr_axis.lines
+               if line.get_linestyle() == ':'), 'the PR no-skill line at the base rate'
+    assert pr_axis.get_yscale() == 'log'
+
+
+def test_a_ranking_block_with_EMPTY_curves_writes_nothing(tmp_path):
+    """``roc_pr`` is present but carries no points — the shape ``finalize_ranking_metrics`` returns when the split held
+    no positive cells. An empty pair of axes would be published as a figure."""
+    curves = {'roc_pr': {'occurrence': {'fpr': [], 'tpr': [], 'recall': [], 'precision': []}}}
+    reporting._roc_pr_curves(curves, str(tmp_path), ['png'])
+    assert not [name for name in os.listdir(str(tmp_path)) if name.endswith('.png')]
+
+
+def test_the_intensity_bin_table_keeps_the_BINS_as_its_row_labels(tmp_path):
+    """The one CSV in this module written with its index — the bins are the row identity, and dropping them leaves a
+    table of unlabelled numbers."""
+    curves = {'error_by_bin': {'model': {'0-1h': 0.4, '1-6h': 2.0, '6h+': 5.0},
+                               'climatology': {'0-1h': 0.9, '1-6h': 3.0, '6h+': 7.0}}}
+    reporting._error_by_intensity_bin(curves, str(tmp_path), ['png', 'csv'])
+
+    table = pd.read_csv(os.path.join(str(tmp_path), 'error_by_intensity_bin.csv'), index_col=0)
+    assert list(table.index) == ['0-1h', '1-6h', '6h+']
+    assert {'model', 'climatology'} <= set(table.columns)
+
+
+def test_the_rank_histogram_normalises_to_FREQUENCIES_against_a_uniform_reference(tmp_path):
+    """Reading it is a comparison against uniform, so the bars must be frequencies and the reference must be
+    ``1 / (M + 1)``. Raw counts would make the reference height depend on the split size."""
+    captured = {}
+    original = reporting._save_figure
+
+    def spy(fig, path, name, formats):
+        captured['axis'] = fig.axes[0]
+        return original(fig, path, name, formats)
+
+    curves = {'rank_histogram': {'counts': [30, 10, 10, 10, 40], 'n_members': 4}}
+    reporting._save_figure = spy
+    try:
+        reporting._rank_histogram(curves, str(tmp_path), ['png', 'csv'])
+    finally:
+        reporting._save_figure = original
+
+    heights = [patch.get_height() for patch in captured['axis'].patches]
+    assert abs(sum(heights) - 1.0) < 1e-9, heights
+    assert any(abs(line.get_ydata()[0] - 0.2) < 1e-9 for line in captured['axis'].lines)
+
+    table = pd.read_csv(os.path.join(str(tmp_path), 'rank_histogram.csv'))
+    assert list(table['count']) == [30, 10, 10, 10, 40]
+
+
+def test_an_EMPTY_rank_histogram_writes_nothing_rather_than_dividing_by_zero(tmp_path):
+    """All-zero counts is what a deterministic family produces if the curve is populated at all, and normalising it
+    would be ``0 / 0``."""
+    reporting._rank_histogram({'rank_histogram': {'counts': [0, 0, 0], 'n_members': 2}}, str(tmp_path), ['png'])
+    assert not os.listdir(str(tmp_path))
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# The six residual builders, called directly
+# ---------------------------------------------------------------------------------------------------------------------
+RESIDUAL_BUILDERS = [
+    reporting._residual_bias_map, reporting._residual_surprise, reporting._residual_histograms,
+    reporting._residual_qq, reporting._residual_scatters, reporting._residual_heteroscedasticity,
+]
+
+
+@pytest.mark.parametrize('builder', RESIDUAL_BUILDERS, ids=lambda builder: builder.__name__)
+def test_each_residual_builder_renders_png_and_pdf_when_called_DIRECTLY(builder, residual_curves, tmp_path):
+    """The same six figures the ported test renders through ``write_report`` — but that path swallows exceptions and
+    reports only a missing file. Here a broken builder surfaces its traceback."""
+    curves, _, _, _ = residual_curves
+    builder(curves, str(tmp_path), ['png', 'csv'])
+
+    name = builder.__name__.lstrip('_')
+    assert os.path.exists(os.path.join(str(tmp_path), f'{name}.png')), sorted(os.listdir(str(tmp_path)))
+    assert os.path.exists(os.path.join(str(tmp_path), f'{name}.pdf'))
+
+
+@pytest.mark.parametrize('builder', RESIDUAL_BUILDERS, ids=lambda builder: builder.__name__)
+def test_each_residual_builder_self_skips_without_its_block(builder, tmp_path):
+    """Two skips, not one: no ``residual`` key at all (a deterministic or full-target run) and a residual block missing
+    this figure's own key (a diagnostics version that computed less)."""
+    builder({}, str(tmp_path), ['png', 'csv'])
+    builder({'residual': {}}, str(tmp_path), ['png', 'csv'])
+    assert not os.listdir(str(tmp_path))
+
+
+def test_the_heteroscedasticity_figure_skips_when_every_decile_is_EMPTY(tmp_path):
+    """The block exists but holds no bins — what ``_decile_heteroscedasticity`` returns when the conditioning field has
+    no spread. The builder opens a figure before it knows that, so the guard has to close it as well as return."""
+    import matplotlib.pyplot as plt
+
+    before = len(plt.get_fignums())
+    reporting._residual_heteroscedasticity(
+        {'residual': {'heteroscedasticity': {'upstream': {'bin_center': []}, 'obs': {'bin_center': []}}}},
+        str(tmp_path), ['png'])
+
+    assert not os.listdir(str(tmp_path))
+    assert len(plt.get_fignums()) == before, 'the opened figure must be closed on the skip path'

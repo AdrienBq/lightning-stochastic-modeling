@@ -10,12 +10,13 @@ that prints "skipped" and passes is the exact failure mode this repo keeps closi
 ``evaluation.py`` import break read as green.
 """
 import numpy as np
+import pandas as pd
 import pytest
 
 from src.utils.metrics import scores
 from src.utils.metrics.evaluation import (
     build_baselines, climatology_brier, climatology_conditional_mae, finalize_ensemble_metrics,
-    merge_ensemble_partials, resolve_occurrence_event, resolve_threshold, run_metric_suite,
+    merge_ensemble_partials, resolve_occurrence_event, resolve_threshold, resolve_thresholds, run_metric_suite,
 )
 
 
@@ -548,3 +549,190 @@ def test_the_persistence_baseline_is_REJECTED(suite_arrays, metrics_config):
     items = pd.DataFrame({'date': pd.date_range('2010-07-14', periods=6), 'hour': [np.nan] * 6})
     with pytest.raises(ValueError, match='persistence'):
         build_baselines(['persistence'], {}, pd.DataFrame(), items, 'daily', 24)
+
+
+# =====================================================================================================================
+# Block 5c — the threshold value object and the dataset-level helpers
+# =====================================================================================================================
+def test_the_two_sides_of_a_SYMMETRIC_threshold_are_reported_as_one():
+    """``is_symmetric`` is what tells a caller whether it may reuse one cut for both fields. Every ``kind: absolute``
+    entry — the whole daily suite's h3/h6/h12 bands — is symmetric, because prediction and observation are the same
+    quantity in the same units there."""
+    resolved = resolve_threshold({'kind': 'absolute', 'value': 6.0, 'strict': False}, {}, (0.0, True))
+
+    assert resolved.is_symmetric
+    assert resolved.obs_event == (6.0, False)
+    assert (resolved.pred_value, resolved.pred_strict) == (6.0, False)
+
+
+def test_a_PROBABILITY_threshold_is_asymmetric_and_reads_the_labels_unchanged():
+    """The hourly classification case, and the reason ``EventThreshold`` carries two sides at all. The observation is
+    already a 0/1 event so its side is the occurrence event; the prediction is a probability so its side is a DECISION
+    cut. A shared cut of ``> 0`` on a probability field fires on every cell with any non-zero probability."""
+    resolved = resolve_threshold({'kind': 'probability', 'value': 0.5}, {}, (0.0, True))
+
+    assert not resolved.is_symmetric
+    assert resolved.obs_event == (0.0, True), 'the labels are read as they are, not re-thresholded'
+    assert resolved.pred_value == 0.5
+
+
+def test_obs_event_hands_back_exactly_the_pair_the_score_functions_take():
+    """``scores.exceedance`` and ``diagnostics._occurrence_mask`` both take ``(value, strict)``. The property exists so
+    the obs side can be passed straight through rather than unpacked at each of the six call sites."""
+    resolved = resolve_threshold({'kind': 'occurrence'}, {}, (0.0, True))
+    value, strict = resolved.obs_event
+    assert (value, strict) == (0.0, True)
+    assert scores.exceedance(np.array([0.0, 1.0]), value, strict).tolist() == [False, True]
+
+
+def test_every_threshold_in_the_SHIPPED_suite_resolves(metrics_config):
+    """Driven from the real ``config/eval/metrics.yaml`` rather than a fixture: an unresolvable kind raises inside the
+    evaluation stage, long after the model has been trained."""
+    resolved = resolve_thresholds(metrics_config, {'mode': 'daily'})
+
+    assert set(resolved) == {'occurrence', 'h3', 'h6', 'h12'}, sorted(resolved)
+    for name, threshold in resolved.items():
+        assert isinstance(threshold.obs_value, float), name
+        assert threshold.is_symmetric, f'{name}: the daily suite is entirely symmetric hour bands'
+
+
+def test_the_resolver_keeps_the_suites_own_threshold_NAMES():
+    """The names become metric-key suffixes (``ets_h6``, ``fss_h6_s3``), so a renamed threshold silently renames every
+    metric that uses it and breaks the cross-family comparison table."""
+    config = {'thresholds': {'h3': {'kind': 'absolute', 'value': 3.0},
+                             'occurrence': {'kind': 'occurrence'}}}
+    assert set(resolve_thresholds(config, {})) == {'h3', 'occurrence'}
+
+
+def test_a_suite_with_no_thresholds_resolves_to_an_empty_mapping():
+    """The continuous-only configuration. Raising here would make a suite that asks for no categorical scores
+    unusable."""
+    assert resolve_thresholds({}, {}) == {}
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# The dataset-level helpers — these read the prepared .npy files, so they cannot be tested with bare arrays
+# ---------------------------------------------------------------------------------------------------------------------
+def test_a_target_file_is_loaded_as_FLOAT32(tmp_path):
+    """The prepared targets are written as float32 and some as smaller dtypes. The cast is what stops an integer-typed
+    target from making every downstream mean an integer division."""
+    from src.utils.metrics.evaluation import _load_target
+
+    path = str(tmp_path / 'target.npy')
+    np.save(path, np.array([[0, 3], [24, 1]], dtype=np.int16))
+
+    loaded = _load_target(path)
+    assert loaded.dtype == np.float32
+    assert loaded.tolist() == [[0.0, 3.0], [24.0, 1.0]]
+
+
+def test_the_observation_stack_preserves_ITEM_ORDER(prepared_split):
+    """Predictions arrive in item order from the dataloader, and the stack is compared against them cell by cell. A
+    reordering here would score every day against a different day's observation and still produce finite numbers."""
+    from src.utils.metrics.evaluation import _load_target, _observation_stack
+
+    split_index, _ = prepared_split(mode='daily', days_per_year=6)
+    items = split_index[split_index['split'] == 'valid'].reset_index(drop=True)
+
+    stack = _observation_stack(items, 'daily')
+
+    assert stack.shape[0] == len(items)
+    for position in range(len(items)):
+        assert np.array_equal(stack[position], _load_target(items.iloc[position]['target_file']))
+
+
+def test_the_observation_stack_SLICES_THE_HOUR_in_hourly_mode(prepared_split):
+    """An hourly item is one hour of a ``[T, H, W]`` day file. Without the slice the stack would be ``[N, T, H, W]``
+    and every score would broadcast against the wrong shape."""
+    from src.utils.metrics.evaluation import _load_target, _observation_stack
+
+    split_index, config = prepared_split(mode='hourly', days_per_year=2, hours_per_day=4)
+    items = split_index[split_index['split'] == 'valid'].reset_index(drop=True)
+
+    stack = _observation_stack(items, 'hourly')
+
+    assert stack.ndim == 3, stack.shape
+    day = _load_target(items.iloc[3]['target_file'])
+    assert np.array_equal(stack[3], day[int(items.iloc[3]['hour'])])
+
+
+def test_the_daily_climatology_is_a_per_DAY_OF_YEAR_mean_smoothed_over_a_window(prepared_split):
+    """Not a single split-wide mean. Lightning is strongly seasonal, so a flat climatology would be an easy baseline in
+    July and an impossible one in January — and the skill scores built on it would be meaningless in both."""
+    from src.utils.metrics.evaluation import _climatology_tables
+
+    split_index, _ = prepared_split(mode='daily', days_per_year=40)
+    train = split_index[split_index['split'] == 'train']
+
+    lookup = _climatology_tables(train, 'daily', 24, window_days=15, occurrence_event=(0.0, True))
+
+    summer, _ = lookup(pd.Timestamp('2016-07-15'), None)
+    winter, _ = lookup(pd.Timestamp('2016-01-15'), None)
+    assert summer.shape == (16, 24)
+    assert not np.array_equal(summer, winter), 'a flat climatology would return the same map for both'
+
+
+def test_the_climatology_window_is_CIRCULAR_across_the_year_boundary(prepared_split):
+    """31 December and 1 January are one day apart, not 364. Without the wrap the two ends of the year would each be
+    averaged over half a window and be noisier than every other day."""
+    from src.utils.metrics.evaluation import _climatology_tables
+
+    split_index, _ = prepared_split(mode='daily', days_per_year=60)
+    train = split_index[split_index['split'] == 'train']
+    lookup = _climatology_tables(train, 'daily', 24, window_days=31, occurrence_event=(0.0, True))
+
+    last, _ = lookup(pd.Timestamp('2016-12-31'), None)
+    first, _ = lookup(pd.Timestamp('2016-01-01'), None)
+    assert np.corrcoef(last.ravel(), first.ravel())[0, 1] > 0.5, \
+        'the two ends of the year should share most of their window'
+
+
+def test_the_climatology_also_accumulates_the_OCCURRENCE_FREQUENCY(prepared_split):
+    """The second return value is the Brier / explained-deviance denominator. It is a FREQUENCY, so it must lie in
+    ``[0, 1]`` — accumulating the target values instead would give a "probability" in hours and a skill score against
+    a baseline that is not a probability at all."""
+    from src.utils.metrics.evaluation import _climatology_tables
+
+    split_index, _ = prepared_split(mode='daily', days_per_year=30)
+    train = split_index[split_index['split'] == 'train']
+    lookup = _climatology_tables(train, 'daily', 24, window_days=15, occurrence_event=(0.0, True))
+
+    mean_map, frequency_map = lookup(pd.Timestamp('2016-07-15'), None)
+    assert frequency_map.min() >= 0.0 and frequency_map.max() <= 1.0
+    assert mean_map.max() > 1.0, 'the mean map is in hours, so the two are genuinely different quantities'
+
+
+def test_the_hourly_climatology_keys_on_MONTH_AND_HOUR_OF_DAY(prepared_split):
+    """The diurnal cycle is the dominant signal in hourly lightning — afternoon convection. A day-of-year climatology
+    would average it away and hand every hour of the day the same baseline."""
+    from src.utils.metrics.evaluation import _climatology_tables
+
+    split_index, _ = prepared_split(mode='hourly', days_per_year=12, hours_per_day=4)
+    train = split_index[split_index['split'] == 'train']
+
+    lookup = _climatology_tables(train, 'hourly', 4, window_days=15, occurrence_event=(0.0, True))
+
+    hour_zero, _ = lookup(pd.Timestamp('2016-07-15'), 0)
+    hour_three, _ = lookup(pd.Timestamp('2016-07-15'), 3)
+    assert hour_zero.shape == (16, 24)
+    assert not np.array_equal(hour_zero, hour_three)
+
+
+def test_the_shared_selection_reference_builds_every_denominator_from_ONE_climatology(prepared_split, metrics_config):
+    """``_climatology_reference`` exists so ``climatology_brier`` and ``climatology_conditional_mae`` cannot drift apart
+    in how they build the climatology or condition the cells — the two halves of a composite whose weights only mean
+    something if their denominators agree."""
+    from src.utils.metrics.evaluation import _climatology_reference
+
+    split_index, prepared_config = prepared_split(mode='daily', days_per_year=20)
+    eval_items = split_index[split_index['split'] == 'valid'].reset_index(drop=True)
+
+    baselines, occurrence_probability, observation, occurrence, occurrence_event = _climatology_reference(
+        split_index, eval_items, prepared_config, metrics_config['metrics'], {'mode': 'daily'})
+
+    assert 'climatology' in baselines
+    assert baselines['climatology'].shape == observation.shape
+    assert occurrence_probability.shape == observation.shape
+    assert occurrence.dtype == bool and occurrence.shape == observation.shape
+    assert occurrence_event == (0.0, True)
+    assert np.array_equal(occurrence, observation > 0.0), 'the mask must be the occurrence event applied to the obs'

@@ -225,6 +225,26 @@ def test_left_labels_are_honoured_in_both_directions(left_labels, framed_axis):
     plt.close(figure)
 
 
+def test_the_framing_helper_applies_all_five_decorations_on_a_BARE_axis(context):
+    """``frame_map_axis`` is called directly here rather than through ``draw_map``, because it is a separable step and
+    one caller uses it that way: ``reporting._residual_map_panel`` hand-rolls its own extent + coastlines + title and
+    deliberately does NOT call this, so the residual maps carry no gridlines. Pinning what the helper does keeps that
+    difference legible as a choice rather than reading as an oversight.
+    """
+    projection, data_crs = context
+    figure = plt.figure(figsize=(4, 4))
+    ax = maps.add_map_axis(figure, figure.add_gridspec(1, 1)[0, 0], projection)
+
+    maps.frame_map_axis(ax, 'a title', left_labels=True, data_crs=data_crs)
+
+    assert ax.get_title() == 'a title'
+    assert ax.get_aspect() in ('equal', 1.0)
+    gridliners = [artist for artist in ax.artists if isinstance(artist, Gridliner)]
+    assert len(gridliners) == 1 and gridliners[0].left_labels
+    assert any('Feature' in type(artist).__name__ for artist in ax.artists + list(ax.collections))
+    plt.close(figure)
+
+
 def test_coastlines_are_drawn_and_borders_are_not(framed_axis):
     """The resolved decision: the coast is the geographic anchor, and political boundaries are left out because their
     line density would compete with a field that is 99.93 % zero. Both halves pinned so neither drifts back."""
@@ -296,6 +316,35 @@ def test_there_is_no_log_colour_scale():
 
 def test_the_kilometre_per_pixel_constant_is_a_quarter_degree():
     assert abs(maps.KM_PER_PIXEL - 27.75) < 0.5
+
+
+@pytest.mark.parametrize('value,expected', [
+    ('#FFFFFF', (1.0, 1.0, 1.0)),
+    ('#000000', (0.0, 0.0, 0.0)),
+    ('FFFFFF', (1.0, 1.0, 1.0)),                     # the leading '#' is optional
+    ('#9E9E9E', (158 / 255, 158 / 255, 158 / 255)),  # _GREY, the [0.5, 1) band
+])
+def test_hex_colours_convert_to_the_zero_to_one_rgb_matplotlib_wants(value, expected):
+    """The ramps are written as hex strings for readability against the 02a spec, but ``ListedColormap`` needs 0-1
+    floats. A conversion that returned 0-255 would silently clip every colour to white."""
+    assert tuple(round(channel, 6) for channel in maps._hex_to_rgb(value)) == \
+        tuple(round(channel, 6) for channel in expected)
+
+
+def test_every_stop_of_both_ramps_converts_to_a_valid_rgb_triple():
+    """The ramps are hand-written constants; a typo (five digits, a stray character) would raise here rather than
+    somewhere inside a figure build where the try/except only warns."""
+    for ramp in (maps._BASE_COLORS_WARM, maps._BASE_COLORS_COOL, [maps._GREY]):
+        for color in ramp:
+            rgb = maps._hex_to_rgb(color)
+            assert len(rgb) == 3 and all(0.0 <= channel <= 1.0 for channel in rgb), color
+
+
+def test_both_ramps_start_at_WHITE():
+    """The zero end of the axis is the 99.93 % of cells with no lightning; anything else makes the whole map a colour
+    field with the signal invisible inside it."""
+    assert maps._hex_to_rgb(maps._BASE_COLORS_WARM[0]) == (1.0, 1.0, 1.0)
+    assert maps._hex_to_rgb(maps._BASE_COLORS_COOL[0]) == (1.0, 1.0, 1.0)
 
 
 # =====================================================================================================================
