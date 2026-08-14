@@ -12,7 +12,7 @@ to no single step.
 | [`step-1-design.md`](step-1-design.md) | Design decisions via the inventories; global `CLAUDE.md` + `README.md` | ✅ **done** (2026-07-28) |
 | [`step-2-config.md`](step-2-config.md) | Every config file and its contents | ✅ **done** (2026-07-29) |
 | [`step-3-utils.md`](step-3-utils.md) | Shared `src/utils` | ✅ **done** (2026-08-14) |
-| [`step-4-stages.md`](step-4-stages.md) | Stages + common evaluation | 🔵 **next** — read its "tests are part of the implementation" section first |
+| [`step-4-stages.md`](step-4-stages.md) | Stages + common evaluation — **expanded 2026-08-14**, seven blocks `4a`–`4g` | 🔵 **next** |
 | [`step-5-portability.md`](step-5-portability.md) | User- and machine-agnostic | ⚪ provisional |
 
 ### Design decision record (the Step 1 deliverable — all annotated)
@@ -35,6 +35,11 @@ to no single step.
 ---
 
 ## Key merge tasks & risks (carried through Steps 3–4)
+
+> ⚠️ **Two stage renames land in Step 4 block 4a**, so every reference below and in the other plan files is due an
+> update at that point: `prepare_regression` → **`prepare_modeling`** and `evaluate_regression` → **`evaluate`**. The
+> single shared prepare stage keeps its `mode:` key; the split into `prepare_regression`/`prepare_classification`
+> proposed in [`step-3-utils.md`](step-3-utils.md) §3 is **superseded** (struck there, with the reason).
 
 1. **MC-dropout de-duplication:** drop aru's stale vendored `modeling/mc_dropout/` package **and** adrien's
    `unet_aru.py` / `distr_regression_aru.py`; use adrien's current `mc_dropout_module.py` on the shared

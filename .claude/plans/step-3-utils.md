@@ -85,46 +85,46 @@ Keep, unchanged in spirit: `METADATA_JSON_FILENAME`, `METADATA_CSV_FILENAME`, `S
 - `compute_feature_stats` must accumulate in **float64** regardless of the stored `feature-dtype: float16`, so
   storage precision never affects normalization.
 
-### The preparation stage splits in two, over one shared implementation
+### ~~The preparation stage splits in two~~ — ⛔ SUPERSEDED (2026-08-14, in the Step 4 planning)
 
-The hourly task is a classification, so `prepare_regression` is the wrong name for half of its job. Split it by
-task:
+> **This section proposed splitting `prepare_regression` into `prepare_regression` (daily) + `prepare_classification`
+> (hourly) and REMOVING the `mode:` key, so the stage identity would carry the task.** The argument was real — it makes
+> a `mode` that disagrees with the selection score or the output activation inexpressible — but the proposal
+> **contradicted the configs Step 2 had already shipped**, and CLAUDE.md with them:
+>
+> - all twelve pipeline files carry `- prepare_regression:` with a `mode: daily` key inside it;
+> - CLAUDE.md states *"**`mode` is the only key that selects between them**"*, which presupposes the key exists;
+> - `parse_config_test.py` and `dataset.py`'s whole `feature_aggregation`-is-daily-only documentation are written
+>   against one stage taking `mode`.
+>
+> **Resolved (user decision): one shared prepare stage keeping `mode:`, with both misleading names renamed** —
+> `prepare_regression` → **`prepare_modeling`**, `evaluate_regression` → **`evaluate`**. The naming complaint that
+> motivated this section is answered; the split is not adopted. See
+> [`step-4-stages.md`](step-4-stages.md) §"Decisions taken" and §"The rename surface".
+>
+> ⚠️ Kept as a struck heading rather than deleted, because the *analysis* below it is still correct and still applies
+> to the single stage — it is only the two-script conclusion that is dropped. A design record that silently disagrees
+> with the code is worse than no record; that is why this note exists rather than a quiet edit.
 
-| Stage | Mode | Target |
-|---|---|---|
-| `prepare_regression` | `daily` | 0–24 lightning-hours per cell |
-| `prepare_classification` | `hourly` | 0/1 occurrence per cell per hour |
+The hourly task is a classification, so `prepare_regression` was the wrong name for half of its job — hence
+**`prepare_modeling`**, which is true of both tasks.
 
-**Two stage scripts, one implementation.** Everything except the target derivation is shared: sample indexing,
-split assignment, feature materialisation, the streamed feature statistics, and the upstream-prediction pass. So the
-shared `_prepare_base` keeps all of it and only `_derive_target` branches, with each stage script being a thin
-wrapper that hard-codes its mode. There is already precedent for exactly this on branch A, where
-`prepare_distr_regression.py` is a 21-line shim delegating to `prepare_regression`.
+**One stage script, one implementation, `mode` branching only at the target.** Everything except the target derivation
+is shared: sample indexing, split assignment, feature materialisation, the streamed feature statistics, and the
+upstream-prediction pass. `_prepare_base` keeps all of it and only `_derive_target` branches on the mode.
 
-Splitting this way has a benefit beyond the name: **`mode` stops being a stage parameter**, because the stage
-identity carries it. That removes an entire class of misconfiguration — a `mode` that disagrees with the
-`target-variable`, the selection score, or the output activation is no longer expressible.
-
-The two stages' parameter sets genuinely differ, which is further reason not to force them into one signature:
+The two tasks' parameters genuinely differ, and that difference is documented rather than enforced by the stage name:
 
 - `feature-aggregation: hourly_stack` is **daily-only**. It stacks 24 hourly maps into `C*24` channels; in hourly
-  mode the features are already one map per hour, `[C, H, W]`, with nothing to stack.
+  mode the features are already one map per hour, `[C, H, W]`, with nothing to stack. `dataset.py`'s module docstring
+  says so, and `test_feature_aggregation_is_IGNORED_in_hourly_mode` pins it.
 - `hourly-threshold` applies to **both**, and identically: it is the ≥2-stroke cutoff that decides whether an hour
   counts at all. Daily mode then counts the qualifying hours; hourly mode emits 0 or 1 per hour directly. Sharing
   the cutoff is what keeps the two tasks' denoising consistent (see Invariant 1 below).
 
-`evaluate_regression` has the same naming problem but must **not** be split — it is the single shared evaluation, and
+`evaluate_regression` has the same naming problem and must **not** be split — it is the single shared evaluation, and
 its metric suite already serves both tasks. It is renamed to **`evaluate`**, which drops the misleading word without
 adding a second evaluation path.
-
-> **⚠️ STAGE FLAG.** These are `src/stages/` changes, so they land in [Step 4](step-4-stages.md); they are recorded
-> here because this step defines the shared implementation they wrap. The config consequences, for Step 3 or 4:
-> - The nine pipeline files under `config/{deterministic_unet,mc_dropout,diffusion}/` name the stage
->   `prepare_regression`; daily pipelines keep that name, and any hourly pipeline uses `prepare_classification`.
-> - Remove the `mode:` key from every `prepare_*` block — the stage name now carries it.
-> - Rename the `evaluate_regression` stage to `evaluate` in all nine pipeline files and in the three
->   `config/eval/probabilistic_eval*.yaml` blocks.
-> - `feature-aggregation` stays only in `prepare_regression` blocks.
 
 ### Two invariants this module must preserve
 
