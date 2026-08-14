@@ -11,8 +11,8 @@ to no single step.
 | [`step-0-bootstrap.md`](step-0-bootstrap.md) | Bootstrap & hygiene | ✅ **done** (2026-07-27) |
 | [`step-1-design.md`](step-1-design.md) | Design decisions via the inventories; global `CLAUDE.md` + `README.md` | ✅ **done** (2026-07-28) |
 | [`step-2-config.md`](step-2-config.md) | Every config file and its contents | ✅ **done** (2026-07-29) |
-| [`step-3-utils.md`](step-3-utils.md) | Shared `src/utils` | 🔵 **next** — see its "obliged by Step 2" list |
-| [`step-4-stages.md`](step-4-stages.md) | Stages + common evaluation | ⚪ provisional |
+| [`step-3-utils.md`](step-3-utils.md) | Shared `src/utils` | ✅ **done** (2026-08-14) |
+| [`step-4-stages.md`](step-4-stages.md) | Stages + common evaluation | 🔵 **next** — read its "tests are part of the implementation" section first |
 | [`step-5-portability.md`](step-5-portability.md) | User- and machine-agnostic | ⚪ provisional |
 
 ### Design decision record (the Step 1 deliverable — all annotated)
@@ -27,8 +27,10 @@ to no single step.
 
 **Block order** a → b → c → d → e. Each step ends with the verification gate below and a plan update.
 
-> **▶ To resume work:** read the OUTCOME block at the top of [`step-2-config.md`](step-2-config.md) — it records
-> what Step 2 built, the seven corrections it made to its own spec, and the list Step 3 is now obliged to implement.
+> **▶ To resume work:** Step 3 is done — `src/utils` is one merged library and `tests/` is its verification of
+> record (1102 passing, 291/291 functions tested, 86 % line coverage). Read
+> [`step-4-stages.md`](step-4-stages.md), whose two new sections are the standing obligations: **a new function's
+> test lands in the same commit as the function**, and the step ends with a fresh-eyes review of `tests/`.
 
 ---
 
@@ -68,11 +70,23 @@ to no single step.
    `gate_block*.py` scripts that verified Steps 3's blocks 1–4 were **deleted in block 5b**, after each of their 641
    check sites was migrated or dropped with a stated reason — the record is
    [`inventory-gate-migration.md`](inventory-gate-migration.md).
+
+   **Two gates, measuring different things — neither is a superset of the other:**
+
+   * `test_every_source_function_is_referenced_by_a_test` — **hard since block 5c**, 291 of 291, `EXEMPT` empty. It
+     catches "never exercised". A new function with no test fails the suite; `test_function_census_is_stable` pins
+     the count, so adding one is a visible two-line edit.
+   * `--cov-fail-under=85` in `pytest.ini` — line coverage, currently **85.8 %**. It catches "exercised, but its
+     branches never run", which the name gate structurally cannot. Raise the floor whenever a step lifts the number;
+     the residue today is `tuning.py` (25 %) and `stages/run.py` (57 %), both of which need gate 3's real run.
+
    > ⚠️ **At the END of the rebuild, delete the `source_invariant` tests as a group.** They assert on SOURCE TEXT
    > rather than behaviour — that an identifier removed by the three-branch merge stayed removed, that a function
    > delegates rather than re-implements. They are merge guards and have no value once the merge is history.
    > `pytest -m 'not source_invariant'` shows what the suite proves without them; `grep -rn source_invariant tests/`
    > finds every one. Retire the whole set, not a file at a time.
+   > ➕ Retiring them will DROP line coverage, since a tokenize sweep still executes the module it parses. Re-measure
+   > and re-set the floor at that point rather than treating the fall as a regression.
 3. Smoke run: the affected `*_smoke_cpu.yaml` via
    `python run_project.py config/<family>/<family>_smoke_cpu.yaml <EXPERIMENT>` (CPU, `n-trials 1`,
    `max-epochs 1`, the 8-day mid-July split, **`ensemble-size 2`** — never 1, see below); assert declared
@@ -84,6 +98,13 @@ to no single step.
    metrics. (The deterministic family's ensemble scalars are `NaN` and it contributes no rank histogram: identical
    *columns* is the requirement, not identical values.)
 5. **After each step: update the relevant step file** (decisions made, next step refined).
+6. **A new function's test lands in the SAME commit as the function.** Step 3 verified blocks 1–4 with throwaway
+   scratchpad scripts and then spent three commits (5a–5c) turning that into a durable suite — an audit of 641 check
+   sites plus 287 tests written against code that had shipped weeks earlier. The hard gate in §2 is what makes this
+   enforceable from Step 4 onward rather than a good intention. See
+   [`step-4-stages.md`](step-4-stages.md) for the concrete rules and for the **closing review of `tests/`** that each
+   remaining step ends with: read the suite as if new to the repo and answer, with evidence, whether the tests are
+   relevant, whether they would catch a real bug (spot-check by mutation), and where the coverage genuinely is.
 
 > ⚠️ **`ensemble-size` must be ≥ 2 in smoke configs.** `scores.spread_skill_sums` computes variance with `ddof=1`,
 > so a single-member ensemble divides by zero and yields a silent `NaN` rather than an error.

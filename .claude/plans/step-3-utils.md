@@ -688,6 +688,81 @@ consecutive runs (192.9 s and 192.6 s — up from 137 s; the cartopy layout test
 is **inside a docstring**, so the code never changed and the tests correctly passed. A mutation that does not mutate
 proves nothing — verify the edit landed on the executed line before believing a "not caught".
 
+## 5c. Every function tested — ✅ DONE (291 / 291; the gate is hard, line coverage 86 %)
+
+5a brought in what branch A tested (4 of 27 modules) and 5b brought in what the gates checked. Neither was written to
+cover *every* function — the gates targeted merge decisions and A targeted its own branches' features. 5c closed the
+remaining **89**, working from `completeness_test.py`'s own failure list rather than from the source, so nothing was
+guessed at.
+
+**`tests/completeness_test.py::test_every_source_function_is_referenced_by_a_test` is now a HARD GATE, and `EXEMPT` is
+empty.** The plan expected `tuning.py`'s sweep orchestration and `stages/run.py`'s subprocess launch to need
+exemptions; they did not. `execute_stage` is testable against a stubbed `mlflow.run` and tracking client, and
+`tuning`'s store and restart paths against a real journal file. What genuinely cannot be reached that way is *line*
+coverage of the fit itself, which is a different measurement (below) and Step 4's gate.
+
+⚠️ **`strict=False` is why the marker had to come off by hand.** The moment the last function got a test the gate would
+have started reporting `xpassed` — silently green, and green forever afterwards even as new untested functions arrived,
+because a *failure* is what the marker expects. Removing it was a required step, not a formality.
+
+### The two measurements disagree in BOTH directions
+
+This is the finding worth carrying forward, because it is the reason both gates exist:
+
+| | function gate | line coverage |
+|---|---|---|
+| `stages/run.py` | **every function referenced** | **57 %** — `run_sequential` / `run_prefect` / the `run` entry point never execute |
+| `stages/__init__.py` | no functions in the census at all, so nothing to say | 47 % |
+| `search.py`, `mc_dropout_module.py` | a function no test **names** | **100 %** — driven through `sample_trial` / the phase machinery |
+| `io/data.py` | 5 functions missing | 53 %, and the missing ranges were exactly those five bodies |
+
+So neither is a superset of the other. `search._sample_value` had 100 % line coverage before 5c and still needed a
+test: through the sweep the only observable is "a trial dict came out", so a log-uniform node sampling *uniformly*, or
+an `int` range excluding its upper bound, looks like correct behaviour. Conversely the function gate says nothing at
+all about `run.py`'s two backends.
+
+### Line coverage: 82 % → 86 %, and the residue is named
+
+`pytest-cov` added to `minimal_requirements.txt`; `pytest.ini` carries
+`--cov=src --cov-report=term-missing --cov-fail-under=85`. The floor sits just **below** the measured 85.8 % rather
+than at a round aspiration — it is there to catch a regression, and a threshold nobody can meet gets raised rather
+than respected.
+
+The remaining 549 uncovered statements are concentrated, not diffuse:
+
+| module | uncovered | why |
+|---|---|---|
+| `modeling/tuning.py` | **340** (25 %) | `run_sweep` / `_fit_trial` — needs optuna, a Lightning trainer and a real fit |
+| `stages/run.py` | 73 (57 %) | the two orchestration backends and the MLflow logging branches |
+| `unet_module_base.py` | 28 (86 %) | `configure_optimizers`' scheduler branches, reached only by a real fit |
+| everything else | ≤ 21 each | 12 modules at 100 %, 20 at 93 % or better |
+
+**Step 4's end-to-end gate is what closes `tuning.py` and `run.py`** — a real `*_smoke_cpu.yaml` pipeline exercises
+exactly those paths. Naming the gap is the point: function coverage at 100 % with line coverage at 86 % is the honest
+outcome, and pretending otherwise would be the failure mode this whole block exists to avoid.
+
+### What the block actually found
+
+- **`_drive_epoch` initially never called `on_train_epoch_end`**, which is where `ThroughputDiagnostics` emits its
+  line — so the "a single-batch epoch reports nothing" test passed *vacuously*. Fixed, and the helper's docstring now
+  says why the end hook is not optional. Same class of error as 5b's docstring mutation: a test harness that stops one
+  step short makes every assertion under it meaningless while the run stays green.
+- **`prepared` writes one set of filenames into one `tmp_path`**, so building a daily and an hourly dataset in the
+  same test silently overwrote the first's `.npy` with the other mode's shapes. Two tests were parametrized instead;
+  the reason is recorded in the docstring so it is not reintroduced.
+- **`reporting._residual_map_panel` deliberately does not call `maps.frame_map_axis`** — the residual maps carry no
+  gridlines. Left as is (a `src/` change is out of scope for a test block) and pinned by a test of `frame_map_axis` on
+  a bare axis, so the difference reads as a choice rather than an oversight.
+- **`test_residual_figures_render_png_and_pdf` was dropped**, not moved: it rendered the six residual figures through
+  `write_report`, which catches every exception and only warns, so a broken builder read as a missing file with no
+  traceback. The direct parametrized version asserts the same files and surfaces the error.
+
+### Verification
+
+`1102 passed / 14 skipped`, no xfail. **238 s** with coverage instrumentation (193 s without at the end of 5b) — over
+the ~180 s the plan budgeted, and the cartopy layout renders are the cost: four module-scoped fixtures account for
+122 s of it. Recorded rather than optimised away.
+
 ---
 
 ## Settled: the output head, per mode
