@@ -101,6 +101,34 @@ def test_lightning_is_seeded_with_workers_enabled():
     assert 'workers=True' in inspect.getsource(seeding.seed_everything)
 
 
+def test_the_availability_probe_answers_for_present_and_absent_modules():
+    from src.utils.seeding import _available
+
+    assert _available('numpy') is True
+    assert _available('a_module_that_is_not_installed_anywhere') is False
+
+
+def test_the_availability_probe_does_not_IMPORT_what_it_finds():
+    """The whole reason it uses ``find_spec``: a numpy-only stage should not pay for a torch import just to be told torch
+    exists. A probe that imported would make ``seed_everything`` several seconds slower on every stage."""
+    import sys
+
+    from src.utils.seeding import _available
+
+    if 'wave' in sys.modules:                                    # a stdlib module nothing here imports
+        pytest.skip('wave was already imported by another test, so this cannot be observed')
+    assert _available('wave') is True
+    assert 'wave' not in sys.modules, 'find_spec must locate the module without executing it'
+
+
+def test_a_malformed_module_name_is_ABSENT_rather_than_an_exception():
+    """``find_spec('')`` raises ``ValueError``, and seeding runs on package import before the stage body — so anything
+    raising here aborts a stage for a reason unrelated to its work."""
+    from src.utils.seeding import _available
+
+    assert _available('') is False
+
+
 def test_a_lightning_failure_cannot_crash_a_stage(monkeypatch):
     """Defensive by design: seeding runs on package import, before the stage body, so an exception here would abort a
     stage for a reason unrelated to its work. It degrades to a debug log instead."""
