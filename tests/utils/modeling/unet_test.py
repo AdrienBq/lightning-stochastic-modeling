@@ -416,3 +416,56 @@ def test_softplus_one_is_the_softplus_inverse_anchor():
     """``SOFTPLUS_ONE`` is the value whose softplus is 1, used to initialise a monotone warp at the identity. A wrong
     constant would make the calibrator start as a silent rescaling."""
     assert float(torch.nn.functional.softplus(torch.tensor(SOFTPLUS_ONE))) == pytest.approx(1.0, abs=1e-6)
+
+
+# =====================================================================================================================
+# Block 5c — the two calibration parameter groups
+#
+# These exist for exactly one caller: ``UnetModuleBase.set_phase``, which freezes the whole backbone and re-enables
+# only the group belonging to the phase being entered. An empty generator where parameters were expected produces a
+# calibration phase that trains NOTHING — the fit runs, the checkpoint is written, and the calibrator stays at its
+# identity initialisation. No error anywhere.
+# =====================================================================================================================
+@pytest.mark.parametrize('accessor,builder_kwarg', [
+    ('regression_calibration_parameters', 'regression_calibration'),
+    ('output_calibration_parameters', 'output_calibration'),
+])
+def test_a_calibration_group_is_EMPTY_when_its_layer_is_disabled(accessor, builder_kwarg):
+    """Empty rather than raising, because the base class calls BOTH accessors on every fitting phase to freeze them —
+    including in the mode where one of the two layers cannot exist."""
+    disabled = {'regression_calibration': None, 'output_calibration': False}[builder_kwarg]
+    net = DeterministicUnetNet(IN_CHANNELS, UNET, **{builder_kwarg: disabled})
+    assert list(getattr(net, accessor)()) == []
+
+
+def test_the_monotone_group_is_exactly_the_regression_calibrators_parameters(unet_trial):
+    """Exactly, not a superset: ``set_phase`` freezes everything and unfreezes this group, so a group that leaked a
+    backbone parameter would keep training the network during a phase meant to fit a scalar warp."""
+    net = DeterministicUnetNet(IN_CHANNELS, UNET, regression_calibration={'structure': 'monotone_smooth'})
+
+    group = list(net.regression_calibration_parameters())
+    assert group, 'the monotone calibrator must expose parameters to fit'
+    assert {id(parameter) for parameter in group} == \
+        {id(parameter) for parameter in net.regression_calibration.parameters()}
+    backbone = {id(parameter) for parameter in net.backbone.parameters()}
+    assert not ({id(parameter) for parameter in group} & backbone)
+
+
+def test_the_platt_group_is_exactly_the_platt_layers_parameters():
+    net = DeterministicUnetNet(IN_CHANNELS, UNET, output_calibration=True)
+
+    group = list(net.output_calibration_parameters())
+    assert group
+    assert {id(parameter) for parameter in group} == \
+        {id(parameter) for parameter in net.output_calibration.parameters()}
+
+
+def test_the_two_groups_are_DISJOINT_when_both_layers_somehow_exist():
+    """They never coexist in practice — Platt is hourly-only and the monotone warp daily-only — but ``set_phase``
+    unfreezes one and freezes the other unconditionally, so an overlap would leave a parameter frozen mid-phase."""
+    net = DeterministicUnetNet(IN_CHANNELS, UNET, regression_calibration={'structure': 'monotone_smooth'},
+                               output_calibration=True)
+
+    monotone = {id(parameter) for parameter in net.regression_calibration_parameters()}
+    platt = {id(parameter) for parameter in net.output_calibration_parameters()}
+    assert monotone and platt and not (monotone & platt)

@@ -334,3 +334,117 @@ def test_trainer_predict_drives_the_module_end_to_end(make_diffusion):
 
     residual_members = torch.cat([b['ensemble_residual_members'] for b in outputs]).numpy()
     assert residual_members.shape == (n, MEMBERS, height, width)
+
+
+# =====================================================================================================================
+# Block 5c — the four sampling internals
+#
+# The ODE draw is the whole inference path of this family, and its parts are reached only through ``predict_step`` and
+# the validation hooks. Every failure here is silent: a time distribution collapsing to a point still trains, an
+# ensemble whose members share a seed still reports a spread (of zero), and a clamp applied to the mean instead of the
+# members still produces a prediction inside 0-24.
+# =====================================================================================================================
+def test_the_time_sampler_is_LOGIT_NORMAL_over_the_open_unit_interval(make_diffusion):
+    """Not uniform. It concentrates on mid-path times, where the velocity is hardest to predict — that is the whole
+    reason it exists, and a uniform sampler would look identical in every training curve."""
+    module = make_diffusion()
+    generator = torch.Generator().manual_seed(0)
+    times = module._sample_time(20000, torch.device('cpu'), generator)
+
+    assert times.shape == (20000,)
+    assert float(times.min()) > 0.0 and float(times.max()) < 1.0
+    assert abs(float(times.median()) - 0.5) < 0.02, 'a logit-normal is symmetric about t = 0.5'
+    # a uniform sample puts ~50 % of its mass in the middle half; the logit-normal puts noticeably more
+    middle = float(((times > 0.25) & (times < 0.75)).float().mean())
+    assert middle > 0.6, f'only {middle:.2f} of the mass is mid-path — this looks uniform'
+
+
+def test_the_time_sampler_is_reproducible_and_lands_on_the_requested_device(make_diffusion):
+    module = make_diffusion()
+    first = module._sample_time(8, torch.device('cpu'), torch.Generator().manual_seed(3))
+    second = module._sample_time(8, torch.device('cpu'), torch.Generator().manual_seed(3))
+    assert torch.equal(first, second)
+    assert first.device.type == 'cpu'
+
+
+def test_a_target_space_prediction_is_a_CPU_float32_map_inside_the_bounds(make_diffusion, batch):
+    """It is handed straight to the numpy metric suite, so it must leave the device and the autograd graph here. A
+    prediction still carrying ``grad_fn`` would keep the whole sampling graph alive for every batch of the split."""
+    module = make_diffusion()
+    x, _ = batch()
+
+    prediction = module._predict_target_space(x, None, num_steps=2)
+
+    assert prediction.shape == (x.shape[0], x.shape[-2], x.shape[-1])
+    assert prediction.device.type == 'cpu' and prediction.dtype == torch.float32
+    assert prediction.grad_fn is None and not prediction.requires_grad
+    assert float(prediction.min()) >= 0.0 and float(prediction.max()) <= 24.0
+
+
+def test_the_unclamped_residual_is_returned_ALONGSIDE_the_clamped_prediction(make_diffusion, batch):
+    """The diagnostics need the uncensored discrepancy: ``clamp(P) - upstream`` would hide exactly the corrections that
+    overshoot, which are the ones the surprise maps exist to show."""
+    module = make_diffusion(residual=True)
+    x, _, upstream = batch(channels=COND_CHANNELS + 1, residual=True)
+
+    prediction, generated = module._predict_target_space(x, upstream, num_steps=2, return_residual=True)
+
+    assert prediction.shape == generated.shape
+    assert float(prediction.min()) >= 0.0 and float(prediction.max()) <= 24.0
+    reconstructed = generated + upstream.cpu().float()
+    assert torch.allclose(prediction, reconstructed.clamp(0.0, 24.0), atol=1e-5)
+
+
+def test_every_ensemble_member_gets_its_OWN_seed(make_diffusion, batch):
+    """``seed + batch_idx * M + member``. Sharing a seed across members gives M identical draws, a spread of exactly
+    zero, and ``spread_skill_sums`` returning NaN through its ``ddof=1`` — with no exception anywhere."""
+    module = make_diffusion()
+    x, _ = batch()
+
+    members = module._draw_ensemble(x, None, num_steps=2, batch_idx=0, members=4, seed=11)
+
+    assert members.shape[0] == 4
+    for other in range(1, 4):
+        assert not torch.allclose(members[0], members[other]), f'member {other} is identical to member 0'
+
+
+def test_the_member_seeds_do_not_COLLIDE_across_batches(make_diffusion, batch):
+    """The stride is ``batch_idx * members``, so batch 0's last member and batch 1's first are distinct draws. A stride
+    of 1 would make every batch reuse the previous batch's noise and correlate the whole split's ensemble."""
+    module = make_diffusion()
+    x, _ = batch()
+
+    first_batch = module._draw_ensemble(x, None, num_steps=2, batch_idx=0, members=3, seed=0)
+    second_batch = module._draw_ensemble(x, None, num_steps=2, batch_idx=1, members=3, seed=0)
+
+    for member in range(3):
+        assert not torch.allclose(first_batch[member], second_batch[member])
+
+
+def test_the_ensemble_draw_can_return_the_matching_residual_STACK(make_diffusion, batch):
+    module = make_diffusion(residual=True)
+    x, _, upstream = batch(channels=COND_CHANNELS + 1, residual=True)
+
+    members, residuals = module._draw_ensemble(x, upstream, num_steps=2, batch_idx=0, members=3, seed=0,
+                                               return_residual=True)
+
+    assert members.shape == residuals.shape == (3, x.shape[0], x.shape[-2], x.shape[-1])
+    assert float(members.min()) >= 0.0 and float(members.max()) <= 24.0, 'the members are clamped'
+    reconstructed = (upstream[None].cpu().float() + residuals).clamp(0.0, 24.0)
+    assert torch.allclose(members, reconstructed, atol=1e-5), 'each member IS clamp(U + its own residual)'
+
+
+def test_the_validation_buffers_are_CLEARED_and_include_the_flow_loss_accumulator(make_diffusion, batch):
+    """This family carries two extra buffers the base does not — the flow-loss sum and count, reported every epoch even
+    on a non-scoring pass. A reset that missed them would report a running mean over all epochs so far, which falls
+    monotonically and reads exactly like a model that is still learning."""
+    module = make_diffusion()
+    x, y = batch()
+
+    module.on_validation_epoch_start()
+    module.validation_step((x, y), 0)
+    assert module._val_flow_loss_count > 0
+
+    module._reset_validation_buffers()
+    assert module._val_flow_loss_sum == 0.0 and module._val_flow_loss_count == 0
+    assert module._val_prediction == [] and module._val_members == [] and module._val_observation == []

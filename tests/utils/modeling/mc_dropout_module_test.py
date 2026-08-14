@@ -439,3 +439,31 @@ def test_the_finetune_phase_uses_a_reduced_learning_rate(make_mc):
     base = module._learning_rate()
     module.set_phase('finetune')
     assert module._learning_rate() < base
+
+
+# =====================================================================================================================
+# Block 5c — the family's own phase guard
+# =====================================================================================================================
+def test_the_FINETUNE_phase_requires_finetuning_to_be_enabled(mc_trial, normalization, target_stats):
+    """``finetuning.enabled`` is what builds the ensemble loss; without it ``self.finetune_loss`` is None and the phase
+    would run a second fitting pass with no objective. The message names ``apply_constraints`` because that is what
+    forces the flag true on a warm start — a warm-started run has no train phase to fall back on."""
+    module = MCDropoutModule(mc_trial(finetuning=False), 5, target_stats(), normalization)
+
+    assert 'finetune' in module.PHASES, 'the phase must be NAMED, or this tests nothing'
+    with pytest.raises(ValueError, match='finetuning.enabled'):
+        module._check_phase_available('finetune')
+
+
+def test_the_finetune_phase_IS_available_once_enabled(mc_trial, normalization, target_stats):
+    module = MCDropoutModule(mc_trial(finetuning=True), 5, target_stats(), normalization)
+    assert module._check_phase_available('finetune') is None
+    assert 'finetune' in module.training_phases()
+
+
+def test_the_guard_still_DELEGATES_to_the_shared_calibration_checks(mc_trial, normalization, target_stats):
+    """It is an override, not a replacement — the ``super()`` call is what keeps the two calibration phases guarded for
+    this family too. Dropping it would let an MC-dropout trial enter a calibration phase whose layer does not exist."""
+    module = MCDropoutModule(mc_trial(finetuning=True), 5, target_stats(mode='daily'), normalization)
+    with pytest.raises(ValueError, match='monotone'):
+        module._check_phase_available('regression_calibration')

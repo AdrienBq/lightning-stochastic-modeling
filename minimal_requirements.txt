@@ -39,4 +39,10 @@ matplotlib>=3.9,<4
 cartopy>=0.22,<1
 
 # --- tests (verification gate for every rebuild step) ---
+# tests/ is the verification of record: it mirrors src/ one <module>_test.py per module, and
+# tests/completeness_test.py enforces both the mirror and the requirement that EVERY function has a test.
+# pytest-cov backs that up with line coverage — the function gate catches "never exercised", not "exercised but
+# its branches never run" — and pytest.ini pins a --cov-fail-under floor, so it is a hard dependency of a green run
+# rather than an optional extra.
 pytest>=8,<9
+pytest-cov>=5,<8

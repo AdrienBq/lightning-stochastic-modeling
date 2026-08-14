@@ -26,9 +26,13 @@ TESTS = 'tests'
 # Functions that cannot be unit-tested without a live MLflow tracking server or a real DATA_ROOT. Each entry carries
 # its reason, and `test_exemption_list_has_not_grown` PINS THE LENGTH — adding an exemption must be a deliberate,
 # visible edit rather than the path of least resistance when a test turns out to be awkward to write.
-EXEMPT = {
-    # (populated in Block 5c, once the work-list below is worked through and the genuinely untestable ones are known)
-}
+#
+# ⚠️ EMPTY, and that is the Block 5c result rather than an oversight: all 291 functions have a test. The awkward ones
+# were reachable after all — `run.execute_stage` against a stubbed `mlflow.run` and tracking client, `tuning`'s store
+# and restart paths against a real journal file. What CANNOT be reached this way is line coverage of `run_sequential`
+# / `run_prefect` / `run_sweep` / `_fit_trial`, which need a tracking server and a real fit; that gap is measured by
+# `--cov-fail-under` and closed by Step 4's end-to-end gate, not by an exemption here.
+EXEMPT = {}
 EXEMPT_COUNT = 0
 
 
@@ -137,8 +141,10 @@ def test_mirror_directory_structure_matches(repo_root):
 # =====================================================================================================================
 # 2. Every function in src has a unit test
 # =====================================================================================================================
-@pytest.mark.xfail(strict=False, reason='Block 5c closes the remaining gap; 5a/5b bring in A + the gate checks first')
 def test_every_source_function_is_referenced_by_a_test(repo_root):
+    """A HARD GATE since Block 5c. It was ``xfail(strict=False)`` through 5a and 5b while the gap closed — note that
+    ``strict=False`` is why the marker had to come off by hand: once the last function got a test the gate would have
+    reported ``xpassed`` forever, staying green even as new untested functions arrived."""
     referenced = referenced_names(repo_root)
     total = 0
     missing = []

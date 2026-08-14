@@ -14,6 +14,7 @@ import copy
 import numpy as np
 import pytest
 
+from src.utils.modeling import search
 from src.utils.modeling.search import (
     apply_constraints, flatten_trial, is_parameter_node, sample_trial, suggest_trial_optuna,
 )
@@ -282,3 +283,61 @@ def test_the_optuna_suggester_produces_the_same_trial_shape(family, search_space
     suggested = suggest_trial_optuna(search_spaces[family], study.ask())
     randomly = sample_trial(search_spaces[family], np.random.default_rng(0))
     assert set(flatten_trial(suggested)) == set(flatten_trial(randomly))
+
+
+# =====================================================================================================================
+# Block 5c — the primitive sampler
+#
+# ⚠️ ``_sample_value`` already had 100 % LINE coverage before this section existed: every test above drives it through
+# ``sample_trial``. What it lacked was a test of its own, and the two are not the same thing — through the sweep the
+# only observable is "a trial dict came out", so a log-uniform silently sampling uniformly, or an int range excluding
+# its upper bound, would look exactly like correct behaviour.
+# =====================================================================================================================
+def test_a_categorical_draws_only_from_its_declared_choices():
+    rng = np.random.default_rng(0)
+    drawn = {search._sample_value({'type': 'categorical', 'choices': ['a', 'b', 'c']}, rng) for _ in range(200)}
+    assert drawn == {'a', 'b', 'c'}, 'every choice must be reachable, and nothing else'
+
+
+def test_an_int_range_is_INCLUSIVE_at_both_ends():
+    """``numpy``'s ``integers`` is half-open, so the ``+ 1`` is what makes ``high`` reachable. Silently excluding it
+    would mean ``depth: {low: 2, high: 4}`` never samples the deepest U-net the space declares."""
+    rng = np.random.default_rng(0)
+    drawn = {search._sample_value({'type': 'int', 'low': 2, 'high': 4}, rng) for _ in range(300)}
+    assert drawn == {2, 3, 4}
+    assert all(isinstance(value, int) for value in drawn)
+
+
+def test_a_float_range_stays_inside_its_bounds_and_returns_a_python_float():
+    rng = np.random.default_rng(0)
+    for _ in range(200):
+        value = search._sample_value({'type': 'float', 'low': 0.1, 'high': 0.5}, rng)
+        assert isinstance(value, float) and 0.1 <= value <= 0.5
+
+
+def test_a_LOG_scaled_float_samples_uniformly_in_the_EXPONENT():
+    """The learning rate spans 1e-5 to 1e-2 — three decades. Sampled linearly, ~90 % of trials would land in the top
+    decade and the sweep would barely explore the small rates. The observable difference is the MEDIAN: log-uniform
+    puts it at the geometric mean, linear at the arithmetic one."""
+    rng = np.random.default_rng(0)
+    node = {'type': 'float', 'low': 1e-5, 'high': 1e-2, 'log': True}
+    drawn = np.array([search._sample_value(node, rng) for _ in range(4000)])
+
+    assert drawn.min() >= 1e-5 and drawn.max() <= 1e-2
+    geometric_mean = np.sqrt(1e-5 * 1e-2)
+    assert abs(np.median(drawn) - geometric_mean) < 0.35 * geometric_mean
+    assert np.median(drawn) < 0.1 * 0.5 * (1e-5 + 1e-2), 'a linear sample would sit near the arithmetic mean'
+
+
+def test_the_absence_of_a_log_flag_means_LINEAR():
+    rng = np.random.default_rng(0)
+    drawn = np.array([search._sample_value({'type': 'float', 'low': 1e-5, 'high': 1e-2}, rng)
+                      for _ in range(4000)])
+    assert abs(np.median(drawn) - 0.5 * (1e-5 + 1e-2)) < 0.1 * (1e-2)
+
+
+def test_the_sampler_is_reproducible_under_a_fixed_generator():
+    """``PIPELINE_SEED`` makes a sweep reproducible only if every draw is a pure function of the generator state."""
+    node = {'type': 'float', 'low': 0.0, 'high': 1.0}
+    assert search._sample_value(node, np.random.default_rng(11)) == \
+        search._sample_value(node, np.random.default_rng(11))

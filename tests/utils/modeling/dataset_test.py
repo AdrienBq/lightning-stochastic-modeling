@@ -408,3 +408,180 @@ def test_the_mode_vocabulary_is_imported_from_io_data_and_MODES_is_not():
 
     assert {'MODE_DAILY', 'MODE_HOURLY', 'normalize_mode'} <= imported, sorted(imported)
     assert 'MODES' not in imported, 'normalize_mode is the single gate; MODES would be a second one'
+
+
+# =====================================================================================================================
+# Block 5c — the four per-item readers, driven directly
+#
+# ``__getitem__`` picks between the materialized and the checkpoint reader by ``uses_materialized_features``, and every
+# config in the repo sets ``materialize-features: true`` — so the CHECKPOINT path is dormant today and reachable only
+# by calling it. Its output must nevertheless match the materialized path channel for channel, because that is the
+# fallback a prepared directory without feature files lands on.
+# =====================================================================================================================
+def _dataset(prepared, **kwargs):
+    index, config = prepared(**kwargs)
+    return LightningMapsDataset(index, config), index, config
+
+
+def test_the_two_feature_readers_agree_CHANNEL_FOR_CHANNEL(prepared, tmp_path):
+    """The property that makes the fallback a fallback. The materialized reader loads a ``[Vf, T, H, W]`` ``.npy`` and
+    the checkpoint reader slices a cached ``.pt`` day, through different transposes and a different broadcast — and
+    ``channel_variable_names`` describes both, so a divergence would mislabel every channel on the dormant path."""
+    import torch as torch_module
+
+    index, config = prepared(mode='daily', n_days=2, feature_aggregation='hourly_stack')
+    # give the same days a .pt checkpoint holding exactly what the .npy holds
+    for position, row in index.iterrows():
+        stored = np.load(row['feature_file'])                         # [Vf, T, H, W], variable-major
+        path = str(tmp_path / f'checkpoint_{position}.pt')
+        torch_module.save({name: torch_module.from_numpy(stored[i]) for i, name in enumerate(VARIABLES)}, path)
+        index.at[position, 'file'] = path
+
+    dataset = LightningMapsDataset(index, config)
+    row = dataset.index.iloc[0]
+
+    materialized = dataset._item_features_materialized(row, None)
+    from_checkpoint = dataset._item_features_checkpoint(row, None)
+
+    assert materialized.shape == from_checkpoint.shape
+    assert np.allclose(materialized.astype(np.float32), from_checkpoint, atol=1e-3)
+
+
+def test_a_STATIC_field_is_broadcast_by_both_readers(prepared, tmp_path):
+    """``lsm`` is stored with ``T = 1``. Both readers have to expand it to the day's hours, or the stacked stack is
+    short by ``T - 1`` channels and ``in_channels`` disagrees with the tensor."""
+    import torch as torch_module
+
+    index, config = prepared(mode='daily', n_days=1, feature_aggregation='hourly_stack')
+    payload = {name: torch_module.randn(HOURS, HEIGHT, WIDTH) for name in VARIABLES[:-1]}
+    payload[VARIABLES[-1]] = torch_module.randn(HEIGHT, WIDTH)         # a static [H, W] field
+    path = str(tmp_path / 'static.pt')
+    torch_module.save(payload, path)
+    index.at[0, 'file'] = path
+
+    dataset = LightningMapsDataset(index, config)
+    stacked = dataset._item_features_checkpoint(dataset.index.iloc[0], None)
+
+    assert stacked.shape == (len(VARIABLES) * HOURS, HEIGHT, WIDTH)
+    static_channels = stacked[(len(VARIABLES) - 1) * HOURS:]
+    assert all(np.array_equal(static_channels[0], channel) for channel in static_channels[1:]), \
+        'the static field must contribute T IDENTICAL channels'
+
+
+def test_the_materialized_reader_returns_a_WRITABLE_copy_not_the_memory_map(prepared):
+    """It opens the day with ``mmap_mode='r'``, which is read-only. Handing that array straight to the collate would
+    make ``torch.from_numpy`` emit a warning and share memory with a file the next item reopens."""
+    dataset, _, _ = _dataset(prepared, mode='daily', n_days=1)
+    features = dataset._item_features_materialized(dataset.index.iloc[0], None)
+    assert features.flags.writeable
+
+
+@pytest.mark.parametrize('mode,hour,expected_channels', [
+    ('hourly', 2, len(VARIABLES)),                                    # one hour: [Vf, H, W]
+    ('daily', None, len(VARIABLES) * HOURS),                          # the whole day, stacked: [Vf * T, H, W]
+])
+def test_the_hourly_reader_slices_ONE_hour_and_the_daily_reader_takes_the_whole_day(
+        prepared, mode, hour, expected_channels):
+    """The shape fork. An hourly item that kept the time axis would hand the net ``[Vf, T, H, W]`` and the first conv
+    would fail on the channel count — loudly. The reverse (a daily item silently taking hour 0) would not.
+
+    ⚠️ Parametrized rather than building both datasets in one test: ``prepared`` writes ``feature_<n>.npy`` into one
+    ``tmp_path``, so a second build in the same test OVERWRITES the first's files with the other mode's shapes."""
+    dataset, _, _ = _dataset(prepared, mode=mode, n_days=1, feature_aggregation='hourly_stack')
+    features = dataset._item_features_materialized(dataset.index.iloc[0], hour)
+    assert features.shape == (expected_channels, HEIGHT, WIDTH)
+
+
+def test_an_hour_BEYOND_the_stored_time_axis_clamps_to_the_last_slice(prepared):
+    """``min(hour, T - 1)`` — the mechanism that lets a static ``T = 1`` field be read at any hour. Without it a
+    static feature would raise ``IndexError`` on hour 1 of every hourly item."""
+    dataset, _, _ = _dataset(prepared, mode='hourly', n_days=1, hours=HOURS)
+    row = dataset.index.iloc[0]
+    assert np.array_equal(dataset._item_features_materialized(row, HOURS - 1),
+                          dataset._item_features_materialized(row, HOURS + 5))
+
+
+@pytest.mark.parametrize('mode,hour', [('daily', None), ('hourly', 1)])
+def test_the_upstream_reader_returns_a_FLOAT32_map_in_both_modes(prepared, mode, hour):
+    """It is passed as the third batch item and compared against the model's float32 output, so a float16 upstream
+    would silently downcast the residual reconstruction. Both modes yield a bare ``[H, W]`` map — hourly by slicing."""
+    dataset, _, _ = _dataset(prepared, mode=mode, n_days=1, residual=True)
+    upstream = dataset._item_upstream(dataset.index.iloc[0], hour)
+
+    assert upstream.dtype == np.float32
+    assert upstream.shape == (HEIGHT, WIDTH)
+
+
+def test_the_upstream_reader_slices_the_HOUR_and_clamps_past_the_end(prepared):
+    dataset, index, _ = _dataset(prepared, mode='hourly', n_days=1, residual=True)
+    stored = np.load(index.iloc[0]['upstream_file'])
+    row = dataset.index.iloc[0]
+
+    assert np.allclose(dataset._item_upstream(row, 2), stored[2])
+    assert np.allclose(dataset._item_upstream(row, HOURS + 3), stored[-1])
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# The day-checkpoint LRU cache
+# ---------------------------------------------------------------------------------------------------------------------
+def test_the_checkpoint_cache_serves_a_repeated_day_WITHOUT_re_reading_it(prepared, tmp_path, monkeypatch):
+    """An hourly day is 24 items reading one 8.7 MB checkpoint. Without the cache each item pays the full load, which
+    is the reason ``DayGroupedShuffleSampler`` keeps a day contiguous in the first place."""
+    import torch as torch_module
+
+    from src.utils.modeling import dataset as dataset_module
+
+    index, config = prepared(mode='hourly', n_days=1, materialize=False)
+    path = str(tmp_path / 'day.pt')
+    torch_module.save({name: torch_module.randn(HOURS, HEIGHT, WIDTH) for name in VARIABLES}, path)
+    index.at[0, 'file'] = path
+
+    dataset = LightningMapsDataset(index, config)
+    loads = []
+    original = dataset_module.load_sample_tensor
+    monkeypatch.setattr(dataset_module, 'load_sample_tensor',
+                        lambda *args, **kwargs: loads.append(1) or original(*args, **kwargs))
+
+    for hour in range(HOURS):
+        dataset._item_features_checkpoint(dataset.index.iloc[0], hour)
+    assert len(loads) == 1, f'the day was re-read {len(loads)} times'
+
+
+def test_the_cache_EVICTS_least_recently_used_so_it_cannot_grow_without_bound(prepared, tmp_path):
+    """5843 days at 8.7 MB each. An unbounded cache would hold the whole dataset in RAM by the end of an epoch."""
+    import torch as torch_module
+
+    index, config = prepared(mode='daily', n_days=4, materialize=False)
+    for position in range(len(index)):
+        path = str(tmp_path / f'day_{position}.pt')
+        torch_module.save({name: torch_module.randn(HOURS, HEIGHT, WIDTH) for name in VARIABLES}, path)
+        index.at[position, 'file'] = path
+
+    dataset = LightningMapsDataset(index, config, cache_size=2)
+    for position in range(4):
+        dataset._load_features(index.iloc[position]['file'])
+
+    assert len(dataset._cache) == 2
+    assert index.iloc[0]['file'] not in dataset._cache, 'the oldest day must have been evicted'
+    assert index.iloc[3]['file'] in dataset._cache
+
+
+def test_a_CACHE_HIT_refreshes_the_entrys_recency(prepared, tmp_path):
+    """``move_to_end`` — an LRU that did not re-order on a hit would be a FIFO, and would evict the day currently being
+    read across its 24 hourly items."""
+    import torch as torch_module
+
+    index, config = prepared(mode='daily', n_days=3, materialize=False)
+    for position in range(len(index)):
+        path = str(tmp_path / f'day_{position}.pt')
+        torch_module.save({name: torch_module.randn(HOURS, HEIGHT, WIDTH) for name in VARIABLES}, path)
+        index.at[position, 'file'] = path
+
+    dataset = LightningMapsDataset(index, config, cache_size=2)
+    dataset._load_features(index.iloc[0]['file'])
+    dataset._load_features(index.iloc[1]['file'])
+    dataset._load_features(index.iloc[0]['file'])                     # a hit on the OLDEST entry
+    dataset._load_features(index.iloc[2]['file'])                     # forces one eviction
+
+    assert index.iloc[0]['file'] in dataset._cache, 'the refreshed entry must survive'
+    assert index.iloc[1]['file'] not in dataset._cache

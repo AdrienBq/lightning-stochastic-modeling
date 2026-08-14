@@ -241,3 +241,62 @@ def test_an_mc_dropout_checkpoint_trained_with_that_loss_loads_and_predicts(
     with torch.no_grad():
         output = loaded.predict_step((x, y), 0)
     assert output['ensemble_members'].shape == (x.shape[0], MEMBERS, x.shape[2], x.shape[3])
+
+
+# =====================================================================================================================
+# Block 5c — the two loader internals
+# =====================================================================================================================
+def test_a_checkpoint_is_loaded_with_weights_only_DISABLED(unet_trial, normalization, target_stats,
+                                                           save_checkpoint):
+    """torch >= 2.6 flips ``weights_only`` to True by default, which refuses to unpickle anything but tensors. Our own
+    checkpoints carry ``hyper_parameters`` — the trial dict, ``target_stats``, the normalization — so the default would
+    make every checkpoint in the repo unloadable, and the family marker unreadable with it."""
+    from src.utils.modeling.registry import _load_checkpoint
+
+    module = DeterministicUnetModule(unet_trial(), 5, target_stats(), normalization)
+    checkpoint = _load_checkpoint(save_checkpoint(module))
+
+    assert 'state_dict' in checkpoint
+    assert 'hyper_parameters' in checkpoint, 'the non-tensor payload must survive the load'
+    assert 'trial' in checkpoint['hyper_parameters']
+
+
+@pytest.mark.parametrize('trial,expected', [
+    ({'flow': {}}, 'diffusion'),
+    ({'transformer': {}}, 'diffusion'),                    # the pre-rename name, kept for source-branch checkpoints
+    ({'dropout_p': 0.2}, 'mc_dropout'),
+    ({'mc_inference': {}}, 'mc_dropout'),                  # ditto
+    ({'unet': {}}, 'deterministic_unet'),
+    ({}, 'deterministic_unet'),
+])
+def test_the_family_is_sniffed_from_the_DISJOINT_trial_keys(trial, expected):
+    """The legacy fallback for a marker-less checkpoint. It works only because the three families' trial vocabularies
+    are disjoint — ``flow`` for diffusion, ``dropout_p`` for MC-dropout, neither for the plain U-net. Adding a
+    ``flow`` block to another family would silently reroute its checkpoints."""
+    from src.utils.modeling.registry import _sniff_family
+
+    assert _sniff_family({'hyper_parameters': {'trial': trial}}) == expected
+
+
+@pytest.mark.parametrize('checkpoint', [
+    {},                                                    # no hyper_parameters at all
+    {'hyper_parameters': {}},                              # no trial
+    {'hyper_parameters': {'trial': 'not-a-dict'}},         # a trial of the wrong type
+    {'hyper_parameters': 'not-a-dict'},
+    'not-a-dict-at-all',
+])
+def test_a_MALFORMED_checkpoint_sniffs_to_the_default_rather_than_raising(checkpoint):
+    """Best-effort by design — it runs only when the marker is absent, which already means the checkpoint predates the
+    registry. Raising here would make an old checkpoint unloadable rather than merely mis-typed, and the explicit
+    ``model_family`` argument is the documented way out."""
+    from src.utils.modeling.registry import DEFAULT_MODULE_CLASS, _sniff_family
+
+    assert _sniff_family(checkpoint) == DEFAULT_MODULE_CLASS
+
+
+def test_the_sniff_prefers_DIFFUSION_when_a_trial_somehow_carries_both():
+    """Not reachable from any shipped search space, but pinned because the order of the two tests IS the tie-break: a
+    residual diffusion trial has no ``dropout_p``, so if one ever appeared the flow block is the stronger signal."""
+    from src.utils.modeling.registry import _sniff_family
+
+    assert _sniff_family({'hyper_parameters': {'trial': {'flow': {}, 'dropout_p': 0.2}}}) == 'diffusion'

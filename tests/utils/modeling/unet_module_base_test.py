@@ -323,3 +323,104 @@ def test_the_prediction_is_detached(unet_trial, normalization, target_stats):
     module = DeterministicUnetModule(unet_trial(), 5, target_stats(), normalization)
     head = torch.randn(2, 8, 8, requires_grad=True)
     assert not module._to_prediction(head).requires_grad
+
+
+# =====================================================================================================================
+# Block 5c — the phase machinery's three internals
+#
+# ``training_phases`` and ``set_phase`` are already covered above; these are the pieces underneath them. The failure
+# mode they guard is uniformly SILENT: a calibration phase that should not have been constructible runs anyway and
+# fits a layer that is not there, or the validation buffers carry the previous epoch's predictions into this one's
+# composite. Neither raises.
+# =====================================================================================================================
+def test_the_calibration_phases_are_chosen_by_MODE_not_by_configuration(unet_trial, normalization, target_stats):
+    """Which calibrator is meaningful follows from the task — Platt scales an hourly LOGIT, the monotone warp bends
+    daily HOURS — so there is deliberately no config key selecting between them, only one enabling each."""
+    daily = DeterministicUnetModule(
+        unet_trial(calibration={'occurrence': 'platt',
+                                'regression': {'structure': 'monotone_smooth', 'objective': 'pointwise'}}),
+        5, target_stats(mode='daily'), normalization)
+    hourly = DeterministicUnetModule(
+        unet_trial(calibration={'occurrence': 'platt',
+                                'regression': {'structure': 'monotone_smooth', 'objective': 'pointwise'}}),
+        5, target_stats(mode='hourly'), normalization)
+
+    assert daily._calibration_phases() == ('regression_calibration',)
+    assert hourly._calibration_phases() == ('occurrence_calibration',), \
+        'the same trial, both calibrators requested — the MODE picks which one exists'
+
+
+@pytest.mark.parametrize('mode', ['daily', 'hourly'])
+def test_there_is_AT_MOST_ONE_calibration_phase(mode, unet_trial, normalization, target_stats):
+    module = DeterministicUnetModule(
+        unet_trial(calibration={'occurrence': 'platt',
+                                'regression': {'structure': 'monotone_smooth', 'objective': 'pointwise'}}),
+        5, target_stats(mode=mode), normalization)
+    assert len(module._calibration_phases()) <= 1
+    assert module.training_phases()[0] == 'train'
+    assert module.training_phases() == ('train',) + module._calibration_phases()
+
+
+def test_no_calibration_phase_when_neither_calibrator_is_enabled(unet_trial, normalization, target_stats):
+    module = DeterministicUnetModule(unet_trial(), 5, target_stats(mode='daily'), normalization)
+    assert module._calibration_phases() == ()
+    assert module.training_phases() == ('train',)
+
+
+@pytest.mark.parametrize('mode,phase,fragment', [
+    ('daily', 'occurrence_calibration', 'Platt'),
+    ('hourly', 'regression_calibration', 'monotone'),
+])
+def test_a_phase_that_is_NAMED_but_not_constructible_raises_naming_the_layer(
+        mode, phase, fragment, unet_trial, normalization, target_stats):
+    """``PHASES`` lists all three names for every family, so a phase can be requested that this trial cannot build. The
+    check is what turns "fit a layer that does not exist" into an error — without it ``set_phase`` would freeze the
+    backbone, find an empty parameter group, and run a full phase training nothing at all."""
+    module = DeterministicUnetModule(unet_trial(), 5, target_stats(mode=mode), normalization)
+
+    assert phase in module.PHASES, 'the phase must be NAMED, or this tests nothing'
+    with pytest.raises(ValueError, match=fragment):
+        module._check_phase_available(phase)
+
+
+@pytest.mark.parametrize('mode', ['daily', 'hourly'])
+def test_the_TRAIN_phase_is_always_available(mode, unet_trial, normalization, target_stats):
+    module = DeterministicUnetModule(unet_trial(), 5, target_stats(mode=mode), normalization)
+    assert module._check_phase_available('train') is None
+
+
+def test_every_phase_the_module_ADVERTISES_is_available(unet_trial, normalization, target_stats):
+    """The consistency that matters to ``_fit_trial``: it fits exactly what ``training_phases()`` returns, so a phase
+    advertised but unavailable would abort the trial after phase 1 had already been fitted."""
+    for mode in ('daily', 'hourly'):
+        for calibration in ({'occurrence': 'none', 'regression': {'structure': 'none', 'objective': 'pointwise'}},
+                            {'occurrence': 'platt',
+                             'regression': {'structure': 'monotone_smooth', 'objective': 'pointwise'}}):
+            module = DeterministicUnetModule(unet_trial(calibration=calibration), 5,
+                                             target_stats(mode=mode), normalization)
+            for phase in module.training_phases():
+                module._check_phase_available(phase)                 # must not raise
+                module.set_phase(phase)
+
+
+def test_the_validation_buffers_are_CLEARED_not_appended_to(unet_trial, normalization, target_stats, batch):
+    """They accumulate per-batch predictions across an epoch and are reduced once at ``on_validation_epoch_end``.
+    Without the reset, epoch 2's composite is computed over epochs 1 AND 2 — a monotonically diluted score that still
+    looks like a plausible learning curve, and the sweep ranks trials on it."""
+    module = DeterministicUnetModule(unet_trial(), 5, target_stats(mode='daily'), normalization)
+    x, y = batch()
+
+    module.on_validation_epoch_start()
+    module.validation_step((x, y), 0)
+    assert len(module._val_prediction) == 1
+
+    module.on_validation_epoch_start()
+    assert module._val_prediction == [] and module._val_observation == [], \
+        'a new epoch must start from an empty buffer'
+
+
+def test_the_reset_is_idempotent(unet_trial, normalization, target_stats):
+    module = DeterministicUnetModule(unet_trial(), 5, target_stats(mode='daily'), normalization)
+    module._reset_validation_buffers()
+    module._reset_validation_buffers()
+    assert module._val_prediction == [] and module._val_observation == []
