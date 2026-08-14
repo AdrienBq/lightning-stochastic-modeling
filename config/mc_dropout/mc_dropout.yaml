@@ -117,8 +117,18 @@ stages:
         feature-stats-days: 256
 
     # ------------------------------------------------------------------------------------------------------------
-    # 3) Retrain the winning configuration (both phases, or the finetuning phase alone in upstream mode). The
+    # 3) Retrain the winning configuration (both phases, or the finetuning phase alone in warm-start mode). The
     # selection metric/mode are read back from source-path/best_trial.json, so they cannot disagree with the sweep.
+    #
+    # !! There is deliberately NO `upstream-model-path` here even though this family warm-starts. The stage READS
+    # !! THE SWEEP'S RECORD out of source-path/best_trial.json, so a warm-started sweep is retrained warm-started
+    # !! automatically and a from-scratch one is retrained from scratch -- with no second place for the two to
+    # !! disagree. That matters because the hyperparameters were chosen under whichever regime the sweep ran: a
+    # !! warm-started config refitted from scratch runs TWO phases from random weights instead of one from the
+    # !! upstream's, which is a different model answering a different question.
+    # !! Pass `upstream-model-path:` here only to OVERRIDE -- the case where the deterministic upstream was itself
+    # !! retrained on this data and the MC-dropout model should start from the new one. It warns when it differs
+    # !! from the record.
     # ------------------------------------------------------------------------------------------------------------
     - retrain_best:
         model-family: mc_dropout

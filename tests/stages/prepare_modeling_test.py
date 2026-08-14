@@ -25,6 +25,7 @@ import pytest
 import torch
 
 import prepare_modeling                                          # bare name: see conftest.py
+from tests.conftest import executable_source
 
 VARIABLES = ['MU_LI', 'MU_MIXR', 'RH_500850', 'cp', 'lsm', 'lightnings']
 FEATURES = 'MU_LI,MU_MIXR,RH_500850,cp,lsm'
@@ -204,29 +205,9 @@ def test_there_is_no_target_variable_PARAMETER():
     assert 'mode' in parameters
 
 
-def _executable_source(module):
-    """The module's source with every docstring and comment stripped.
-
-    Needed because the removed names are DISCUSSED in this stage's docstrings — they explain why the unbounded-count
-    aggregations and the gamma fit are gone, which is worth keeping. A naive substring sweep over the raw file would
-    flag its own explanation, so the sweep has to run on what actually executes.
-    """
-    import ast
-    import inspect as inspect_module
-
-    tree = ast.parse(inspect_module.getsource(module))
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.body:
-            first = node.body[0]
-            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) \
-                    and isinstance(first.value.value, str):
-                node.body.pop(0)                                 # drop the docstring
-    return ast.unparse(tree)                                     # comments never survive unparse
-
-
 @pytest.mark.source_invariant
 def test_no_unbounded_count_aggregation_survives_in_the_EXECUTABLE_stage():
-    executable = _executable_source(prepare_modeling)
+    executable = executable_source(prepare_modeling)
     for banned in ('lightning_counts', 'lightning_peak', 'TARGET_VARIABLES', 'target_variable'):
         assert banned not in executable, banned
 
@@ -235,7 +216,7 @@ def test_no_unbounded_count_aggregation_survives_in_the_EXECUTABLE_stage():
 def test_the_GAMMA_FIT_is_gone_with_the_transform_it_conditioned():
     """``gamma_shape`` / ``gamma_scale`` existed only to parameterize the removed F-transform. The scipy import went
     with them, which is the observable trace — and an import is executable, so it is caught with docstrings stripped."""
-    executable = _executable_source(prepare_modeling)
+    executable = executable_source(prepare_modeling)
     assert 'gamma_shape' not in executable and 'gamma_scale' not in executable
     assert 'scipy' not in executable
 

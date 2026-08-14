@@ -467,13 +467,23 @@ def run_sweep(
         )
 
     prepared_config, split_index, target_stats = load_prepared_artifacts(abs_input_path)
-    # record the (ordered) feature provenance in target_stats so it is baked into every checkpoint; a downstream
-    # residual-diffusion preparation can then verify the conditioning channel set/order matches when it reuses
-    # this model upstream (the per-channel normalization is positional, so a feature reorder must be caught)
+    # Carry into target_stats the three PREPARED-DIRECTORY facts the modules need but target_stats.json does not
+    # hold, so they are baked into every checkpoint:
+    #
+    # * `features` / `feature_aggregation` — the ordered feature provenance, so a downstream residual-diffusion
+    #   preparation can verify the conditioning channel set/order when it reuses this model upstream (the
+    #   per-channel normalization is positional, so a feature reorder must be caught);
+    # * `residual_target` — ⚠️ DiffusionModule reads it from `target_stats` and it lives in `prepared_config`. Left
+    #   out, a diffusion sweep on a residual directory trains in FULL-TARGET mode: the dataset still appends the
+    #   upstream channel (it keys on prepared_config), so in_channels is 6 either way and every shape check passes,
+    #   while `_generation_target` learns `y` instead of `y - upstream`. Nothing raises, the trial scores plausibly,
+    #   and `retrain_best_config` — which DOES carry the key — then retrains the winning configuration as a genuine
+    #   residual model. Two different objectives, one sweep, no error.
     target_stats = {
         **target_stats,
         'features': list(prepared_config['features']),
-        'feature_aggregation': prepared_config.get('feature_aggregation')
+        'feature_aggregation': prepared_config.get('feature_aggregation'),
+        'residual_target': bool(prepared_config.get('residual_target', False))
     }
     datasets = build_split_datasets(split_index, prepared_config, splits=['train', 'valid'])
     in_channels = datasets['train'].in_channels
@@ -860,11 +870,15 @@ def retrain_best_config(
         f'Retraining the best config from "{source_path}" (tuned {selection_metric} = {saved_best["score"]:.4f}) '
         f'on the data in "{input_path}".'
     )
-    # a warm-started sweep produced weights that were only ever fine-tuned, so a retrain must warm-start too
+    # A warm-started sweep produced weights that were only ever fine-tuned, so a retrain must warm-start too — the
+    # hyperparameters were chosen under that regime. The STAGE owns that resolution (it builds module_factory), and
+    # `stages/retrain_best.py` reads this same key back to do it; recorded here so the provenance travels with the
+    # experiment rather than depending on the caller remembering.
     if saved_best.get('upstream_model_path'):
         logger.info(
-            f'The source sweep warm-started from "{saved_best["upstream_model_path"]}"; the retrained model is '
-            f'only meaningful with the same upstream weights, so the stage must supply them to module_factory.'
+            f'The source sweep warm-started from "{saved_best["upstream_model_path"]}". The retrained model is only '
+            f'meaningful with the same upstream weights; `stages/retrain_best.py` inherits them from this record '
+            f'unless --upstream-model-path overrides it.'
         )
 
     # GPU runtime (mirrors run_sweep): TF32 matmuls; selection metrics stay fp32 on CPU

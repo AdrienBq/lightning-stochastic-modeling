@@ -169,10 +169,10 @@ def test_function_census_is_stable(repo_root):
     above — and so the count MOVES in the same commit as the code, making the diff a statement of what was added.
 
     History: 291 at the end of Step 3. Step 4 block 4a added `prepare_modeling`'s 14 functions and
-    `data.high_lightning_days`, giving 306.
+    `data.high_lightning_days` (306); block 4b added `tune`'s 2 and `retrain_best`'s 2 (310).
     """
     total = sum(1 for _ in _all_functions(repo_root))
-    assert total == 306, f'the testable surface moved from 306 to {total}; re-scope the coverage work-list'
+    assert total == 310, f'the testable surface moved from 310 to {total}; re-scope the coverage work-list'
 
 
 def test_exemption_list_has_not_grown(repo_root):

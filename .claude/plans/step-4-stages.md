@@ -150,6 +150,19 @@ Same `MODULE_FACTORIES` dispatch over `retrain_best_config`. Parameters from the
 `early-stopping-patience`, `accelerator`, `devices`, `num-workers`, `progress-bar`. No `selection-metric` /
 `selection-mode` — read back from `source-path/best_trial.json`.
 
+➕ **A warm-started sweep is retrained WARM-STARTED** (user decision, block 4b — this plan first said the opposite).
+The claim that "a retrain fits from fresh weights by definition" was an assertion, not something the design implies,
+and it breaks the stage's own contract: the sweep's hyperparameters were chosen under a one-phase fit from the
+upstream's weights, so a from-scratch retrain runs two phases from random weights and answers a different question.
+`tuning.retrain_best_config` already said as much at its warm-start branch — *"the stage must supply them to
+module_factory"* — so the stage was contradicting the harness it calls.
+
+Resolution order, through the same `tune._module_factory` so the two stages cannot drift: an explicit
+`--upstream-model-path` (for when the upstream itself was retrained), else **whatever the sweep recorded in
+`best_trial.json`**. The shipped pipeline therefore needs no new config key, and a recorded checkpoint that no longer
+exists **raises** rather than falling back to a from-scratch fit — that fallback is the silent regime change the whole
+arrangement exists to prevent.
+
 ### `evaluate` — base A `evaluate_regression.py` (407)
 
 The orchestration is correct as written, and every function it calls exists with a matching signature (checked:

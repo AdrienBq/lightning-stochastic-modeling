@@ -44,6 +44,27 @@ def repo_root():
     return REPO_ROOT
 
 
+def executable_source(module) -> str:
+    """A module's source with every docstring and comment stripped.
+
+    For ``source_invariant`` sweeps that assert a name is GONE. The removed names are usually discussed in the very
+    docstrings that explain their removal — which is worth keeping — so a substring search over the raw file flags its
+    own explanation. Running the sweep on what actually executes is the difference between "this code does not use X"
+    and "this file does not mention X", and only the first is the claim worth making.
+    """
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(module))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.body:
+            first = node.body[0]
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) \
+                    and isinstance(first.value.value, str):
+                node.body.pop(0)                                 # drop the docstring
+    return ast.unparse(tree)                                     # comments never survive unparse
+
+
 @pytest.fixture(scope='session')
 def metrics_config():
     """The shipped shared metric suite, parsed. Tests assert against the REAL config, not a fixture copy of it —
