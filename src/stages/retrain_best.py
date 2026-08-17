@@ -41,9 +41,9 @@ Usage (standalone)::
 
     python src/stages/retrain_best.py \\
         --model_family deterministic_unet \\
-        --source_path outputs/deterministic_unet/tuning \\
-        --input_path  outputs/deterministic_unet/prepared/daily \\
-        --output_path outputs/deterministic_unet/best
+        --source_path $OUTPUT_ROOT/deterministic_unet/tuning \\
+        --input_path  $OUTPUT_ROOT/deterministic_unet/prepared/daily \\
+        --output_path $OUTPUT_ROOT/deterministic_unet/best
 """
 import json
 import logging

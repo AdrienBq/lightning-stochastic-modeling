@@ -25,64 +25,58 @@ supply `DATA_ROOT` plus the venv/output locations. Two concrete carry-overs:
   user-specific. Needs a documented pre-warm step. *(Now unavoidable: cartopy is a hard requirement — the
   lazy-import fallback was dropped in Step 1.)*
 
-## TODO — move ALL outputs off the source tree, behind `{{$OUTPUT_ROOT}}`
+## ✅ DONE in Step 4 block 4c-r — outputs live behind `{{$OUTPUT_ROOT}}`
 
-⭐ **Decided 2026-08-14 (user).** Every config currently writes to `outputs/…`, i.e. inside the git checkout. On a
-remote cluster the source tree and the bulk storage are deliberately separate filesystems with very different quotas,
-so this does not survive a real run. **One variable, `OUTPUT_ROOT`, replaces the literal `outputs/` prefix
-everywhere — smoke tiers included**, so there is a single rule rather than a rule with an exception.
+Every written path in all 11 pipeline configs now resolves under `{{$OUTPUT_ROOT}}` — smoke tiers included, so there
+is one rule rather than a rule with an exception. Done here rather than in Step 5 because the full dataset does not
+fit in a checkout and the first real run cannot wait: measured against the real grid (101 x 149, 5843 days, 5
+predictors x 24 h, float16 features), `features/` alone is **19.7 GiB per split**, so a daily prepared directory is
+~20 GiB. `tuning/` adds a checkpoint per retained trial plus the optuna journal.
 
-The scale is the argument. Measured against the real grid (101 × 149, 5843 days, 5 predictors × 24 h, float16
-features):
+Three things landed with it:
 
-| | per day | per split |
-|---|---|---|
-| `features/` | 3.44 MiB | **19.7 GiB** |
-| `targets/` daily (float32 0–24) | 58.8 KiB | 0.33 GiB |
-| `targets/` hourly (uint8 0/1) | 352.7 KiB | 1.97 GiB |
+1. **The `setup` guard.** `parse_config` maps an unset variable to the EMPTY STRING, so `'{{$OUTPUT_ROOT}}/family/prepared'`
+   becomes `/family/prepared` — absolute, at the filesystem root — and `os.path.join(root_path, …)` then discards the
+   repo root entirely. `setup.looks_like_an_unset_root` catches it before anything expensive, discriminating on the
+   TOP-LEVEL segment (a real absolute path sits under an existing mount; an unset variable leaves a first segment that
+   is a family name and does not exist). It lives in `setup` and **not** in `parse_config` because `UPSTREAM_MODEL`
+   *relies* on the empty-string behaviour — unset means "no warm start" to both `tune` and `prepare_modeling`, so a
+   blanket raise would break both stochastic families.
+2. **The two U-net families now SHARE one prepared directory**, `$OUTPUT_ROOT/deterministic_and_mc_dropout/prepared`.
+   Their `prepare_modeling` blocks differed in `output-path` alone, so the second pipeline to run now skips
+   preparation entirely — ~20 GiB and one full pass saved. ⚠️ Diffusion does **not** share it and must not: in
+   residual mode its preparation writes `upstream/` maps and flips `residual_target`, and the dataset keys the 6th
+   conditioning channel on that flag, so the U-net checkpoints would mismatch on `in_channels`. In full-target mode
+   the directory *would* be identical, which is what makes sharing a trap rather than an optimisation — it would work
+   until the first residual run.
+3. **Two regression guards in `parse_config_test.py`**: every output-tree path is rooted at the marker (the half-moved
+   sweep is the failure mode of a 70-path edit), and the two families sharing a directory pass identical prepare
+   parameters.
 
-**One daily prepared directory is ~20 GiB and the three families are ~60 GiB** — each family keeps its own copy
-deliberately, so the pipelines can run and be cached independently. An hourly tier adds ~21.6 GiB per family. And
-`prepared/` is only the largest part: `tuning/` holds a checkpoint per retained trial plus the optuna journal,
-`best/` another checkpoint, `evaluation/` the `predictions.npz` stacks, and `reports/` the png+pdf pair per rendered
-day. All of it grows with every experiment, and none of it belongs in a checkout.
+⚠️ **Corrections to what this file said before.** Two of the four hazards it listed were wrong:
 
-**Use the mechanism that already exists** (Step 1 finding #4, and the rule CLAUDE.md states for `DATA_ROOT`: *never
-hardcode a data path*) — the same `{{$VAR}}` substitution, read from the per-user config file this step introduces:
+* *"the half-moved-pipeline case"* — already guarded, and not by anything new:
+  `parse_config_test.py::test_every_consumer_reads_the_leaf_its_own_pipeline_PRODUCES` has walked every pipeline since
+  block 5a asserting each `input-path` equals its own file's `prepare_*` `output-path`. It catches the case whether
+  `OUTPUT_ROOT` is set or not. The note also mis-attributed the harm to `prepare_modeling` "re-preparing into an empty
+  directory", which is just the stage doing its job — the harm is entirely on the READING side, where `tune` trains on
+  a stale directory from an earlier run.
+* *"the 2048 MB dir budget"* — real, but the risk it implies is already covered. A 20 GiB prepared directory exceeds
+  `lazy_content_max_dir_mb` (default 2048), so `lazy.fingerprint_path` switches to size-only mode: the cache key holds
+  each file's path and byte SIZE, not its contents, and a same-size rewrite is invisible to the cache. That is the
+  right trade — content-hashing 20 GiB per stage would dominate the run — and the specific danger (re-preparing under
+  a different `hourly-threshold`) is caught from the other side by `prepare_modeling`'s own staleness check, which
+  RAISES on a `mode` / `hourly-threshold` mismatch. The two mechanisms cover each other.
 
-```yaml
-- setup:
-    outputs:    '{{$OUTPUT_ROOT}}'
-    prepared:   '{{$OUTPUT_ROOT}}/deterministic_unet/prepared'
-    tuning:     '{{$OUTPUT_ROOT}}/deterministic_unet/tuning'
-    best:       '{{$OUTPUT_ROOT}}/deterministic_unet/best'
-    evaluation: '{{$OUTPUT_ROOT}}/deterministic_unet/evaluation'
-    reports:    '{{$OUTPUT_ROOT}}/deterministic_unet/reports'
-- prepare_modeling:
-    output-path: '{{$OUTPUT_ROOT}}/deterministic_unet/prepared/daily'
-# …and every input-path / model-path / metrics-path / report-path that points into the tree
-```
+### Still open for this step
 
-Five things to get right when doing it:
-
-1. **⚠️ `{{$VAR}}` substitutes to the EMPTY STRING when unset**, so an unset `OUTPUT_ROOT` silently yields
-   `/deterministic_unet/prepared/daily` — an absolute path at the filesystem root, which fails late and confusingly
-   (or, worse, succeeds as root). `DATA_ROOT` has the same footgun today, so solve both together: either default the
-   variable in the launch script, or add one guard that rejects a resolved path whose root segment is empty.
-2. **It is a sweep across all 12 configs plus `config/hello_world.yaml`**, and every `input-path` / `model-path` /
-   `metrics-path` / `report-path` / `source-path` must move with the `output-path` that produced it — a half-moved
-   pipeline writes to the new root and reads from the old one, and `prepare_modeling`'s overwrite=false fast path
-   would then quietly re-prepare into an empty directory.
-3. **Quote every interpolated scalar** (`'{{$OUTPUT_ROOT}}/…'`), per the CLAUDE.md convention — substitution is
-   textual and happens *before* the YAML parse.
-4. **The lazy cache already copes, but check the number**: `lazy_content_max_dir_mb` defaults to 2048, so a 20 GiB
-   prepared directory is fingerprinted in size-only metadata mode with a de-duplicated warning. That is the right
-   behaviour — content-hashing 20 GiB per stage would dominate the run — but it means a size-preserving change to a
-   prepared file is not detected. Worth stating in the config comment rather than leaving to be discovered.
-5. **Decide whether the MLflow store moves too.** `mlruns/` is created next to `run_project.py`, holds the lazy
-   cache's tags and every run's logged artifacts, and grows without bound. It is not covered by `OUTPUT_ROOT` as
-   written above; `run_project.py` already accepts a `tracking_uri`, so the choice is between pointing that at the
-   new root and leaving the store local by design.
+* **`mlruns/` is not covered.** It is created next to `run_project.py`, holds the lazy cache's tags and every run's
+  logged artifacts, and grows without bound. `run_project.py` already accepts a `tracking_uri`, so the choice is
+  between pointing that at the new root and keeping the store local by design.
+* **`OUTPUT_ROOT` and `DATA_ROOT` should come from the per-user config file** this step introduces, rather than from
+  whatever exported them. The `setup` guard makes a missing `OUTPUT_ROOT` loud; it does nothing for a missing
+  `DATA_ROOT`, which still fails inside `prepare_modeling`.
+* **`.gitignore` still lists `/outputs/`** — harmless, and still correct for a local run with `OUTPUT_ROOT=outputs`.
 
 ## Carried in from Step 4
 

@@ -41,12 +41,12 @@ description: 'Deterministic U-net: the baseline, and the upstream model for resi
 
 stages:
     - setup:
-        outputs: outputs
-        prepared: outputs/deterministic_unet/prepared
-        tuning: outputs/deterministic_unet/tuning
-        best: outputs/deterministic_unet/best
-        evaluation: outputs/deterministic_unet/evaluation
-        reports: outputs/deterministic_unet/reports
+        outputs: '{{$OUTPUT_ROOT}}'
+        prepared: '{{$OUTPUT_ROOT}}/deterministic_and_mc_dropout/prepared'
+        tuning: '{{$OUTPUT_ROOT}}/deterministic_unet/tuning'
+        best: '{{$OUTPUT_ROOT}}/deterministic_unet/best'
+        evaluation: '{{$OUTPUT_ROOT}}/deterministic_unet/evaluation'
+        reports: '{{$OUTPUT_ROOT}}/deterministic_unet/reports'
 
     # ------------------------------------------------------------------------------------------------------------
     # 1) Data preparation
@@ -54,13 +54,20 @@ stages:
     # targets, the split index and the train target statistics. No feature scaler is produced: feature
     # standardization is fitted by the tuning stage and baked into the checkpoint (the dataset-side scalers/
     # directory is deprecated).
+    #
+    # !! SHARED WITH config/mc_dropout/mc_dropout.yaml. The prepared data is family-agnostic and the two blocks are
+    # !! identical, so both write $OUTPUT_ROOT/deterministic_and_mc_dropout/prepared -- whichever pipeline runs first
+    # !! prepares it and the second skips via overwrite=false. Diffusion does NOT share it: in residual mode its
+    # !! prepare writes upstream/ maps and flips residual_target, which would add a 6th conditioning channel here.
+    # !! Keep the two blocks in step -- a parameter changed in one and not the other makes the second pipeline RAISE
+    # !! on stale targets (see prepare_modeling's staleness check), which is enforced by parse_config_test.py.
     # ------------------------------------------------------------------------------------------------------------
     - prepare_modeling:
         data-path: '{{$DATA_ROOT}}'         # dataset root; NEVER hardcode a path. The token is {{$VAR}} -- an
                                             # unset variable substitutes to the empty string, so a missing
                                             # DATA_ROOT fails at the stage, not silently.
         split-config: config/split/split.yaml     # the shared year-based split (see CLAUDE.md "Data")
-        output-path: outputs/deterministic_unet/prepared/daily
+        output-path: '{{$OUTPUT_ROOT}}/deterministic_and_mc_dropout/prepared/daily'
         mode: daily                         # daily | hourly (aggregation level of the items only)
         feature-aggregation: hourly_stack   # hourly_stack | daily_mean (daily mode only); stacks 24 hourly maps
                                             # into C*24 input channels
@@ -86,12 +93,12 @@ stages:
     - tune:
         model-family: deterministic_unet
         model-type: deterministic_unet      # tagged on the mlflow run for ease of access
-        input-path: outputs/deterministic_unet/prepared/daily
+        input-path: '{{$OUTPUT_ROOT}}/deterministic_and_mc_dropout/prepared/daily'
         model-config: config/deterministic_unet/search_space.yaml
         metrics-config: config/eval/metrics.yaml # supplies the climatology baseline behind the
                                             # mae_cond_ss_climatology selection component
-        output-path: outputs/deterministic_unet/tuning
-        metrics-path: outputs/deterministic_unet/tuning/best_trial_metrics.json
+        output-path: '{{$OUTPUT_ROOT}}/deterministic_unet/tuning'
+        metrics-path: '{{$OUTPUT_ROOT}}/deterministic_unet/tuning/best_trial_metrics.json'
         n-trials: 40
         sampler: tpe                        # random | tpe (tpe requires optuna)
         max-epochs: 50
@@ -114,11 +121,11 @@ stages:
     - retrain_best:
         model-family: deterministic_unet
         model-type: deterministic_unet
-        source-path: outputs/deterministic_unet/tuning
-        input-path: outputs/deterministic_unet/prepared/daily
+        source-path: '{{$OUTPUT_ROOT}}/deterministic_unet/tuning'
+        input-path: '{{$OUTPUT_ROOT}}/deterministic_and_mc_dropout/prepared/daily'
         metrics-config: config/eval/metrics.yaml
-        output-path: outputs/deterministic_unet/best
-        metrics-path: outputs/deterministic_unet/best/best_trial_metrics.json
+        output-path: '{{$OUTPUT_ROOT}}/deterministic_unet/best'
+        metrics-path: '{{$OUTPUT_ROOT}}/deterministic_unet/best/best_trial_metrics.json'
         max-epochs: 80
         early-stopping-patience: 10
         accelerator: auto
@@ -133,12 +140,12 @@ stages:
     # metrics-path) and a report directory of figures + CSVs (auto-logged via report-path).
     # ------------------------------------------------------------------------------------------------------------
     - evaluate:
-        input-path: outputs/deterministic_unet/prepared/daily
-        model-path: outputs/deterministic_unet/best/best_model.ckpt
-        output-path: outputs/deterministic_unet/evaluation
+        input-path: '{{$OUTPUT_ROOT}}/deterministic_and_mc_dropout/prepared/daily'
+        model-path: '{{$OUTPUT_ROOT}}/deterministic_unet/best/best_model.ckpt'
+        output-path: '{{$OUTPUT_ROOT}}/deterministic_unet/evaluation'
         metrics-config: config/eval/metrics.yaml
-        metrics-path: outputs/deterministic_unet/evaluation/test_metrics.json
-        report-path: outputs/deterministic_unet/reports
+        metrics-path: '{{$OUTPUT_ROOT}}/deterministic_unet/evaluation/test_metrics.json'
+        report-path: '{{$OUTPUT_ROOT}}/deterministic_unet/reports'
         split: test                         # valid | test
         baselines: zero,climatology         # no persistence: a diagnostic parameterization has no past observation
         ensemble-size: 2                    # this family is deterministic, so predict_step emits no

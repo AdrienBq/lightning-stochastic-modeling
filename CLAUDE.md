@@ -49,6 +49,26 @@ Two consequences that matter constantly:
 
 Reached via the **`DATA_ROOT`** environment variable — **never hardcode a data path**, in code or in config.
 
+⚠️ **Two roots, both required, both `{{$VAR}}`:** `DATA_ROOT` for the read-only dataset and **`OUTPUT_ROOT`** for
+everything the pipelines write. Outputs are not in the checkout — one daily prepared directory is ~20 GiB (`features/`
+alone is 19.7 GiB per split) and the three families come to ~60 GiB, so on a cluster the source tree and the bulk
+storage are separate filesystems.
+
+```shell
+export DATA_ROOT=/path/to/era5_postprocess          # metadata.json, metadata.csv, samples/
+export OUTPUT_ROOT=/scratch/$USER/lightning-outputs # prepared/, tuning/, best/, evaluation/, reports/
+```
+
+An **unset** variable substitutes to the empty string rather than erroring (see the `{{$VAR}}` note below), so
+`'{{$OUTPUT_ROOT}}/family/prepared'` becomes `/family/prepared` — absolute, at the filesystem root. `setup`, the first
+stage of every pipeline, refuses that and names the variable; a missing `DATA_ROOT` still fails inside the stage.
+
+**The two U-net families share one prepared directory**, `$OUTPUT_ROOT/deterministic_and_mc_dropout/prepared`: their
+`prepare_modeling` blocks are identical, so whichever pipeline runs first prepares it and the second skips. Their
+`prepare_modeling` blocks must therefore stay in step — `parse_config_test.py` enforces the equality. **Diffusion keeps
+its own**, because in residual mode its preparation writes `upstream/` maps and flips `residual_target`, which would
+give the U-net families a 6th conditioning channel their checkpoints were not built for.
+
 ```
 $DATA_ROOT/
   metadata.json     # 6 variables, 0.25 deg, 35-60N / -12-25E, 2008-01-02 -> 2023-12-31

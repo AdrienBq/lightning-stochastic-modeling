@@ -10,10 +10,11 @@ Two layers, deliberately:
    the 02a grammar removed, and its headline-log list had gone stale — both silent, both caught by an AST check
    against the real signatures rather than by running anything.
 
-The bottom section is branch A's ported ``test_probabilistic_eval_hpc.py``: a subprocess run against REAL checkpoints,
-env-gated so it self-skips. It is the only test that scores two families' checkpoints and compares their metric key
-sets — the invariant the whole shared-evaluation design exists for — and it needs artifacts no synthetic fixture can
-produce. Block 4e's synthetic pipeline test covers the wiring; this covers the real thing when it is available.
+The bottom section is branch A's ported ``test_probabilistic_eval_hpc.py``: a subprocess run against REAL checkpoints.
+It is the only test that scores two families' checkpoints and compares their metric key sets — the invariant the whole
+shared-evaluation design exists for — and it needs artifacts no synthetic fixture can produce. ⚠️ A's version was gated
+on ``PROB_EVAL_*`` variables that NOTHING sets, so it stayed dormant even after a real run produced exactly what it
+wanted; it now DISCOVERS its artifacts from the shipped cross-family eval config and runs the moment they exist.
 """
 import ast
 import glob
@@ -353,15 +354,72 @@ def test_the_stage_imports_root_path_BEFORE_any_src_import(repo_root):
 
 
 # =====================================================================================================================
-# Branch A's ported HPC test — a subprocess run against REAL checkpoints, env-gated
+# Branch A's ported HPC test — a subprocess run against REAL checkpoints
 #
 # This is the only test that scores two families' real checkpoints and compares their metric KEY SETS, which is the
-# invariant the shared evaluation exists for. No synthetic fixture can produce a trained checkpoint of each family, so
-# it self-skips unless the environment points at them.
+# invariant the shared evaluation exists for, and no synthetic fixture can produce a trained checkpoint of each family.
+#
+# ⚠️ A's version was gated on `PROB_EVAL_*` environment variables that NOTHING sets — not the pipeline, not conftest —
+# so it stayed dormant even after a real run produced exactly the artifacts it wanted. It now DISCOVERS them from the
+# shipped cross-family eval config, the same principle as every other config-driven test here, and runs the moment
+# those artifacts exist. The env vars survive as an override, for a checkpoint no config names.
 # =====================================================================================================================
+FAMILIES = ('deterministic_unet', 'mc_dropout', 'diffusion')
+
+
 def _env(name, default=None):
     value = os.environ.get(name)
     return value if value not in (None, '') else default
+
+
+def _configured_evaluations(repo_root):
+    """``{family: (input_path, model_path)}`` as the shipped cross-family eval configs declare them.
+
+    The family is the last segment of ``output-path`` (``$OUTPUT_ROOT/comparison/evaluation/<family>``). Both tiers are
+    read, smoke FIRST: a smoke run produces these artifacts long before a full one does, and it is the run most
+    likely to have happened.
+    """
+    from src.utils.io.parse_config import parse_config
+
+    declared = {}
+    for tier in ('_smoke_cpu', ''):
+        config = parse_config(os.path.join(repo_root, f'config/eval/probabilistic_eval{tier}.yaml'))
+        for stage in config['stages']:
+            for name, parameters in stage.items():
+                if name != 'evaluate':
+                    continue
+                family = os.path.basename(parameters['output-path'])
+                declared.setdefault(family, (parameters['input-path'], parameters['model-path']))
+    return declared
+
+
+def _available_evaluations(repo_root):
+    """The subset of the above whose prepared directory AND checkpoint are actually on disk."""
+    available = {}
+    for family, (prepared_dir, model_path) in _configured_evaluations(repo_root).items():
+        if os.path.isdir(os.path.join(repo_root, prepared_dir)) \
+                and os.path.exists(os.path.join(repo_root, model_path)):
+            available[family] = (prepared_dir, model_path)
+    return available
+
+
+def _artifacts_for(repo_root, family):
+    """``(input_path, model_path)`` for one family — the env override first, else the shipped config."""
+    prepared_dir, checkpoint = _env('PROB_EVAL_PREPARED'), _env(f'PROB_EVAL_{family.upper()}')
+    if prepared_dir and checkpoint:
+        return prepared_dir, checkpoint
+    return _available_evaluations(repo_root).get(family, (None, None))
+
+
+def test_the_DISCOVERY_finds_all_three_families_in_the_shipped_config(repo_root):
+    """⭐ Runs ALWAYS, with no artifacts, and it is the test that keeps the two below from going quietly dormant. If the
+    eval config's ``output-path`` leaf were renamed, discovery would return nothing, both tests would skip forever, and
+    the suite would still be green — the same failure mode the env-var gating had, just better hidden."""
+    declared = _configured_evaluations(repo_root)
+    assert set(declared) == set(FAMILIES), sorted(declared)
+    for family, (prepared_dir, model_path) in declared.items():
+        assert model_path.endswith('best_model.ckpt'), (family, model_path)
+        assert 'prepared' in prepared_dir, (family, prepared_dir)
 
 
 def _run_stage(repo_root, prepared_dir, model_path, model_family, out_dir, report_dir, metrics_path):
@@ -402,14 +460,14 @@ def _check_outputs(label, metrics_path, report_dir):
     return set(metrics)
 
 
-@pytest.mark.parametrize('family', ['diffusion', 'mc_dropout', 'deterministic_unet'])
+@pytest.mark.parametrize('family', FAMILIES)
 def test_the_stage_scores_each_family_on_REAL_artifacts(family, repo_root, tmp_path):
-    """Set ``PROB_EVAL_PREPARED`` to a prepared directory (the ``daily`` leaf) and ``PROB_EVAL_<FAMILY>`` to a
-    checkpoint."""
-    prepared_dir = _env('PROB_EVAL_PREPARED')
-    checkpoint = _env(f'PROB_EVAL_{family.upper()}')
+    """Runs as soon as that family's pipeline has produced a checkpoint — no environment setup needed. Override with
+    ``PROB_EVAL_PREPARED`` + ``PROB_EVAL_<FAMILY>`` to point at something the configs do not name."""
+    prepared_dir, checkpoint = _artifacts_for(repo_root, family)
     if not (prepared_dir and checkpoint):
-        pytest.skip(f'set PROB_EVAL_PREPARED and PROB_EVAL_{family.upper()}')
+        pytest.skip(f'no {family} checkpoint yet — run its pipeline (or its *_smoke_cpu tier) first, '
+                    f'or set PROB_EVAL_PREPARED and PROB_EVAL_{family.upper()}')
 
     out_dir = str(tmp_path / family / 'eval')
     report_dir = str(tmp_path / family / 'report')
@@ -421,16 +479,17 @@ def test_the_stage_scores_each_family_on_REAL_artifacts(family, repo_root, tmp_p
 
 
 def test_all_available_families_are_scored_by_the_SAME_metric_suite(repo_root, tmp_path):
-    """Two families reporting different metric keys means ``evaluate`` grew a family-specific path."""
-    prepared_dir = _env('PROB_EVAL_PREPARED')
-    available = {family: _env(f'PROB_EVAL_{family.upper()}')
-                 for family in ('diffusion', 'mc_dropout', 'deterministic_unet')}
-    available = {family: path for family, path in available.items() if path}
-    if not prepared_dir or len(available) < 2:
-        pytest.skip('needs PROB_EVAL_PREPARED and at least two family checkpoints')
+    """⭐ The invariant the shared evaluation exists for. Two families reporting different metric keys means
+    ``evaluate`` grew a family-specific path, and the cross-family comparison table would come out with holes in it.
+
+    Note each family is scored on ITS OWN prepared directory, which is what the pipelines actually produce — the
+    diffusion one differs in residual mode. The claim is that the SUITE is shared, not the data."""
+    available = {family: paths for family, paths in _available_evaluations(repo_root).items()}
+    if len(available) < 2:
+        pytest.skip(f'needs at least two family checkpoints; found {sorted(available)}')
 
     key_sets = {}
-    for family, checkpoint in available.items():
+    for family, (prepared_dir, checkpoint) in available.items():
         out_dir = str(tmp_path / family / 'eval')
         report_dir = str(tmp_path / family / 'report')
         os.makedirs(out_dir, exist_ok=True)

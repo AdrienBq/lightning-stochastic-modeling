@@ -45,15 +45,15 @@ Usage (standalone)::
     # full-target
     python src/stages/prepare_modeling.py \\
         --data_path $DATA_ROOT \\
-        --output_path outputs/deterministic_unet/prepared/daily \\
+        --output_path $OUTPUT_ROOT/deterministic_unet/prepared/daily \\
         --mode daily
 
     # residual (diffusion on the discrepancy of an upstream deterministic U-net)
     python src/stages/prepare_modeling.py \\
         --data_path $DATA_ROOT \\
-        --output_path outputs/diffusion/prepared/daily \\
+        --output_path $OUTPUT_ROOT/diffusion/prepared/daily \\
         --mode daily \\
-        --upstream_model_path outputs/deterministic_unet/best/best_model.ckpt
+        --upstream_model_path $OUTPUT_ROOT/deterministic_unet/best/best_model.ckpt
 """
 import json
 import logging

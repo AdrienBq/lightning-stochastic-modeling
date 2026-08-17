@@ -38,8 +38,8 @@ Usage (standalone)::
 
     python src/stages/tune.py \\
         --model_family deterministic_unet \\
-        --input_path outputs/deterministic_unet/prepared/daily \\
-        --output_path outputs/deterministic_unet/tuning \\
+        --input_path $OUTPUT_ROOT/deterministic_unet/prepared/daily \\
+        --output_path $OUTPUT_ROOT/deterministic_unet/tuning \\
         --model_config config/deterministic_unet/search_space.yaml \\
         --metrics_config config/eval/metrics.yaml \\
         --n_trials 60

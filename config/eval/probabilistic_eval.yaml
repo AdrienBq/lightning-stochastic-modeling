@@ -39,9 +39,9 @@ description: 'Cross-family comparison: one evaluation, one metric table, one set
 
 stages:
     - setup:
-        outputs: outputs
-        comparison: outputs/comparison
-        curves: outputs/comparison/curves
+        outputs: '{{$OUTPUT_ROOT}}'
+        comparison: '{{$OUTPUT_ROOT}}/comparison'
+        curves: '{{$OUTPUT_ROOT}}/comparison/curves'
 
     # ------------------------------------------------------------------------------------------------------------
     # 1) The common evaluation, once per family. Identical parameters apart from the paths, the family-specific
@@ -49,12 +49,12 @@ stages:
     # ------------------------------------------------------------------------------------------------------------
     # 1a) Deterministic U-net -- the baseline
     - evaluate:
-        input-path: outputs/deterministic_unet/prepared/daily
-        model-path: outputs/deterministic_unet/best/best_model.ckpt
-        output-path: outputs/comparison/evaluation/deterministic_unet
+        input-path: '{{$OUTPUT_ROOT}}/deterministic_and_mc_dropout/prepared/daily'
+        model-path: '{{$OUTPUT_ROOT}}/deterministic_unet/best/best_model.ckpt'
+        output-path: '{{$OUTPUT_ROOT}}/comparison/evaluation/deterministic_unet'
         metrics-config: config/eval/metrics.yaml
-        metrics-path: outputs/comparison/evaluation/deterministic_unet/test_metrics.json
-        report-path: outputs/comparison/reports/deterministic_unet
+        metrics-path: '{{$OUTPUT_ROOT}}/comparison/evaluation/deterministic_unet/test_metrics.json'
+        report-path: '{{$OUTPUT_ROOT}}/comparison/reports/deterministic_unet'
         split: test
         baselines: zero,climatology
         ensemble-size: 2                    # deterministic: no members emitted; never 1 (ddof=1)
@@ -66,12 +66,12 @@ stages:
 
     # 1b) MC-dropout
     - evaluate:
-        input-path: outputs/mc_dropout/prepared/daily
-        model-path: outputs/mc_dropout/best/best_model.ckpt
-        output-path: outputs/comparison/evaluation/mc_dropout
+        input-path: '{{$OUTPUT_ROOT}}/deterministic_and_mc_dropout/prepared/daily'
+        model-path: '{{$OUTPUT_ROOT}}/mc_dropout/best/best_model.ckpt'
+        output-path: '{{$OUTPUT_ROOT}}/comparison/evaluation/mc_dropout'
         metrics-config: config/eval/metrics.yaml
-        metrics-path: outputs/comparison/evaluation/mc_dropout/test_metrics.json
-        report-path: outputs/comparison/reports/mc_dropout
+        metrics-path: '{{$OUTPUT_ROOT}}/comparison/evaluation/mc_dropout/test_metrics.json'
+        report-path: '{{$OUTPUT_ROOT}}/comparison/reports/mc_dropout'
         split: test
         baselines: zero,climatology
         ensemble-size: 32
@@ -83,12 +83,12 @@ stages:
 
     # 1c) Flow-matching diffusion
     - evaluate:
-        input-path: outputs/diffusion/prepared/daily
-        model-path: outputs/diffusion/best/best_model.ckpt
-        output-path: outputs/comparison/evaluation/diffusion
+        input-path: '{{$OUTPUT_ROOT}}/diffusion/prepared/daily'
+        model-path: '{{$OUTPUT_ROOT}}/diffusion/best/best_model.ckpt'
+        output-path: '{{$OUTPUT_ROOT}}/comparison/evaluation/diffusion'
         metrics-config: config/eval/metrics.yaml
-        metrics-path: outputs/comparison/evaluation/diffusion/test_metrics.json
-        report-path: outputs/comparison/reports/diffusion
+        metrics-path: '{{$OUTPUT_ROOT}}/comparison/evaluation/diffusion/test_metrics.json'
+        report-path: '{{$OUTPUT_ROOT}}/comparison/reports/diffusion'
         split: test
         baselines: zero,climatology
         sampling-steps: 50
@@ -103,17 +103,17 @@ stages:
     # 2) The comparison layer: one table, one set of overlaid curves.
     # ------------------------------------------------------------------------------------------------------------
     - tabulate_metrics:
-        output-path: outputs/comparison/metrics_comparison_test.csv
-        Deterministic-UNet: outputs/comparison/evaluation/deterministic_unet/test_metrics.json
-        MC-Dropout:         outputs/comparison/evaluation/mc_dropout/test_metrics.json
-        Diffusion:          outputs/comparison/evaluation/diffusion/test_metrics.json
+        output-path: '{{$OUTPUT_ROOT}}/comparison/metrics_comparison_test.csv'
+        Deterministic-UNet: '{{$OUTPUT_ROOT}}/comparison/evaluation/deterministic_unet/test_metrics.json'
+        MC-Dropout:         '{{$OUTPUT_ROOT}}/comparison/evaluation/mc_dropout/test_metrics.json'
+        Diffusion:          '{{$OUTPUT_ROOT}}/comparison/evaluation/diffusion/test_metrics.json'
         # selected-metrics: average_precision_occurrence,ets_occurrence,sedi_occurrence,mae_cond_pos,crps,crps_occ,spread_skill_ratio,rank_histogram_reliability
 
     - combine_curves:
-        output-path: outputs/comparison/curves
-        Deterministic-UNet: outputs/comparison/reports/deterministic_unet
-        MC-Dropout:         outputs/comparison/reports/mc_dropout
-        Diffusion:          outputs/comparison/reports/diffusion
+        output-path: '{{$OUTPUT_ROOT}}/comparison/curves'
+        Deterministic-UNet: '{{$OUTPUT_ROOT}}/comparison/reports/deterministic_unet'
+        MC-Dropout:         '{{$OUTPUT_ROOT}}/comparison/reports/mc_dropout'
+        Diffusion:          '{{$OUTPUT_ROOT}}/comparison/reports/diffusion'
 
 tags:                                                                               # tags to be applied to the run
     version: 1.0

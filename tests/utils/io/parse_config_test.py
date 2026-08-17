@@ -237,7 +237,7 @@ def test_the_cross_family_eval_configs_read_a_real_family_output(pipelines):
 def test_every_config_valued_parameter_points_at_a_file_that_EXISTS(repo_root, pipelines):
     """The corollary of the ``OUTPUT_PARAM_KEYS`` rule: a stale path silently degrades to a plain scalar in
     ``classify_params``, so the lazy cache stops invalidating on that input and a changed ``metrics.yaml`` no longer
-    busts the cache. Output paths under ``outputs/`` are absent by design and are not checked."""
+    busts the cache. Paths under ``{{$OUTPUT_ROOT}}`` are absent by design and are not checked."""
     missing = [(path, name, key, value) for path, config in pipelines.items()
                for name, params in _stage_params(config)
                for key, value in params.items()
@@ -272,3 +272,161 @@ def test_all_nine_prepare_blocks_keep_their_required_keys(pipelines):
     required = {'data-path', 'split-config', 'output-path', 'mode', 'features', 'hourly-threshold'}
     for keys in prepare_keys:
         assert required <= keys, sorted(required - keys)
+
+
+# =====================================================================================================================
+# Every written path is rooted at {{$OUTPUT_ROOT}}  (Step 4 block 4c-r)
+#
+# The outputs moved off the source tree because one daily prepared directory is ~20 GiB and a checkout cannot hold it.
+# The change touched ~70 paths across 11 files, and the failure mode of such a sweep is a HALF-MOVED config: some paths
+# under the new root, some still literal. That parses, runs, and reads a stale directory left by an earlier run.
+# =====================================================================================================================
+OUTPUT_KEYS = ('output-path', 'input-path', 'model-path', 'source-path', 'metrics-path', 'report-path')
+
+
+def _output_root_paths(config):
+    """Every stage parameter that names a place in the output tree, as ``(stage, key, value)``."""
+    for name, params in _stage_params(config):
+        if name == 'setup':                                      # setup's values are all output directories
+            for key, value in params.items():
+                if key != 'hard-clean':
+                    yield name, key, value
+            continue
+        for key, value in params.items():
+            if key in OUTPUT_KEYS or (name in ('tabulate_metrics', 'combine_curves') and key[0].isupper()):
+                yield name, key, value
+
+
+def test_NO_written_path_is_a_bare_relative_directory(repo_root, monkeypatch):
+    """⭐ The regression guard for the whole relocation. Parsed with ``OUTPUT_ROOT`` set to a marker, every output-tree
+    path must start with it — a path that does not is one the sweep missed, and it would be read or written inside the
+    git checkout while its siblings went to the cluster's scratch space."""
+    import glob
+
+    from src.utils.io.parse_config import parse_config
+
+    monkeypatch.setenv('OUTPUT_ROOT', '/MARKER')
+    stragglers = []
+    for path in sorted(glob.glob(os.path.join(repo_root, 'config/*/*.yaml'))):
+        config = parse_config(path)
+        if 'stages' not in config:
+            continue
+        for name, key, value in _output_root_paths(config):
+            if isinstance(value, str) and not value.startswith('/MARKER'):
+                stragglers.append(f'{os.path.basename(path)} :: {name}.{key} = {value}')
+    assert not stragglers, 'paths not rooted at {{$OUTPUT_ROOT}}:\n  ' + '\n  '.join(stragglers)
+
+
+def test_the_root_check_above_is_not_VACUOUS(repo_root, monkeypatch):
+    """It would pass trivially if ``_output_root_paths`` yielded nothing — e.g. after a key rename. Twelve pipelines
+    with six-odd written paths each means dozens; anything under ten means the collector stopped working."""
+    import glob
+
+    from src.utils.io.parse_config import parse_config
+
+    monkeypatch.setenv('OUTPUT_ROOT', '/MARKER')
+    collected = [entry for path in sorted(glob.glob(os.path.join(repo_root, 'config/*/*.yaml')))
+                 for entry in _output_root_paths(parse_config(path))]
+    assert len(collected) > 10, len(collected)
+
+
+def test_an_UNSET_output_root_leaves_a_path_at_the_FILESYSTEM_ROOT(monkeypatch, tmp_path):
+    """⚠️ The documented ``{{$VAR}}`` footgun, made executable. Substitution is textual and an unset variable becomes
+    the EMPTY STRING rather than an error, so the path becomes absolute at ``/`` — and ``os.path.join(root_path, …)``
+    then discards the repo root entirely. ``stages/setup.py`` is where that is caught; this pins WHY it has to be."""
+    from src.utils.io.parse_config import parse_config
+
+    monkeypatch.delenv('OUTPUT_ROOT', raising=False)
+    probe = tmp_path / 'probe.yaml'
+    probe.write_text("path: '{{$OUTPUT_ROOT}}/family/prepared/daily'\n")
+
+    substituted = parse_config(str(probe))['path']
+    assert substituted == '/family/prepared/daily'
+    assert os.path.join('/some/repo/root', substituted) == '/family/prepared/daily', \
+        'os.path.join discards everything before an absolute component — the reason this is not merely cosmetic'
+
+
+# =====================================================================================================================
+# The SHARED prepared directory  (Step 4 block 4c-r)
+#
+# The deterministic and MC-dropout families train on identical prepared data — the prepared directory is
+# family-agnostic and their `prepare_modeling` blocks differed in `output-path` alone — so they now write ONE shared
+# directory and the second pipeline to run skips preparation entirely. That saves ~20 GiB and a full pass per family.
+#
+# The invariant it creates: two pipelines writing one directory must ASK FOR THE SAME THING. They no longer can
+# disagree silently, because `prepare_modeling` raises when `mode` or `hourly-threshold` disagree with the targets on
+# disk — but the raise arrives at run time, after a preparation, and this catches it at test time instead.
+# =====================================================================================================================
+SHARED_PREPARED_FAMILIES = ('deterministic_unet', 'mc_dropout')
+
+
+def _prepare_blocks(repo_root, tier=''):
+    from src.utils.io.parse_config import parse_config
+
+    blocks = {}
+    for family in ('deterministic_unet', 'mc_dropout', 'diffusion'):
+        config = parse_config(os.path.join(repo_root, f'config/{family}/{family}{tier}.yaml'))
+        blocks[family] = next(params for stage in config['stages']
+                              for name, params in stage.items() if name == 'prepare_modeling')
+    return blocks
+
+
+@pytest.mark.parametrize('tier', ['', '_smoke_cpu', '_smoke_gpu'])
+def test_the_two_U_NET_families_prepare_into_ONE_shared_directory(tier, repo_root, monkeypatch):
+    monkeypatch.setenv('OUTPUT_ROOT', '/MARKER')
+    blocks = _prepare_blocks(repo_root, tier)
+
+    paths = {family: blocks[family]['output-path'] for family in SHARED_PREPARED_FAMILIES}
+    assert len(set(paths.values())) == 1, paths
+    assert 'deterministic_and_mc_dropout' in next(iter(paths.values()))
+
+
+@pytest.mark.parametrize('tier', ['', '_smoke_cpu', '_smoke_gpu'])
+def test_families_sharing_a_directory_pass_IDENTICAL_prepare_parameters(tier, repo_root, monkeypatch):
+    """⭐ The invariant the sharing creates. A parameter changed in one file and not the other means the second
+    pipeline finds targets built under different settings. ``prepare_modeling`` raises on that rather than training on
+    the wrong target — but only at run time, after somebody waited for a preparation. This is the same check, free."""
+    monkeypatch.setenv('OUTPUT_ROOT', '/MARKER')
+    blocks = _prepare_blocks(repo_root, tier)
+
+    first, second = (blocks[family] for family in SHARED_PREPARED_FAMILIES)
+    differing = {key: (first.get(key), second.get(key))
+                 for key in set(first) | set(second) if first.get(key) != second.get(key)}
+    assert not differing, f'{tier or "full"} tier: the shared prepare blocks disagree on {differing}'
+
+
+@pytest.mark.parametrize('tier', ['', '_smoke_cpu', '_smoke_gpu'])
+def test_DIFFUSION_keeps_its_OWN_prepared_directory(tier, repo_root, monkeypatch):
+    """⚠️ Not an oversight. In residual mode diffusion's preparation writes ``upstream/<date>.npy`` maps and flips
+    ``residual_target: true`` in ``prepared_config.json`` — and the DATASET keys the extra conditioning channel on
+    that flag. Sharing would give the two U-net families a 6th input channel, and their checkpoints, built for
+    ``5 x 24``, would mismatch on ``in_channels``.
+
+    In FULL-target mode the directory would in fact be identical, which is exactly what makes sharing a trap rather
+    than an optimisation: it would work until the first residual run."""
+    monkeypatch.setenv('OUTPUT_ROOT', '/MARKER')
+    blocks = _prepare_blocks(repo_root, tier)
+
+    assert blocks['diffusion']['output-path'] != blocks['deterministic_unet']['output-path']
+    assert 'upstream-model-path' in blocks['diffusion'], \
+        'the key whose presence is the reason for the separation'
+    for family in SHARED_PREPARED_FAMILIES:
+        assert 'upstream-model-path' not in blocks[family], family
+
+
+def test_the_MODEL_directories_stay_PER_FAMILY(repo_root, monkeypatch):
+    """Only the prepared DATA is shared. ``tuning`` / ``best`` / ``evaluation`` / ``reports`` hold different models and
+    different numbers, so a shared one would have the two families overwriting each other's ``best_model.ckpt``."""
+    from src.utils.io.parse_config import parse_config
+
+    monkeypatch.setenv('OUTPUT_ROOT', '/MARKER')
+    per_family = {}
+    for family in ('deterministic_unet', 'mc_dropout', 'diffusion'):
+        config = parse_config(os.path.join(repo_root, f'config/{family}/{family}.yaml'))
+        block = next(params for stage in config['stages']
+                     for name, params in stage.items() if name == 'setup')
+        per_family[family] = {key: value for key, value in block.items() if key != 'prepared'}
+
+    for key in ('tuning', 'best', 'evaluation', 'reports'):
+        values = {family: paths[key] for family, paths in per_family.items()}
+        assert len(set(values.values())) == 3, f'{key} is shared between families: {values}'

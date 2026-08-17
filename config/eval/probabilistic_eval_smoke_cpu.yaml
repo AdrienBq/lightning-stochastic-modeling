@@ -27,18 +27,18 @@ description: 'Cross-family comparison -- CPU smoke tier (the merge gate)'
 
 stages:
     - setup:
-        outputs: outputs
-        comparison: outputs/comparison_smoke_cpu
-        curves: outputs/comparison_smoke_cpu/curves
+        outputs: '{{$OUTPUT_ROOT}}'
+        comparison: '{{$OUTPUT_ROOT}}/comparison_smoke_cpu'
+        curves: '{{$OUTPUT_ROOT}}/comparison_smoke_cpu/curves'
 
     # 1a) Deterministic U-net -- the baseline
     - evaluate:
-        input-path: outputs/deterministic_unet_smoke_cpu/prepared/daily
-        model-path: outputs/deterministic_unet_smoke_cpu/best/best_model.ckpt
-        output-path: outputs/comparison_smoke_cpu/evaluation/deterministic_unet
+        input-path: '{{$OUTPUT_ROOT}}/deterministic_and_mc_dropout_smoke_cpu/prepared/daily'
+        model-path: '{{$OUTPUT_ROOT}}/deterministic_unet_smoke_cpu/best/best_model.ckpt'
+        output-path: '{{$OUTPUT_ROOT}}/comparison_smoke_cpu/evaluation/deterministic_unet'
         metrics-config: config/eval/metrics.yaml
-        metrics-path: outputs/comparison_smoke_cpu/evaluation/deterministic_unet/test_metrics.json
-        report-path: outputs/comparison_smoke_cpu/reports/deterministic_unet
+        metrics-path: '{{$OUTPUT_ROOT}}/comparison_smoke_cpu/evaluation/deterministic_unet/test_metrics.json'
+        report-path: '{{$OUTPUT_ROOT}}/comparison_smoke_cpu/reports/deterministic_unet'
         split: test
         baselines: zero,climatology
         ensemble-size: 2                    # NEVER 1: spread_skill_sums uses ddof=1
@@ -50,12 +50,12 @@ stages:
 
     # 1b) MC-dropout
     - evaluate:
-        input-path: outputs/mc_dropout_smoke_cpu/prepared/daily
-        model-path: outputs/mc_dropout_smoke_cpu/best/best_model.ckpt
-        output-path: outputs/comparison_smoke_cpu/evaluation/mc_dropout
+        input-path: '{{$OUTPUT_ROOT}}/deterministic_and_mc_dropout_smoke_cpu/prepared/daily'
+        model-path: '{{$OUTPUT_ROOT}}/mc_dropout_smoke_cpu/best/best_model.ckpt'
+        output-path: '{{$OUTPUT_ROOT}}/comparison_smoke_cpu/evaluation/mc_dropout'
         metrics-config: config/eval/metrics.yaml
-        metrics-path: outputs/comparison_smoke_cpu/evaluation/mc_dropout/test_metrics.json
-        report-path: outputs/comparison_smoke_cpu/reports/mc_dropout
+        metrics-path: '{{$OUTPUT_ROOT}}/comparison_smoke_cpu/evaluation/mc_dropout/test_metrics.json'
+        report-path: '{{$OUTPUT_ROOT}}/comparison_smoke_cpu/reports/mc_dropout'
         split: test
         baselines: zero,climatology
         ensemble-size: 2
@@ -67,12 +67,12 @@ stages:
 
     # 1c) Flow-matching diffusion
     - evaluate:
-        input-path: outputs/diffusion_smoke_cpu/prepared/daily
-        model-path: outputs/diffusion_smoke_cpu/best/best_model.ckpt
-        output-path: outputs/comparison_smoke_cpu/evaluation/diffusion
+        input-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/prepared/daily'
+        model-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/best/best_model.ckpt'
+        output-path: '{{$OUTPUT_ROOT}}/comparison_smoke_cpu/evaluation/diffusion'
         metrics-config: config/eval/metrics.yaml
-        metrics-path: outputs/comparison_smoke_cpu/evaluation/diffusion/test_metrics.json
-        report-path: outputs/comparison_smoke_cpu/reports/diffusion
+        metrics-path: '{{$OUTPUT_ROOT}}/comparison_smoke_cpu/evaluation/diffusion/test_metrics.json'
+        report-path: '{{$OUTPUT_ROOT}}/comparison_smoke_cpu/reports/diffusion'
         split: test
         baselines: zero,climatology
         sampling-steps: 8
@@ -85,16 +85,16 @@ stages:
 
     # 2) The comparison layer -- the gate itself
     - tabulate_metrics:
-        output-path: outputs/comparison_smoke_cpu/metrics_comparison_test.csv
-        Deterministic-UNet: outputs/comparison_smoke_cpu/evaluation/deterministic_unet/test_metrics.json
-        MC-Dropout:         outputs/comparison_smoke_cpu/evaluation/mc_dropout/test_metrics.json
-        Diffusion:          outputs/comparison_smoke_cpu/evaluation/diffusion/test_metrics.json
+        output-path: '{{$OUTPUT_ROOT}}/comparison_smoke_cpu/metrics_comparison_test.csv'
+        Deterministic-UNet: '{{$OUTPUT_ROOT}}/comparison_smoke_cpu/evaluation/deterministic_unet/test_metrics.json'
+        MC-Dropout:         '{{$OUTPUT_ROOT}}/comparison_smoke_cpu/evaluation/mc_dropout/test_metrics.json'
+        Diffusion:          '{{$OUTPUT_ROOT}}/comparison_smoke_cpu/evaluation/diffusion/test_metrics.json'
 
     - combine_curves:
-        output-path: outputs/comparison_smoke_cpu/curves
-        Deterministic-UNet: outputs/comparison_smoke_cpu/reports/deterministic_unet
-        MC-Dropout:         outputs/comparison_smoke_cpu/reports/mc_dropout
-        Diffusion:          outputs/comparison_smoke_cpu/reports/diffusion
+        output-path: '{{$OUTPUT_ROOT}}/comparison_smoke_cpu/curves'
+        Deterministic-UNet: '{{$OUTPUT_ROOT}}/comparison_smoke_cpu/reports/deterministic_unet'
+        MC-Dropout:         '{{$OUTPUT_ROOT}}/comparison_smoke_cpu/reports/mc_dropout'
+        Diffusion:          '{{$OUTPUT_ROOT}}/comparison_smoke_cpu/reports/diffusion'
 
 tags:                                                                               # tags to be applied to the run
     version: 1.0

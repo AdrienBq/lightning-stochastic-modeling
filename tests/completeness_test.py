@@ -171,10 +171,10 @@ def test_function_census_is_stable(repo_root):
 
     History: 291 at the end of Step 3. Step 4 block 4a added `prepare_modeling`'s 14 functions and
     `data.high_lightning_days` (306); block 4b added `tune`'s 2 and `retrain_best`'s 2 (310); block 4c added
-    `evaluate`'s 3 (313).
+    `evaluate`'s 3 (313); block 4c-r added `setup.looks_like_an_unset_root` (314).
     """
     total = sum(1 for _ in _all_functions(repo_root))
-    assert total == 313, f'the testable surface moved from 313 to {total}; re-scope the coverage work-list'
+    assert total == 314, f'the testable surface moved from 314 to {total}; re-scope the coverage work-list'
 
 
 def test_exemption_list_has_not_grown(repo_root):

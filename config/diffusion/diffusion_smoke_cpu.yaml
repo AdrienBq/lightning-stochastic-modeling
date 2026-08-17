@@ -14,10 +14,10 @@ description: 'Flow-matching diffusion -- CPU smoke tier'
 # residual path as well, point it at the CPU smoke tier's own upstream checkpoint -- NOT at a real one, whose feature
 # normalization was fitted on different days:
 #
-#     export UPSTREAM_MODEL=outputs/deterministic_unet_smoke_cpu/best/best_model.ckpt
+#     export UPSTREAM_MODEL=$OUTPUT_ROOT/deterministic_unet_smoke_cpu/best/best_model.ckpt
 #
 # and run config/deterministic_unet/deterministic_unet_smoke_cpu.yaml first. Changing UPSTREAM_MODEL changes the input channel count, so
-# delete outputs/diffusion_smoke_cpu/prepared (or set overwrite: true) when toggling it.
+# delete $OUTPUT_ROOT/diffusion_smoke_cpu/prepared (or set overwrite: true) when toggling it.
 #
 # `sampling-steps` is cut to 8: ODE integration is the dominant cost of a CPU diffusion evaluation, and the smoke run
 # is checking that generation runs at all, not that it converges.
@@ -27,17 +27,17 @@ description: 'Flow-matching diffusion -- CPU smoke tier'
 
 stages:
     - setup:
-        outputs: outputs
-        prepared: outputs/diffusion_smoke_cpu/prepared
-        tuning: outputs/diffusion_smoke_cpu/tuning
-        best: outputs/diffusion_smoke_cpu/best
-        evaluation: outputs/diffusion_smoke_cpu/evaluation
-        reports: outputs/diffusion_smoke_cpu/reports
+        outputs: '{{$OUTPUT_ROOT}}'
+        prepared: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/prepared'
+        tuning: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/tuning'
+        best: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/best'
+        evaluation: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/evaluation'
+        reports: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/reports'
 
     - prepare_modeling:
         data-path: '{{$DATA_ROOT}}'
         split-config: config/split/split_smoke_cpu.yaml
-        output-path: outputs/diffusion_smoke_cpu/prepared/daily
+        output-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/prepared/daily'
         mode: daily
         feature-aggregation: hourly_stack
         features: MU_LI,MU_MIXR,RH_500850,cp,lsm
@@ -54,11 +54,11 @@ stages:
     - tune:
         model-family: diffusion
         model-type: diffusion
-        input-path: outputs/diffusion_smoke_cpu/prepared/daily
+        input-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/prepared/daily'
         model-config: config/diffusion/search_space.yaml
         metrics-config: config/eval/metrics.yaml
-        output-path: outputs/diffusion_smoke_cpu/tuning
-        metrics-path: outputs/diffusion_smoke_cpu/tuning/best_trial_metrics.json
+        output-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/tuning'
+        metrics-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/tuning/best_trial_metrics.json'
         n-trials: 1
         sampler: random
         max-epochs: 1
@@ -73,11 +73,11 @@ stages:
     - retrain_best:
         model-family: diffusion
         model-type: diffusion
-        source-path: outputs/diffusion_smoke_cpu/tuning
-        input-path: outputs/diffusion_smoke_cpu/prepared/daily
+        source-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/tuning'
+        input-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/prepared/daily'
         metrics-config: config/eval/metrics.yaml
-        output-path: outputs/diffusion_smoke_cpu/best
-        metrics-path: outputs/diffusion_smoke_cpu/best/best_trial_metrics.json
+        output-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/best'
+        metrics-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/best/best_trial_metrics.json'
         max-epochs: 1
         early-stopping-patience: 1
         accelerator: cpu
@@ -86,12 +86,12 @@ stages:
         progress-bar: true
 
     - evaluate:
-        input-path: outputs/diffusion_smoke_cpu/prepared/daily
-        model-path: outputs/diffusion_smoke_cpu/best/best_model.ckpt
-        output-path: outputs/diffusion_smoke_cpu/evaluation
+        input-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/prepared/daily'
+        model-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/best/best_model.ckpt'
+        output-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/evaluation'
         metrics-config: config/eval/metrics.yaml
-        metrics-path: outputs/diffusion_smoke_cpu/evaluation/test_metrics.json
-        report-path: outputs/diffusion_smoke_cpu/reports
+        metrics-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/evaluation/test_metrics.json'
+        report-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/reports'
         split: test
         baselines: zero,climatology
         sampling-steps: 8                   # minimum viable ODE integration; cost is M x steps per item on CPU

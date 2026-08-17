@@ -28,7 +28,7 @@ description: 'Flow-matching parameterization of lightning, optionally residual o
 #     as a third batch item) and learns the DISCREPANCY, returning clamp(upstream + residual). The raw targets are
 #     untouched, so the baselines, the target statistics and the whole metric suite stay in the target space.
 #
-#     export UPSTREAM_MODEL=outputs/deterministic_unet/best/best_model.ckpt
+#     export UPSTREAM_MODEL=$OUTPUT_ROOT/deterministic_unet/best/best_model.ckpt
 #
 #   The upstream comes from config/deterministic_unet/deterministic_unet.yaml -- run that pipeline first. Toggling the mode changes the
 #   input channel count, so switch output directories (or set overwrite: true on prepare) rather than reusing a
@@ -41,12 +41,12 @@ description: 'Flow-matching parameterization of lightning, optionally residual o
 
 stages:
     - setup:
-        outputs: outputs
-        prepared: outputs/diffusion/prepared
-        tuning: outputs/diffusion/tuning
-        best: outputs/diffusion/best
-        evaluation: outputs/diffusion/evaluation
-        reports: outputs/diffusion/reports
+        outputs: '{{$OUTPUT_ROOT}}'
+        prepared: '{{$OUTPUT_ROOT}}/diffusion/prepared'
+        tuning: '{{$OUTPUT_ROOT}}/diffusion/tuning'
+        best: '{{$OUTPUT_ROOT}}/diffusion/best'
+        evaluation: '{{$OUTPUT_ROOT}}/diffusion/evaluation'
+        reports: '{{$OUTPUT_ROOT}}/diffusion/reports'
 
     # ------------------------------------------------------------------------------------------------------------
     # 1) Data preparation. Identical to the other two families, plus the optional upstream pass that turns the
@@ -55,7 +55,7 @@ stages:
     - prepare_modeling:
         data-path: '{{$DATA_ROOT}}'         # dataset root; NEVER hardcode a path
         split-config: config/split/split.yaml     # the shared year-based split (see CLAUDE.md "Data")
-        output-path: outputs/diffusion/prepared/daily
+        output-path: '{{$OUTPUT_ROOT}}/diffusion/prepared/daily'
         mode: daily                         # daily | hourly
         feature-aggregation: hourly_stack   # stacks 24 hourly maps into C*24 input channels
         features: MU_LI,MU_MIXR,RH_500850,cp,lsm
@@ -79,12 +79,12 @@ stages:
     - tune:
         model-family: diffusion
         model-type: diffusion               # tagged on the mlflow run for ease of access
-        input-path: outputs/diffusion/prepared/daily
+        input-path: '{{$OUTPUT_ROOT}}/diffusion/prepared/daily'
         model-config: config/diffusion/search_space.yaml
         metrics-config: config/eval/metrics.yaml # supplies the climatology baseline behind the
                                             # mae_cond_ss_climatology selection component
-        output-path: outputs/diffusion/tuning
-        metrics-path: outputs/diffusion/tuning/best_trial_metrics.json
+        output-path: '{{$OUTPUT_ROOT}}/diffusion/tuning'
+        metrics-path: '{{$OUTPUT_ROOT}}/diffusion/tuning/best_trial_metrics.json'
         n-trials: 30                        # each trial pays for ODE sampling on the scoring pass
         sampler: tpe                        # random | tpe (tpe requires optuna)
         max-epochs: 50
@@ -105,11 +105,11 @@ stages:
     - retrain_best:
         model-family: diffusion
         model-type: diffusion
-        source-path: outputs/diffusion/tuning
-        input-path: outputs/diffusion/prepared/daily
+        source-path: '{{$OUTPUT_ROOT}}/diffusion/tuning'
+        input-path: '{{$OUTPUT_ROOT}}/diffusion/prepared/daily'
         metrics-config: config/eval/metrics.yaml
-        output-path: outputs/diffusion/best
-        metrics-path: outputs/diffusion/best/best_trial_metrics.json
+        output-path: '{{$OUTPUT_ROOT}}/diffusion/best'
+        metrics-path: '{{$OUTPUT_ROOT}}/diffusion/best/best_trial_metrics.json'
         max-epochs: 80
         early-stopping-patience: 10
         accelerator: auto
@@ -124,12 +124,12 @@ stages:
     # residual_* report figures populate as well; they self-skip otherwise.
     # ------------------------------------------------------------------------------------------------------------
     - evaluate:
-        input-path: outputs/diffusion/prepared/daily
-        model-path: outputs/diffusion/best/best_model.ckpt
-        output-path: outputs/diffusion/evaluation
+        input-path: '{{$OUTPUT_ROOT}}/diffusion/prepared/daily'
+        model-path: '{{$OUTPUT_ROOT}}/diffusion/best/best_model.ckpt'
+        output-path: '{{$OUTPUT_ROOT}}/diffusion/evaluation'
         metrics-config: config/eval/metrics.yaml
-        metrics-path: outputs/diffusion/evaluation/test_metrics.json
-        report-path: outputs/diffusion/reports
+        metrics-path: '{{$OUTPUT_ROOT}}/diffusion/evaluation/test_metrics.json'
+        report-path: '{{$OUTPUT_ROOT}}/diffusion/reports'
         split: test                         # valid | test
         baselines: zero,climatology         # no persistence: a diagnostic parameterization has no past observation
         sampling-steps: 50                  # ODE steps per draw at evaluation; more than during tuning, since

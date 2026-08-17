@@ -130,7 +130,7 @@ python run_project.py config/deterministic_unet/deterministic_unet_smoke_cpu.yam
 python run_project.py config/mc_dropout/mc_dropout_smoke_cpu.yaml MY_EXPERIMENT
 
 # …or built on the upstream (weights for mc_dropout, predictions for diffusion)
-export UPSTREAM_MODEL=outputs/deterministic_unet_smoke_cpu/best/best_model.ckpt
+export UPSTREAM_MODEL=$OUTPUT_ROOT/deterministic_unet_smoke_cpu/best/best_model.ckpt
 python run_project.py config/diffusion/diffusion_smoke_cpu.yaml MY_EXPERIMENT
 
 # finally the cross-family comparison — the proof all three report the same metrics

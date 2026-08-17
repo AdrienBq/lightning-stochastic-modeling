@@ -39,9 +39,9 @@ There is nothing left to configure per call.
 Usage (standalone)::
 
     python src/stages/evaluate.py \\
-        --input_path outputs/diffusion/prepared/daily \\
-        --model_path outputs/diffusion/best/best_model.ckpt \\
-        --output_path outputs/diffusion/evaluation \\
+        --input_path $OUTPUT_ROOT/diffusion/prepared/daily \\
+        --model_path $OUTPUT_ROOT/diffusion/best/best_model.ckpt \\
+        --output_path $OUTPUT_ROOT/diffusion/evaluation \\
         --metrics_config config/eval/metrics.yaml \\
         --split test --ensemble_size 32
 """
