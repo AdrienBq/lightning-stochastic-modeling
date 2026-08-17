@@ -211,6 +211,30 @@ def test_the_mc_dropout_rate_is_ours_not_the_upstreams(upstream_checkpoint, mc_t
     assert warm.hparams['trial']['unet']['dropout'] == pytest.approx(0.3)
 
 
+def test_the_warm_start_works_at_the_SHIPPED_blocks_per_level(
+        unet_trial, mc_trial, normalization, target_stats, save_checkpoint):
+    """🐛 The Step 4 block 4e gate failure, pinned at the level it actually happened.
+
+    Every test above builds its upstream from the shared UNET fixture, whose ``blocks_per_level`` is **1**. Every
+    shipped search space FIXES it at **2**. At 1 the conditional ``Dropout2d`` landed after the last layer and shifted
+    nothing, so a dropout-0 checkpoint loaded into a dropout-0.2 net and the whole suite was green — while on real data
+    the warm start failed on its first trial, every time, for every family combination. The fix was to emit the dropout
+    layer unconditionally (`unet.ConvBlock`); this test is what would have caught it.
+    """
+    deterministic = DeterministicUnetModule(unet_trial(unet={**unet_trial()['unet'], 'blocks_per_level': 2}),
+                                            5, target_stats(), normalization)
+    checkpoint = save_checkpoint(deterministic, 'upstream_blocks2.ckpt')
+
+    warm = MCDropoutModule.from_upstream(checkpoint, mc_trial(dropout_p=0.2), 5, target_stats(), normalization)
+
+    assert warm.warm_started is True
+    assert warm.hparams['trial']['unet']['blocks_per_level'] == 2, 'the architecture comes from the checkpoint'
+    # the weights are the upstream's, not a fresh initialisation
+    upstream_weights = deterministic.net.state_dict()
+    for key, tensor in warm.net.state_dict().items():
+        assert torch.allclose(tensor, upstream_weights[key]), key
+
+
 def test_the_architecture_key_list_covers_every_unet_field_that_matters():
     """The tuple drives the override log. A key missing from it means a discarded sampled value is never reported,
     which is the difference between a puzzling trials table and a readable one."""

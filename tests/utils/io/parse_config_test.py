@@ -371,6 +371,41 @@ def _prepare_blocks(repo_root, tier=''):
     return blocks
 
 
+@pytest.mark.parametrize('tier', ['_smoke_cpu', '_smoke_gpu'])
+def test_every_SMOKE_tier_sweeps_from_TRIAL_ZERO(tier, repo_root):
+    """🐛 The hole the Step 4 block 4e gate fell into, closed.
+
+    A smoke tier exists to prove every stage EXECUTES, and `lazy: false` is what stops the pipeline cache skipping one.
+    But ``run_sweep`` keeps its own optuna store inside the tune stage's ``output-path`` and resumes from it, which
+    `lazy` does not govern at all — so a second smoke run logged "keeping 2 recorded trial(s)", ran no trial, restored
+    the previous best checkpoint and reported success. The gate passed while executing nothing, and the stale
+    checkpoint it restored had been built by superseded code.
+
+    `restart: true` is therefore not a preference in these tiers. A resume has no value at one or two trials, and its
+    cost is a gate that cannot fail.
+    """
+    from src.utils.io.parse_config import parse_config
+
+    for family in ('deterministic_unet', 'mc_dropout', 'diffusion'):
+        config = parse_config(os.path.join(repo_root, f'config/{family}/{family}{tier}.yaml'))
+        tune_block = next(params for stage in config['stages']
+                          for name, params in stage.items() if name == 'tune')
+        assert tune_block.get('restart') is True, f'{family}{tier}: the sweep may resume and skip every trial'
+        assert config['lazy'] is False, f'{family}{tier}: the pipeline cache may skip a stage'
+
+
+def test_the_FULL_tiers_do_NOT_force_a_restart(repo_root):
+    """The other side, so the rule above is not applied where it would hurt: a full sweep is 30-40 trials and hours
+    long, and resuming an interrupted one is the feature. Only the smoke tiers, whose trials are worthless, discard it."""
+    from src.utils.io.parse_config import parse_config
+
+    for family in ('deterministic_unet', 'mc_dropout', 'diffusion'):
+        config = parse_config(os.path.join(repo_root, f'config/{family}/{family}.yaml'))
+        tune_block = next(params for stage in config['stages']
+                          for name, params in stage.items() if name == 'tune')
+        assert 'restart' not in tune_block, f'{family}: a full sweep must be resumable after an interruption'
+
+
 @pytest.mark.parametrize('tier', ['', '_smoke_cpu', '_smoke_gpu'])
 def test_the_two_U_NET_families_prepare_into_ONE_shared_directory(tier, repo_root, monkeypatch):
     monkeypatch.setenv('OUTPUT_ROOT', '/MARKER')

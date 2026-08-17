@@ -13,8 +13,10 @@ ONE backbone, three families. The deterministic U-net trains it directly; MC-dro
 active at inference (:func:`enable_mc_dropout`); diffusion conditions it on the flow state. Nothing here is
 family-specific, which is what keeps the three comparable at equal architecture:
 
-- ``ConvBlock`` already emits ``nn.Dropout2d`` whenever ``unet.dropout > 0``, so the MC-dropout family needs no
-  architectural change at all -- only the eval-time mode flip.
+- ``ConvBlock`` ALWAYS emits an ``nn.Dropout2d`` (with ``p = unet.dropout``, which may be 0), so the MC-dropout family
+  needs no architectural change at all -- only the eval-time mode flip. Emitting it unconditionally is what makes the
+  two families' ``state_dict`` KEYS identical, and therefore what makes the warm start possible; see the comment on
+  :class:`ConvBlock` for the bug that taught us this.
 - ``Fp32BilinearUpsample`` is PARAMETER-FREE, so a checkpoint is interchangeable with one trained against a plain
   ``nn.Upsample``. That is what lets MC-dropout warm-start from a deterministic U-net checkpoint.
 """
@@ -37,8 +39,9 @@ def enable_mc_dropout(module: nn.Module) -> None:
     carries no running statistics, so a member's output does not depend on the rest of its batch. Under BatchNorm
     the members would additionally covary through the batch.
 
-    Silent no-op when ``unet.dropout == 0`` — :class:`ConvBlock` then contains no ``Dropout2d`` at all and every
-    "member" is identical, which ``spread_skill_sums`` reports as zero spread rather than an error.
+    Silent no-op when ``unet.dropout == 0``: the ``Dropout2d`` submodules are still THERE (:class:`ConvBlock` emits
+    them unconditionally so the state-dict keys do not depend on the dropout value), but ``p = 0`` makes each an
+    identity, so every "member" is identical — which ``spread_skill_sums`` reports as zero spread rather than an error.
     """
     for submodule in module.modules():
         if isinstance(submodule, nn.Dropout2d):
@@ -80,8 +83,20 @@ class ConvBlock(nn.Module):
             layers.append(nn.Conv2d(channels, out_channels, kernel_size, padding=kernel_size // 2))
             layers.append(make_normalization(normalization, out_channels))
             layers.append(make_activation(activation))
-            if dropout > 0:
-                layers.append(nn.Dropout2d(dropout))
+            # 🐛 ALWAYS appended, never conditionally on `dropout > 0`. `Dropout2d(0.0)` is an identity, so this costs
+            # nothing — but the layer's PRESENCE is what keeps the `nn.Sequential` numbering identical whether dropout
+            # is on or off, and those indices ARE the state_dict keys.
+            #
+            # Inserting it conditionally broke the MC-dropout warm start outright: at `blocks_per_level: 2` (the value
+            # every shipped search space fixes) a deterministic checkpoint carries `body.3`/`body.4` while a
+            # dropout-bearing net expects `body.4`/`body.5`, so `from_upstream`'s strict `load_state_dict` failed on
+            # every key with "size mismatch for body.4.weight: [64] vs [64, 64, 3, 3]" — a norm where a conv was
+            # expected. The deterministic family FIXES `dropout: 0.0` and MC-dropout REQUIRES dropout > 0, so the warm
+            # start could never have worked. Found by the Step 4 block 4e real-data gate; the unit tests missed it
+            # because `tests/conftest.py`'s UNET fixture uses `blocks_per_level: 1`, where the dropout lands after the
+            # last layer and nothing shifts. `diffusion.py`'s MLP block always inserted its dropout, so this now
+            # matches it.
+            layers.append(nn.Dropout2d(dropout))
             channels = out_channels
         self.body = nn.Sequential(*layers)
 

@@ -365,6 +365,39 @@ def test_the_deterministic_layout_is_two_map_panels_and_two_shared_colorbars(det
     assert tuple(deterministic_figure.get_size_inches()) == (11.0, 5.5)
 
 
+@pytest.mark.parametrize('layout', ['deterministic', 'stochastic'])
+def test_a_SAVED_map_figure_keeps_its_FULL_canvas(tmp_path, layout):
+    """🐛 The crop found by reading the block 4e gate's report, and the gap it exposed in this file.
+
+    A cartopy ``GeoAxes`` returns a NON-FINITE tight bbox, and matplotlib's tight-bbox machinery silently DISCARDS
+    non-finite bboxes instead of failing. With ``bbox_inches='tight'`` the saved box was therefore the union of the only
+    finite artists — the two colorbars and the suptitle — so an 11 x 5.5 in figure was written as 895 x 771 px instead
+    of 1650 x 825, the "Observed" panel was absent from the FILE, and the title sat at the left edge.
+
+    ⚠️ Every test above passes on the figure OBJECT: two panels, two colorbars, the right figsize. All of them were
+    green throughout, because nothing here had ever looked at what ``savefig`` actually wrote. That is the lesson worth
+    keeping — a figure test that never opens the file cannot see half the failure modes of saving one.
+    """
+    import matplotlib.image as mpimg
+
+    projection, data_crs = maps.geographic_context()
+    prediction, observation, members, _, _ = _report_arrays(n_items=1, seed=1)
+    if layout == 'deterministic':
+        figure = reporting._deterministic_day_figure(observation[0], prediction[0], '2015-07-14',
+                                                     projection, data_crs)
+    else:
+        day = members[0]
+        figure = reporting._stochastic_day_figure(observation[0], day.mean(axis=0), day.std(axis=0), day,
+                                                  '2015-07-14', projection, data_crs, np.random.default_rng(0))
+    expected = tuple(int(round(inches * 150)) for inches in figure.get_size_inches())
+
+    reporting._save_map_figure(figure, str(tmp_path), 'maps_canvas_probe')
+
+    height, width = mpimg.imread(os.path.join(str(tmp_path), 'maps_canvas_probe.png')).shape[:2]
+    assert (width, height) == expected, f'{layout}: saved {width}x{height}, figure declares {expected}'
+    assert os.path.exists(os.path.join(str(tmp_path), 'maps_canvas_probe.pdf')), 'the vector copy is saved too'
+
+
 def test_the_observed_panel_is_ONE_layer_and_the_predicted_panel_is_a_DIFF(deterministic_figure):
     """The asymmetry is the point of the layout: the observation has nothing to be over or under, so it is drawn in the
     warm palette alone, while the prediction is drawn as two masked layers against it."""
@@ -512,6 +545,58 @@ def test_the_map_figure_is_named_maps_most_extreme_days(metrics_config):
     configured = metrics_config['reporting']['figures']
     assert 'maps_most_extreme_days' in configured
     assert 'maps_worst_best_days' not in configured
+
+
+def test_the_confusion_matrix_AXES_match_the_way_its_CELLS_are_laid_out(tmp_path):
+    """🐛 The transposition found by reading the Step 4 block 4e gate's report, pinned.
+
+    ``misses`` is ``~pred & obs``, so ``[[hits, misses], [false_alarms, correct_negatives]]`` puts the OBSERVATION on
+    the rows and the PREDICTION on the columns. The labels used to say the opposite, which made the "obs yes" column
+    contain ``hits + false_alarms`` — for an over-forecasting model, every cell in the domain. The figure then read as
+    "lightning was observed at every pixel", which is impossible on a target that is 99.93 % zero, and it is the sort of
+    error that discredits a whole report rather than one panel.
+
+    The four counts are deliberately DISTINCT so any transposition or rotation moves a value into a cell this test
+    checks, and the labels are asserted together with the cell positions — either alone would still permit the bug.
+    """
+    captured = {}
+    original = reporting._save_figure
+
+    def spy(figure, path, name, formats):
+        captured['axes'] = list(figure.axes)
+        return original(figure, path, name, formats)
+
+    curves = {'confusion': {'occurrence': {'hits': 11, 'misses': 22, 'false_alarms': 33,
+                                           'correct_negatives': 44}}}
+    reporting._save_figure = spy
+    try:
+        reporting._confusion_matrix(curves, str(tmp_path), ['png'])
+    finally:
+        reporting._save_figure = original
+
+    axis = captured['axes'][0]
+    assert [label.get_text() for label in axis.get_xticklabels()] == ['pred yes', 'pred no']
+    assert [label.get_text() for label in axis.get_yticklabels()] == ['obs yes', 'obs no']
+
+    cells = {(round(text.get_position()[0]), round(text.get_position()[1])): text.get_text()
+             for text in axis.texts}
+    assert cells[(0, 0)] == '11', 'pred yes / obs yes must be the HITS'
+    assert cells[(1, 0)] == '22', 'pred NO / obs yes must be the MISSES'
+    assert cells[(0, 1)] == '33', 'pred yes / obs NO must be the FALSE ALARMS'
+    assert cells[(1, 1)] == '44', 'pred no / obs no must be the CORRECT NEGATIVES'
+
+
+def test_the_confusion_CSV_is_written_from_the_NAMED_keys(tmp_path):
+    """Why the transposition never reached the numbers: the CSV carries one named column per count, so it was right
+    while the figure was wrong. A reader comparing the two would have found the figure at fault — which is exactly what
+    happened."""
+    curves = {'confusion': {'occurrence': {'hits': 11, 'misses': 22, 'false_alarms': 33,
+                                           'correct_negatives': 44}}}
+    reporting._confusion_matrix(curves, str(tmp_path), ['png', 'csv'])
+
+    table = pd.read_csv(os.path.join(str(tmp_path), 'confusion_matrix.csv'))
+    row = table.iloc[0]
+    assert (row['hits'], row['misses'], row['false_alarms'], row['correct_negatives']) == (11, 22, 33, 44)
 
 
 @pytest.mark.source_invariant

@@ -98,7 +98,15 @@ def resolve_threshold(spec: dict, target_stats: dict, occurrence_event: Tuple[fl
 
     * ``absolute`` (the DEFAULT, and what the daily suite uses: the hour bands h3/h6/h12) — a plain value in target
       units, applied SYMMETRICALLY to both sides.
-    * ``occurrence`` — the evaluation-side occurrence event, also symmetric.
+    * ``occurrence`` — the evaluation-side occurrence event on the OBSERVATION side, with an optional ``pred_value``
+      giving the prediction side its own cut (``pred_strict`` optional, default inclusive).
+
+      ⚠️ **Supply ``pred_value`` for any REGRESSION run.** The occurrence event is ``target > 0``, and applied
+      symmetrically that asks whether the *predicted hours* are ``> 0`` — which a softplus/ReLU head satisfies at
+      essentially every cell, so the contingency table degenerates to hits + false alarms with zero misses and zero
+      correct negatives (POD = 1, frequency bias = 1/base-rate). ``pred_value: 1`` reads as "the model forecasts at
+      least one lightning-hour", which is the same ``pred >= k`` rule the h3/h6/h12 bands already use, at ``k = 1``.
+      Omitting it keeps the symmetric behaviour, which is right only where the prediction is genuinely 0/1.
     * ``probability`` — for the HOURLY CLASSIFICATION task: the prediction side is a decision threshold on the
       predicted probability (``value``, e.g. 0.5) and the observation side is the occurrence event, so the 0/1
       labels are read as they are rather than re-thresholded. An hourly pipeline's ``metrics.categorical.thresholds``
@@ -116,6 +124,11 @@ def resolve_threshold(spec: dict, target_stats: dict, occurrence_event: Tuple[fl
         return EventThreshold(obs_value=value, obs_strict=strict, pred_value=value, pred_strict=strict)
 
     if kind == 'occurrence':
+        # the OBSERVATION side is always the occurrence event, so every obs-conditioned metric (the conditional
+        # errors, the r2 / rank-correlation subgroups, FSS, the climatology Brier) is unaffected by `pred_value`
+        if 'pred_value' in spec:
+            return EventThreshold(occurrence_event[0], occurrence_event[1],
+                                  float(spec['pred_value']), bool(spec.get('pred_strict', False)))
         return EventThreshold(occurrence_event[0], occurrence_event[1], occurrence_event[0], occurrence_event[1])
     if kind == 'absolute':
         return symmetric(float(spec['value']))
@@ -505,13 +518,21 @@ def run_metric_suite(
             prediction, observation, spec.pred_value, spec.pred_strict,
             obs_threshold=spec.obs_value, obs_strict=spec.obs_strict
         )
-        if prediction_is_probability and spec.pred_value <= 0.0 and spec.pred_strict:
+        # A probability field admits only a cut strictly INSIDE (0, 1); anything else is degenerate in one direction
+        # or the other. Both ends matter, and the second only became reachable when the daily `occurrence` threshold
+        # gained `pred_value: 1`: at <= 0 every cell with any probability counts as a predicted event (pod ~ 1), and
+        # at >= 1 essentially none does (pod ~ 0). Neither raises, and both produce a full table of nonsense.
+        if prediction_is_probability and not (0.0 < spec.pred_value < 1.0):
+            direction = ('at > 0, so every cell with any non-zero probability counts as a predicted event (pod ~ 1, '
+                         'far ~ 1 - base_rate)' if spec.pred_value <= 0.0 else
+                         f'at {spec.pred_value:g}, which a probability essentially never reaches, so almost nothing '
+                         f'counts as a predicted event (pod ~ 0)')
             logger.warning(
-                f'Threshold "{threshold_name}" cuts the PREDICTION at > 0, but the prediction looks like a '
-                f'probability field. Every cell with any non-zero probability then counts as a predicted event, so '
-                f'pod ~ 1 and far ~ 1 - base_rate: the contingency scores for this threshold are meaningless. An '
-                f'hourly (classification) pipeline must use `kind: probability` thresholds in '
-                f'metrics.categorical.thresholds, e.g. `p50: {{kind: probability, value: 0.5}}`.'
+                f'Threshold "{threshold_name}" cuts the PREDICTION {direction} — but the prediction looks like a '
+                f'probability field, so the contingency scores for this threshold are meaningless. An hourly '
+                f'(classification) pipeline must use `kind: probability` thresholds in '
+                f'metrics.categorical.thresholds, e.g. `p50: {{kind: probability, value: 0.5}}` — not the daily '
+                f'suite\'s `occurrence` / hour-band entries.'
             )
         table = scores.categorical_scores(*counts)
         for score_name in table_scores:
@@ -528,7 +549,12 @@ def run_metric_suite(
         # the regression prediction otherwise (the occurrence head says nothing about intensity, so the hour bands
         # always read the prediction). score_max maps hours into [0, 1] for the ranking binning; being a fixed
         # monotone map it leaves the ranking metrics exactly invariant.
-        is_occurrence = spec.obs_event == (occurrence_value, occurrence_strict) and spec.is_symmetric
+        # Keyed on the OBSERVED event alone, deliberately not on `is_symmetric`. The threshold-free scores sweep every
+        # cut, so a threshold's prediction-side DECISION level is irrelevant to them — what matters is whether the
+        # event being ranked against is the occurrence event. Requiring symmetry here meant the daily `occurrence`
+        # threshold silently stopped using the probability the moment it gained a `pred_value`, dropping
+        # `dice_occurrence` and re-ranking `roc_auc` / `average_precision` off the hours field instead.
+        is_occurrence = spec.obs_event == (occurrence_value, occurrence_strict)
         use_probability = (probability is not None) and (is_occurrence or prediction_is_probability)
         continuous_field = probability if use_probability else prediction
         score_max = 1.0 if (use_probability or prediction_is_probability) else max(float(np.nanmax(prediction)), 1.0)

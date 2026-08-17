@@ -58,6 +58,10 @@ stages:
         max-epochs: 1
         early-stopping-patience: 1
         pruning: false                      # a 1-epoch trial has nothing to prune
+        restart: true                       # ALWAYS sweep from trial 0. run_sweep resumes from the optuna store
+                                            # in output-path, which the pipeline's `lazy: false` does NOT govern --
+                                            # so a re-run silently skipped every trial and restored the previous
+                                            # best, defeating a tier whose purpose is to execute every stage.
         accelerator: gpu
         devices: 1
         num-workers: 8

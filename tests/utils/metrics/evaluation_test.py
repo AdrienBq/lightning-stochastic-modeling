@@ -152,10 +152,65 @@ def test_resolve_threshold_probability_kind_splits_the_two_sides():
     assert (event.obs_value, event.obs_strict) == OCCURRENCE_EVENT   # the occurrence event, not the probability cut
 
 
-def test_resolve_threshold_occurrence_kind_is_symmetric():
+def test_resolve_threshold_occurrence_kind_is_symmetric_WITHOUT_a_pred_value():
     event = resolve_threshold({'kind': 'occurrence'}, {}, OCCURRENCE_EVENT)
     assert (event.pred_value, event.pred_strict) == OCCURRENCE_EVENT
     assert (event.obs_value, event.obs_strict) == OCCURRENCE_EVENT
+
+
+def test_the_occurrence_kind_takes_a_SEPARATE_prediction_cut():
+    """``pred_value`` gives the prediction side its own level while the observation side stays the occurrence event —
+    which is what keeps every observation-conditioned metric (mae_cond_pos, r2_occurrence, FSS, the climatology Brier)
+    unchanged by a decision-threshold choice."""
+    event = resolve_threshold({'kind': 'occurrence', 'pred_value': 1}, {}, OCCURRENCE_EVENT)
+    assert (event.obs_value, event.obs_strict) == OCCURRENCE_EVENT
+    assert (event.pred_value, event.pred_strict) == (1.0, False)      # pred >= 1, inclusive by default
+    assert not event.is_symmetric
+
+
+def test_a_REGRESSION_occurrence_cut_at_zero_makes_the_table_DEGENERATE(daily_field):
+    """🐛 The bug found by reading the block 4e gate's confusion matrix, pinned as the reason `pred_value` exists.
+
+    A softplus/ReLU head emits small POSITIVE hours almost everywhere, so cutting the prediction at ``> 0`` marks every
+    cell a predicted event: zero misses, zero correct negatives, POD = 1, frequency bias = 1/base-rate. Nothing raises
+    — the table is simply meaningless, and the confusion figure reads as "lightning everywhere".
+    """
+    import numpy as np
+
+    from src.utils.metrics import scores
+
+    observation = daily_field(n=2, seed=3)                            # sparse, mostly zero
+    prediction = np.full_like(observation, 0.2)                       # never exactly zero, never a whole hour
+    prediction[observation > 0] = 4.0                                 # right where it matters
+
+    symmetric = resolve_threshold({'kind': 'occurrence'}, {}, OCCURRENCE_EVENT)
+    hits, misses, false_alarms, correct_negatives = scores.contingency_counts(
+        prediction, observation, symmetric.pred_value, symmetric.pred_strict,
+        obs_threshold=symmetric.obs_value, obs_strict=symmetric.obs_strict
+    )
+    assert misses == 0 and correct_negatives == 0, 'the degeneracy this parameter exists to remove'
+    assert false_alarms == observation.size - hits
+
+    decided = resolve_threshold({'kind': 'occurrence', 'pred_value': 1}, {}, OCCURRENCE_EVENT)
+    hits, misses, false_alarms, correct_negatives = scores.contingency_counts(
+        prediction, observation, decided.pred_value, decided.pred_strict,
+        obs_threshold=decided.obs_value, obs_strict=decided.obs_strict
+    )
+    assert correct_negatives > 0, 'a sub-hour prediction over a dry cell must be a CORRECT NEGATIVE'
+    assert false_alarms == 0 and misses == 0                          # this fixture predicts the event exactly
+
+
+def test_the_SHIPPED_daily_suite_cuts_the_occurrence_PREDICTION_at_one_hour(metrics_config):
+    """The decision itself, pinned against the real config rather than a fixture: `pred >= 1` is the same rule the
+    h3/h6/h12 bands use at k=1, so the four thresholds form one consistent family (`obs >= k` vs `pred >= k`)."""
+    resolved = resolve_thresholds(metrics_config, {})
+
+    occurrence = resolved['occurrence']
+    assert (occurrence.obs_value, occurrence.obs_strict) == OCCURRENCE_EVENT
+    assert occurrence.pred_value == 1.0 and occurrence.pred_strict is False
+
+    for name, level in (('h3', 3.0), ('h6', 6.0), ('h12', 12.0)):
+        assert resolved[name].pred_value == level, f'{name} must keep its symmetric band'
 
 
 def test_resolve_occurrence_event_rejects_a_reintroduced_threshold():
@@ -593,7 +648,14 @@ def test_every_threshold_in_the_SHIPPED_suite_resolves(metrics_config):
     assert set(resolved) == {'occurrence', 'h3', 'h6', 'h12'}, sorted(resolved)
     for name, threshold in resolved.items():
         assert isinstance(threshold.obs_value, float), name
-        assert threshold.is_symmetric, f'{name}: the daily suite is entirely symmetric hour bands'
+
+    # The hour bands are symmetric; `occurrence` is NOT, and that asymmetry is the point. Its observed event is
+    # `> 0` while its prediction side cuts at one whole hour, because a regression head emits small positive hours
+    # nearly everywhere and a `> 0` prediction cut marks every cell an event (see
+    # test_a_REGRESSION_occurrence_cut_at_zero_makes_the_table_DEGENERATE).
+    for name in ('h3', 'h6', 'h12'):
+        assert resolved[name].is_symmetric, f'{name}: an hour band cuts both sides at the same level'
+    assert not resolved['occurrence'].is_symmetric
 
 
 def test_the_resolver_keeps_the_suites_own_threshold_NAMES():

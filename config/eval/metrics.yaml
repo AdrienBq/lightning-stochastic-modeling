@@ -95,8 +95,19 @@ baselines:
 # INTEGER target: on 0-24 the 0.999 quantile of the positive marginal lands on a single hour value, so p99 and
 # p99_9 stop being distinct events.
 thresholds:
-    occurrence: {kind: occurrence}                      # target > 0 — THE primary event under the
-                                                        # classification-first scope (denoising is in prepare)
+    occurrence: {kind: occurrence, pred_value: 1}       # observed: target > 0 — THE primary event under the
+                                                        # classification-first scope (denoising is in prepare).
+                                                        # ⚠️ pred_value 1 = "the model forecasts at least one
+                                                        # lightning-hour", the SAME `pred >= k` rule as the bands
+                                                        # below at k=1. Without it the prediction side would be
+                                                        # `hours > 0`, which a softplus head satisfies at nearly
+                                                        # every cell: the contingency table collapses to hits +
+                                                        # false alarms with NO misses and NO correct negatives, so
+                                                        # POD = 1 and frequency bias = 1/base-rate. The confusion
+                                                        # figure then reads as "lightning everywhere". The obs side
+                                                        # is untouched, so every observation-conditioned metric
+                                                        # (mae_cond_pos, r2_occurrence, FSS, the climatology Brier)
+                                                        # is unchanged.
     h3:  {kind: absolute, value: 3}                     # >= 3 hours with lightning that day
     h6:  {kind: absolute, value: 6}                     # >= 6 hours: an active convective day
     h12: {kind: absolute, value: 12}                    # >= 12 hours: the rare, all-day event

@@ -101,6 +101,50 @@ def test_the_head_is_named_head_not_regression_head(net):
 
 
 # =====================================================================================================================
+# The warm start's real precondition: the state_dict keys must not depend on the dropout value
+# =====================================================================================================================
+@pytest.mark.parametrize('blocks_per_level', [1, 2, 3])
+def test_the_state_dict_KEYS_do_not_depend_on_the_DROPOUT_value(net, blocks_per_level):
+    """🐛 The bug the Step 4 block 4e real-data gate found, pinned. ``ConvBlock`` used to append its ``Dropout2d`` only
+    when ``dropout > 0``, which SHIFTS every later index in the ``nn.Sequential`` — and those indices are the
+    ``state_dict`` keys. A deterministic checkpoint (``dropout: 0.0``, fixed by that family's search space) therefore
+    could not load into an MC-dropout net (``dropout > 0``, required by that family), so the warm start failed on every
+    trial with "size mismatch for backbone.stem.body.4.weight: [64] vs [64, 64, 3, 3]" — a norm where a conv was
+    expected.
+
+    ⚠️ Parametrized over ``blocks_per_level`` because that is exactly why the unit suite missed it: at 1 the dropout
+    lands after the last layer and nothing shifts, and ``tests/conftest.py``'s UNET fixture uses 1 while every shipped
+    search space FIXES 2. One value of a fixture constant was the whole difference between a green suite and a feature
+    that had never worked.
+    """
+    deterministic = net(dropout=0.0, blocks_per_level=blocks_per_level)
+    stochastic = net(dropout=0.2, blocks_per_level=blocks_per_level)
+
+    assert set(deterministic.state_dict()) == set(stochastic.state_dict())
+    for key, tensor in deterministic.state_dict().items():
+        assert tensor.shape == stochastic.state_dict()[key].shape, key
+
+
+@pytest.mark.parametrize('dropout', [0.0, 0.2])
+def test_the_dropout_submodules_are_present_at_EVERY_dropout_value(net, dropout):
+    """The other half: they are always there, and ``p`` carries the value. `enable_mc_dropout` finds them by type, so a
+    p=0 net has them too and flipping their mode is simply a no-op — which is what the docstring now claims."""
+    import torch.nn as nn
+
+    layers = [module for module in net(dropout=dropout).modules() if isinstance(module, nn.Dropout2d)]
+    assert layers, 'ConvBlock must emit its Dropout2d unconditionally'
+    assert all(layer.p == dropout for layer in layers)
+
+
+def test_a_DETERMINISTIC_checkpoint_loads_STRICTLY_into_a_dropout_net(net):
+    """The end the warm start actually needs, asserted through `load_state_dict(strict=True)` rather than through key
+    sets — that call is what `from_upstream` makes, and only it proves the two are genuinely interchangeable."""
+    upstream = net(dropout=0.0, blocks_per_level=2)
+    stochastic = net(dropout=0.25, blocks_per_level=2)
+    stochastic.load_state_dict(upstream.state_dict())        # strict by default: raises on any mismatch
+
+
+# =====================================================================================================================
 # The warm-start hole 3d-0 closed
 # =====================================================================================================================
 def test_the_platt_layer_lives_IN_the_net_state_dict(net):
@@ -247,20 +291,29 @@ def test_a_missing_unet_key_raises_rather_than_defaulting():
         UNetBackbone(IN_CHANNELS, {key: value for key, value in UNET.items() if key != 'kernel_size'})
 
 
-def test_a_dropout_layer_is_emitted_ONLY_when_the_rate_is_positive():
-    """At p=0 there is NO Dropout2d in the block at all — the layer is omitted, not merely inert. So MC-dropout with
-    `dropout_p = 0` would have nothing to flip and would produce M identical members, a zero spread and NaN
-    spread-skill, with no exception anywhere.
+def test_a_dropout_layer_is_emitted_at_EVERY_rate_but_p_ZERO_makes_it_INERT():
+    """MC-dropout with ``dropout_p = 0`` produces M identical members, a zero spread and a NaN spread-skill ratio with
+    no exception anywhere — which is why ``MCDropoutModule`` rejects ``dropout_p <= 0`` rather than tolerating it. This
+    is the other half of that argument (see mc_dropout_module_test.py).
 
-    That is the whole reason `MCDropoutModule` rejects `dropout_p <= 0` rather than tolerating it, and this is the
-    other half of that argument (see mc_dropout_module_test.py).
+    ⚠️ **The MECHANISM changed in block 4e and the conclusion did not.** The block used to omit the layer entirely at
+    p=0, so there was nothing for ``enable_mc_dropout`` to flip. It now always emits one, because the conditional
+    insertion shifted every later ``nn.Sequential`` index and so broke the warm start's strict state-dict load
+    (``test_the_state_dict_KEYS_do_not_depend_on_the_DROPOUT_value``). The layer is therefore present but INERT: p=0 is
+    an identity, so flipping its mode still changes nothing and the members are still identical.
     """
     def dropout_layers(rate):
         block = ConvBlock(4, 8, kernel_size=3, normalization='group', activation='relu', dropout=rate, blocks=1)
         return [m for m in block.modules() if isinstance(m, (nn.Dropout, nn.Dropout2d))]
 
-    assert dropout_layers(0.0) == [], 'a zero rate must emit no dropout layer'
-    assert dropout_layers(0.2), 'a positive rate must emit a dropout layer for enable_mc_dropout to flip'
+    assert len(dropout_layers(0.0)) == len(dropout_layers(0.2)) == 1, 'the layer count must not depend on the rate'
+    assert dropout_layers(0.0)[0].p == 0.0, 'a zero rate must leave the layer INERT rather than absent'
+    assert dropout_layers(0.2)[0].p == pytest.approx(0.2)
+
+    # inert means inert: at p=0 the layer is an identity even in TRAIN mode, which is what enable_mc_dropout flips
+    layer = dropout_layers(0.0)[0].train()
+    values = torch.randn(2, 8, 4, 4)
+    assert torch.equal(layer(values), values), 'p=0 must pass the tensor through unchanged even in train mode'
 
 
 @pytest.mark.parametrize('blocks', [1, 2, 3])

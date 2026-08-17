@@ -66,9 +66,20 @@ def _save_figure(figure, report_path: str, name: str, formats) -> None:
 
 def _save_map_figure(figure, report_path: str, name: str) -> None:
     """Persist a map figure as BOTH png (raster preview) and pdf (vector, for publication), regardless of the
-    ``formats`` requested for the line/table figures."""
-    figure.savefig(os.path.join(report_path, f'{name}.png'), dpi=150, bbox_inches='tight')
-    figure.savefig(os.path.join(report_path, f'{name}.pdf'), bbox_inches='tight')
+    ``formats`` requested for the line/table figures.
+
+    🐛 **No ``bbox_inches='tight'`` here, unlike the line figures.** A cartopy ``GeoAxes`` returns a NON-FINITE tight
+    bbox, and matplotlib's tight-bbox machinery silently DISCARDS non-finite bboxes rather than failing — so the saved
+    box was the union of the only finite artists, the two colorbars and the suptitle. Every map figure came out cropped
+    to roughly its right half: the "Observed" panel was absent from the file entirely and the title sat at the left
+    edge, which is how it was spotted. An 11 x 5.5 in figure saved 895 x 771 px instead of 1650 x 825.
+
+    Nothing is lost by dropping it: these figures are laid out EXPLICITLY (``add_gridspec(left=…, right=…)`` plus
+    hand-placed colorbar axes), so there is no stray whitespace for a tight box to trim. The line figures keep it —
+    plain Axes report finite bboxes and are not laid out by hand.
+    """
+    figure.savefig(os.path.join(report_path, f'{name}.png'), dpi=150)
+    figure.savefig(os.path.join(report_path, f'{name}.pdf'))
     plt.close(figure)
 
 
@@ -456,8 +467,14 @@ def _confusion_matrix(curves, report_path, formats):
         for row in range(2):
             for col in range(2):
                 axis.text(col, row, f'{table[row, col]:,.0f}', ha='center', va='center', fontsize=9)
-        axis.set_xticks([0, 1], ['obs yes', 'obs no'])
-        axis.set_yticks([0, 1], ['pred yes', 'pred no'])
+        # 🐛 The axes follow the LAYOUT above, and used to be the other way round. `misses` is `~pred & obs`, so
+        # row 0 = [hits, misses] is "observed yes" and column 0 = [hits, false_alarms] is "predicted yes": rows are the
+        # OBSERVATION, columns the PREDICTION. Labelled the other way, the "obs yes" column showed
+        # hits + false_alarms — every cell in the domain for a model that over-forecasts — so the figure read as
+        # "lightning was observed at every pixel", which is impossible on a 99.93 %-zero target. The CSV was never
+        # affected: it is written from the named keys. Found by reading the block 4e gate's report.
+        axis.set_xticks([0, 1], ['pred yes', 'pred no'])
+        axis.set_yticks([0, 1], ['obs yes', 'obs no'])
         axis.set_title(threshold_name, fontsize=10)
 
     figure.suptitle('Contingency counts per event threshold (log colour)', fontsize=12)
