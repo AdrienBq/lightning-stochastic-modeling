@@ -313,7 +313,38 @@ config so a change to one is a visible change to the other. The entire delta is 
 `tests/` would let them drift from the pipeline they exist to smoke-test — the one thing they must not do — and would
 break CLAUDE.md's documented three-tier convention plus the 19-config parse sweep in `parse_config_test.py`.
 
-### `tests/pipeline_e2e_test.py` — synthetic root, always runs
+### `tests/pipeline_e2e_test.py` — synthetic root, always runs. ✅ DONE in 4e (18 tests, ~115 s)
+
+**Four things the design above got wrong or did not know.** The rest of this section stands as written.
+
+1. 🐛 **`mlflow.projects` shells out to a BARE `python`, not `sys.executable`** — the first thing the test hit, and a
+   real portability wart rather than a test problem. With no `MLproject` file, MLflow's local backend builds
+   `python src/stages/<stage>.py ...`, so every stage subprocess resolves its interpreter from `PATH`. It works today
+   only because the launch scripts activate the venv first. The test prepends `os.path.dirname(sys.executable)` to the
+   subprocess `PATH`; the user-facing fix is Step 5's
+   ([recorded there](step-5-portability.md) with the options).
+2. ⚠️ **`EXPECTED_DAILY_KEYS` could not be asserted as a subset.** `evaluation_test.py`'s `daily_suite` fixture calls
+   `run_metric_suite` with a **non-None `probability`**, which no daily pipeline produces — `deterministic_module`
+   returns `probability=None` in daily mode because there is no occurrence head. So `explained_deviance` is
+   *structurally* absent from a real daily run, and two more keys (`fss_useful_scale_occurrence`,
+   `mae_bin_occurrence_h3`) are absent on a 2-day untrained split. The test imports the list and subtracts two named
+   exclusion tables, asserting **set equality on the difference** — so it fails both when a key disappears and when an
+   excluded key becomes emittable, which would mean the exclusion note is stale.
+3. ➕ **Only ONE parameter had to be rewritten** — `split-config`. Sizing the synthetic dataset at 12 days (8 train)
+   lets the shipped `feature-stats-days: 4` stand, so the derived config is otherwise the shipped pipeline verbatim,
+   and a test pins that exactly one non-comment line differs. Both roots come from the environment
+   (`DATA_ROOT` / `OUTPUT_ROOT`), which is the shipped mechanism, and `MLFLOW_TRACKING_URI` redirects the store into
+   `tmp_path` so a test run never writes into the checkout.
+4. ⚠️ **The comparison layer is tested with ONE family's artifacts under all three shipped labels.** Three trained
+   models would triple the runtime, and "the three families emit identical metric keys" genuinely needs three models —
+   it stays with the by-hand cross-family gate. What the e2e test proves instead is the plumbing no unit test can
+   reach: that `--Deterministic-UNet <path>` survives `run_project` → MLflow's parameter list → Fire's hyphen
+   substitution → the stage's `**kwargs`, and comes back out as a row label spelled the way the config spelled it.
+   Block 4d's unit tests call `tabulate` directly, so they cover `_display` and neither layer in front of it.
+
+**Anti-vacuity, checked:** three simultaneous mutations in different subsystems — branch A's space fallback in
+`_display`, one figure builder unwired in `combine_curves`, and a deliberately stale exclusion entry — each failed
+exactly its own test while the other 15 stayed green.
 
 Lives at the `tests/` root, like `completeness_test.py`, because it mirrors no single module — it exercises all of
 them. ⚠️ **Add it to `completeness_test.py`'s expected set (L110-111)** or
@@ -460,7 +491,7 @@ real gaps are.
 | `4c` ✅ | `evaluate` |
 | `4c-r` ✅ | *(unplanned)* every output behind `{{$OUTPUT_ROOT}}`, the `setup` unset-root guard, one shared U-net prepared dir |
 | `4d` ✅ | `tabulate_metrics` + `combine_curves` + `src/stages/README.md` — **every stage the configs name now exists** |
-| `4e` | `tests/pipeline_e2e_test.py`, then **by hand on real data**: (a) each family's `*_smoke_cpu` pipeline end to end, proving the real 101×149 grid / `samples/*.pt` layout / year split; (b) `probabilistic_eval_smoke_cpu.yaml` on top of all three, proving `tabulate_metrics` emits **identical metric-key columns across the families** and `combine_curves` the overlaid figures |
+| `4e` | `tests/pipeline_e2e_test.py` ✅ (18 tests, ~115 s), then **by hand on real data**: (a) each family's `*_smoke_cpu` pipeline end to end, proving the real 101×149 grid / `samples/*.pt` layout / year split; (b) `probabilistic_eval_smoke_cpu.yaml` on top of all three, proving `tabulate_metrics` emits **identical metric-key columns across the families** and `combine_curves` the overlaid figures |
 | `4f` | the hourly pipeline (`metrics_hourly.yaml` + the hourly YAML + smoke tier), then **by hand**: the hourly smoke runs and its metrics JSON carries the classification keys absent in daily mode (`brier_skill_score`, `explained_deviance`, `dice_occurrence`, `average_precision_occurrence`) |
 | `4g` | the closing review of `tests/` |
 

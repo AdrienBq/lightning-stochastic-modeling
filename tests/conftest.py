@@ -65,6 +65,86 @@ def executable_source(module) -> str:
     return ast.unparse(tree)                                     # comments never survive unparse
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# A synthetic $DATA_ROOT, as PLAIN FUNCTIONS rather than fixtures.
+#
+# `tests/stages/conftest.py` wraps these in `tmp_path`-bound fixtures for the stage tests, and
+# `pipeline_e2e_test.py` calls them directly because its own fixture is SESSION-scoped (it pays for a full pipeline
+# run once) and a session fixture cannot depend on `tmp_path`. One builder either way: the layout here is the contract
+# `prepare_modeling` reads, so a second copy of it would be a second thing to keep in step with the stage.
+# ---------------------------------------------------------------------------------------------------------------------
+VARIABLES = ['MU_LI', 'MU_MIXR', 'RH_500850', 'cp', 'lsm', 'lightnings']
+FEATURES = 'MU_LI,MU_MIXR,RH_500850,cp,lsm'
+HOURS, HEIGHT, WIDTH = 6, 8, 10
+
+
+def build_dataset_root(root, n_days=6, hours=HOURS, vary_activity=False):
+    """Write a ``$DATA_ROOT``-shaped directory: ``metadata.json``, ``metadata.csv``, ``samples/sample_XXXXXX.pt``.
+
+    The lightning channel carries a KNOWN per-hour stroke pattern rather than noise, so the target derivation is
+    checkable by hand: cell ``(0, 0)`` gets one stroke in 3 hours (sub-threshold at ``hourly_threshold=2``) and cell
+    ``(1, 1)`` five strokes in 4 hours (qualifying).
+
+    ``vary_activity`` makes the qualifying-hour count and the active cells differ BY DAY. Off by default because the
+    stage tests assert against the fixed pattern above; required by any test that reaches the metric suite, because a
+    target identical on every day makes the climatology baseline exactly equal to the target, every skill score a
+    ``1 - x/0``, and the whole skill group vanish from the metrics JSON as non-finite.
+    """
+    import json
+
+    import torch
+
+    samples = os.path.join(root, 'samples')
+    os.makedirs(samples, exist_ok=True)
+
+    metadata = {'num_variables': len(VARIABLES)}
+    metadata.update({f'variable_{position + 1}': name for position, name in enumerate(VARIABLES)})
+    with open(os.path.join(root, 'metadata.json'), 'w') as handle:
+        json.dump(metadata, handle)
+
+    generator = torch.Generator().manual_seed(0)
+    rows = ['date,id,num_lightnings,pixels_with_lightning']
+    for day in range(n_days):
+        payload = {name: torch.randn(hours, HEIGHT, WIDTH, generator=generator) for name in VARIABLES[:-1]}
+        lightning = torch.zeros(hours, HEIGHT, WIDTH)
+        lightning[:3, 0, 0] = 1.0                                  # sub-threshold at hourly_threshold=2
+        if vary_activity:
+            qualifying = 2 + (day % 4)                             # 2-5 qualifying hours, cycling
+            lightning[:qualifying, 1, 1] = 5.0
+            lightning[:qualifying, 2 + (day % 3), 3] = 4.0         # a second cell, moving across days
+        else:
+            lightning[:4, 1, 1] = 5.0
+        payload['lightnings'] = lightning
+        torch.save(payload, os.path.join(samples, f'sample_{day:06d}.pt'))
+        rows.append(f'2015-07-{day + 1:02d},{day},{100 * (day + 1)},{day + 3}')
+    with open(os.path.join(root, 'metadata.csv'), 'w') as handle:
+        handle.write('\n'.join(rows) + '\n')
+    return root
+
+
+def write_split_config(path, n_days=6, train_fraction=None):
+    """Write a ``by_sample_id`` split over the synthetic ids — the method the smoke tiers use, and the only one that
+    can slice below a year. Returns the path.
+
+    ``train_fraction`` widens the train split (the pipeline test needs enough train days for the shipped
+    ``feature-stats-days`` and for a non-degenerate climatology); the default thirds are what the stage tests use.
+    """
+    if train_fraction is None:
+        third = max(n_days // 3, 1)
+        splits = {'train': [[0, third - 1]],
+                  'valid': [[third, 2 * third - 1]],
+                  'test': [[2 * third, n_days - 1]]}
+    else:
+        n_train = max(int(n_days * train_fraction), 1)
+        remaining = max((n_days - n_train) // 2, 1)
+        splits = {'train': [[0, n_train - 1]],
+                  'valid': [[n_train, n_train + remaining - 1]],
+                  'test': [[n_train + remaining, n_days - 1]]}
+    with open(path, 'w') as handle:
+        yaml.safe_dump({'method': 'by_sample_id', 'cross_check': False, 'by_sample_id': splits}, handle)
+    return path
+
+
 @pytest.fixture(scope='session')
 def metrics_config():
     """The shipped shared metric suite, parsed. Tests assert against the REAL config, not a fixture copy of it —

@@ -111,11 +111,10 @@ def test_every_source_module_has_a_test_file(repo_root):
 def test_no_test_file_outlives_its_module(repo_root):
     """A test file whose module was deleted still passes while asserting nothing about the codebase."""
     expected = {test_path for _, test_path in source_modules(repo_root)}
+    # The two files at the `tests/` root that mirror NO single module: this one asserts things about the suite itself,
+    # and `pipeline_e2e_test.py` exercises every module at once by running a real pipeline (Block 4e).
     expected |= {os.path.join(repo_root, TESTS, name)
-                 for name in ('completeness_test.py',)}                      # this file mirrors nothing
-    # ⚠️ EMPTY since Block 4d, and deliberately kept as an empty statement rather than deleted: every stage module the
-    # shipped configs name now exists, so the mirror covers all of them normally. Block 4e adds `pipeline_e2e_test.py`
-    # to the set above (it mirrors no single module because it exercises all of them), not to this one.
+                 for name in ('completeness_test.py', 'pipeline_e2e_test.py')}
 
     orphans = [os.path.relpath(path, repo_root)
                for path in _iter_source_files(os.path.join(repo_root, TESTS))

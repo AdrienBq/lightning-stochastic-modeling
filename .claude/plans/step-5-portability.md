@@ -70,9 +70,25 @@ Three things landed with it:
 
 ### Still open for this step
 
+* ⚠️ **`mlflow.projects` shells out to a BARE `python`, not `sys.executable`.** Found in Step 4 block 4e, the first
+  thing the end-to-end test hit. `run_project.py` calls `mlflow.projects.run(...)`, and with no `MLproject` file
+  MLflow's local backend builds the command `python src/stages/<stage>.py --...`. So **every stage subprocess resolves
+  its interpreter from `PATH`**, not from the interpreter that launched the pipeline. Consequences:
+  - it works today only because the launch scripts activate the venv first — which is precisely the machine-specific
+    step this step exists to remove;
+  - a job script that module-loads a system python, or any invocation by absolute interpreter path
+    (`/path/to/venv/bin/python run_project.py ...`), silently gets the wrong interpreter and dies on `import mlflow`
+    inside the stage. The traceback names the stage, so it reads as a broken stage rather than a broken environment.
+
+  `tests/pipeline_e2e_test.py` works around it by prepending `os.path.dirname(sys.executable)` to the subprocess
+  `PATH`. That is right for a test and is not the fix for a user: the options are an `MLproject` file whose entry-point
+  commands are explicit about the interpreter, or documenting activation as a hard prerequisite of `run_project.py`.
+  Decide it here.
 * **`mlruns/` is not covered.** It is created next to `run_project.py`, holds the lazy cache's tags and every run's
   logged artifacts, and grows without bound. `run_project.py` already accepts a `tracking_uri`, so the choice is
-  between pointing that at the new root and keeping the store local by design.
+  between pointing that at the new root and keeping the store local by design. ✅ **Confirmed in 4e that
+  `MLFLOW_TRACKING_URI=file:/some/path` relocates the whole store** — the e2e test sets it so a test run never writes
+  into the checkout, which means the per-user config file can supply it without any code change.
 * **`OUTPUT_ROOT` and `DATA_ROOT` should come from the per-user config file** this step introduces, rather than from
   whatever exported them. The `setup` guard makes a missing `OUTPUT_ROOT` loud; it does nothing for a missing
   `DATA_ROOT`, which still fails inside `prepare_modeling`.

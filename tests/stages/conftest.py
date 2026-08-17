@@ -31,46 +31,26 @@ def stages_dir():
 # =====================================================================================================================
 # A synthetic $DATA_ROOT and split, so a stage can be driven end to end with no real dataset.
 #
+# The BUILDERS live in `tests/conftest.py` (as plain functions, because `pipeline_e2e_test.py` needs them from a
+# session-scoped fixture); these are the `tmp_path`-bound factories the stage tests use. The constants are re-exported
+# so `from tests.stages.conftest import HOURS, ...` keeps working.
+#
 # Shared here rather than in one test file because `prepare_modeling` produces what `evaluate` consumes: the only
 # honest way to test the evaluation stage is against a directory the preparation stage actually wrote.
 # =====================================================================================================================
-VARIABLES = ['MU_LI', 'MU_MIXR', 'RH_500850', 'cp', 'lsm', 'lightnings']
-FEATURES = 'MU_LI,MU_MIXR,RH_500850,cp,lsm'
-HOURS, HEIGHT, WIDTH = 6, 8, 10
+from tests.conftest import (                     # noqa: E402 — after the sys.path insert above, by necessity
+    FEATURES, HEIGHT, HOURS, VARIABLES, WIDTH, build_dataset_root, write_split_config,
+)
 
 
 @pytest.fixture
 def dataset_root(tmp_path):
-    """A ``$DATA_ROOT``-shaped directory: ``metadata.json``, ``metadata.csv``, ``samples/sample_XXXXXX.pt``.
-
-    The lightning channel carries a KNOWN per-hour stroke pattern rather than noise, so the target derivation is
-    checkable by hand: cell ``(0, 0)`` gets one stroke in 3 hours (sub-threshold at ``hourly_threshold=2``) and cell
-    ``(1, 1)`` five strokes in 4 hours (qualifying).
-    """
-    import json
-
-    import torch
-
+    """A ``$DATA_ROOT``-shaped directory — see ``tests.conftest.build_dataset_root`` for the layout and the known
+    stroke pattern the target derivation is checked against."""
     def build(n_days=6, hours=HOURS):
         root = tmp_path / 'data'
-        samples = root / 'samples'
-        samples.mkdir(parents=True, exist_ok=True)
-
-        metadata = {'num_variables': len(VARIABLES)}
-        metadata.update({f'variable_{position + 1}': name for position, name in enumerate(VARIABLES)})
-        (root / 'metadata.json').write_text(json.dumps(metadata))
-
-        rows = ['date,id,num_lightnings,pixels_with_lightning']
-        for day in range(n_days):
-            payload = {name: torch.randn(hours, HEIGHT, WIDTH) for name in VARIABLES[:-1]}
-            lightning = torch.zeros(hours, HEIGHT, WIDTH)
-            lightning[:3, 0, 0] = 1.0
-            lightning[:4, 1, 1] = 5.0
-            payload['lightnings'] = lightning
-            torch.save(payload, str(samples / f'sample_{day:06d}.pt'))
-            rows.append(f'2015-07-{day + 1:02d},{day},{100 * (day + 1)},{day + 3}')
-        (root / 'metadata.csv').write_text('\n'.join(rows) + '\n')
-        return str(root)
+        root.mkdir(parents=True, exist_ok=True)
+        return build_dataset_root(str(root), n_days=n_days, hours=hours)
     return build
 
 
@@ -79,21 +59,7 @@ def split_config(tmp_path):
     """A ``by_sample_id`` split over the synthetic ids — the method the smoke tiers use, and the only one that can
     slice below a year."""
     def build(n_days=6):
-        import yaml
-
-        third = max(n_days // 3, 1)
-        spec = {
-            'method': 'by_sample_id',
-            'cross_check': False,
-            'by_sample_id': {
-                'train': [[0, third - 1]],
-                'valid': [[third, 2 * third - 1]],
-                'test': [[2 * third, n_days - 1]],
-            },
-        }
-        path = tmp_path / 'split.yaml'
-        path.write_text(yaml.safe_dump(spec))
-        return str(path)
+        return write_split_config(str(tmp_path / 'split.yaml'), n_days=n_days)
     return build
 
 
