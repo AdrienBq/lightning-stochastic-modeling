@@ -12,7 +12,7 @@ to no single step.
 | [`step-1-design.md`](step-1-design.md) | Design decisions via the inventories; global `CLAUDE.md` + `README.md` | ✅ **done** (2026-07-28) |
 | [`step-2-config.md`](step-2-config.md) | Every config file and its contents | ✅ **done** (2026-07-29) |
 | [`step-3-utils.md`](step-3-utils.md) | Shared `src/utils` | ✅ **done** (2026-08-14) |
-| [`step-4-stages.md`](step-4-stages.md) | Stages + common evaluation — **expanded 2026-08-14**, seven blocks `4a`–`4g` | 🔵 **next** |
+| [`step-4-stages.md`](step-4-stages.md) | Stages + common evaluation — **expanded 2026-08-14**, blocks `4a`–`4g` | 🔵 **in progress** — `4a`–`4d` done; **every stage the configs name now exists**. Next: `4e`, the synthetic-root e2e test plus the two by-hand real-data runs (per-family smoke, then the cross-family comparison) |
 | [`step-5-portability.md`](step-5-portability.md) | User- and machine-agnostic | ⚪ provisional |
 
 ### Design decision record (the Step 1 deliverable — all annotated)
@@ -27,10 +27,24 @@ to no single step.
 
 **Block order** a → b → c → d → e. Each step ends with the verification gate below and a plan update.
 
-> **▶ To resume work:** Step 3 is done — `src/utils` is one merged library and `tests/` is its verification of
-> record (1102 passing, 291/291 functions tested, 86 % line coverage). Read
-> [`step-4-stages.md`](step-4-stages.md), whose two new sections are the standing obligations: **a new function's
-> test lands in the same commit as the function**, and the step ends with a fresh-eyes review of `tests/`.
+> **▶ To resume work:** Step 4 is at block **`4e`**. All seven stages exist (`4a`–`4d`), every written path is behind
+> `{{$OUTPUT_ROOT}}` (`4c-r`), and `tests/` is the verification of record — 331/331 functions tested, ~88 % line
+> coverage. `4e` has three parts, in order:
+>
+> 1. `tests/pipeline_e2e_test.py` — a synthetic `$DATA_ROOT` and a config *derived* from the shipped smoke YAML, so it
+>    cannot drift from the real pipeline. Proves the pipeline is **wired**, runnable by anyone with no dataset.
+> 2. **The per-family smoke run**, by hand with `DATA_ROOT` + `OUTPUT_ROOT` exported:
+>    `python run_project.py config/<family>/<family>_smoke_cpu.yaml <EXPERIMENT>`, once per family. Proves what the
+>    synthetic test cannot — the real 101 × 149 grid, the real `samples/*.pt` layout, the real year split.
+>    ⚠️ Commit first; the lazy cache keys on the whole-repo dirty diff.
+> 3. **The cross-family comparison**, by hand: `config/eval/probabilistic_eval_smoke_cpu.yaml` over all three trained
+>    families. `tabulate_metrics` must emit one CSV with **identical metric-key columns across families** (the
+>    deterministic family's ensemble scalars `NaN`) and `combine_curves` the overlaid figures. This is the gate that
+>    says whether the merge worked; read its per-family missing-metric **log**, since the columns match by construction.
+>
+> Read [`step-4-stages.md`](step-4-stages.md) §Verification for all eight checks. Two standing obligations hold for
+> every block: **a new function's test lands in the same commit as the function**, and the step ends with a fresh-eyes
+> review of `tests/`.
 
 ---
 
@@ -78,12 +92,14 @@ to no single step.
 
    **Two gates, measuring different things — neither is a superset of the other:**
 
-   * `test_every_source_function_is_referenced_by_a_test` — **hard since block 5c**, 291 of 291, `EXEMPT` empty. It
+   * `test_every_source_function_is_referenced_by_a_test` — **hard since block 5c**, 331 of 331, `EXEMPT` empty. It
      catches "never exercised". A new function with no test fails the suite; `test_function_census_is_stable` pins
      the count, so adding one is a visible two-line edit.
-   * `--cov-fail-under=85` in `pytest.ini` — line coverage, currently **85.8 %**. It catches "exercised, but its
+   * `--cov-fail-under=85` in `pytest.ini` — line coverage, currently **87.6 %**. It catches "exercised, but its
      branches never run", which the name gate structurally cannot. Raise the floor whenever a step lifts the number;
-     the residue today is `tuning.py` (25 %) and `stages/run.py` (57 %), both of which need gate 3's real run.
+     the residue today is `tuning.py` (25 %) and `stages/run.py` (57 %), and both need a **real pipeline run** —
+     `run_project.py` dispatches every stage as an `mlflow.run` subprocess, which `pytest-cov` does not see into
+     without the `COV_CORE_*` hook, so those lines are reachable only by the by-hand smoke gates of Step 4.
 
    > ⚠️ **At the END of the rebuild, delete the `source_invariant` tests as a group.** They assert on SOURCE TEXT
    > rather than behaviour — that an identifier removed by the three-branch merge stayed removed, that a function

@@ -831,6 +831,42 @@ def test_a_ranking_block_with_EMPTY_curves_writes_nothing(tmp_path):
     assert not [name for name in os.listdir(str(tmp_path)) if name.endswith('.png')]
 
 
+def test_the_ranking_curves_export_their_POINTS_as_well_as_the_summary(tmp_path):
+    """Two CSVs, because AUC and AP cannot be turned back into a curve. ``combine_curves`` overlays the families' ROC and
+    PR curves, and the points are the only thing that makes that possible — every other curve figure already exports its
+    own, so the summary-only export was the odd one out."""
+    curves = {'roc_pr': {
+        'occurrence': {'fpr': [0.0, 0.4, 1.0], 'tpr': [0.0, 0.9, 1.0], 'recall': [0.0, 0.9, 1.0],
+                       'precision': [1.0, 0.2, 0.01], 'roc_auc': 0.93, 'average_precision': 0.18,
+                       'base_rate': 0.01},
+        'h6': {'fpr': [0.0, 0.6, 1.0], 'tpr': [0.0, 0.7, 1.0], 'recall': [0.0, 0.7, 1.0],
+               'precision': [1.0, 0.1, 0.004], 'roc_auc': 0.71, 'average_precision': 0.06, 'base_rate': 0.002},
+    }}
+    reporting._roc_pr_curves(curves, str(tmp_path), ['csv'])
+
+    points = pd.read_csv(os.path.join(str(tmp_path), 'roc_pr_curves.csv'))
+    assert list(points.columns) == ['threshold', 'fpr', 'tpr', 'recall', 'precision']
+    assert len(points) == 6, 'both thresholds, all three cuts each'
+    assert set(points['threshold']) == {'occurrence', 'h6'}
+    # the declaration order is preserved, which is what combine_curves' first-listed fallback relies on
+    assert points['threshold'].iloc[0] == 'occurrence'
+
+    summary = pd.read_csv(os.path.join(str(tmp_path), 'roc_pr_summary.csv'))
+    assert {'roc_auc', 'average_precision', 'base_rate'} <= set(summary.columns), \
+        'the summary still carries the scalars the legend and the no-skill line need'
+
+
+def test_a_ranking_block_with_EMPTY_curves_writes_NEITHER_csv(tmp_path):
+    """The ``not drawn`` return sits BEFORE the csv block, so a split with no positive cells produces no ranking tables at
+    all — not a header-only points file and not an all-NaN summary. The scalars are not lost: ``roc_auc_*`` and
+    ``average_precision_*`` are in the flat metrics JSON, NaN like every other undefined score."""
+    curves = {'roc_pr': {'occurrence': {'fpr': [], 'tpr': [], 'recall': [], 'precision': [],
+                                        'roc_auc': float('nan'), 'average_precision': float('nan')}}}
+    reporting._roc_pr_curves(curves, str(tmp_path), ['csv'])
+
+    assert not [name for name in os.listdir(str(tmp_path)) if name.startswith('roc_pr')]
+
+
 def test_the_intensity_bin_table_keeps_the_BINS_as_its_row_labels(tmp_path):
     """The one CSV in this module written with its index — the bins are the row identity, and dropping them leaves a
     table of unlabelled numbers."""

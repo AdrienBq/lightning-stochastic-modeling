@@ -72,8 +72,8 @@ invariant CLAUDE.md states as *"One evaluation for all families. Never add a fam
 | `tune` | A's two wrappers, unified | ~170 | dispatches `module_factory` by `model-family`; owns the MC-dropout warm-start `partial` |
 | `retrain_best` | A's two wrappers, unified | ~130 | same dispatch; selection metric read back from `best_trial.json` |
 | `evaluate` | A `evaluate_regression` | ~370 | the shared evaluation; loses five dead map-colour arguments |
-| `tabulate_metrics` | A | ~116 | near as-is |
-| `combine_curves` | A | ~260 | `_combined_qq` deleted, reliability + ROC/PR overlays added |
+| `tabulate_metrics` | A | ~116 → **135** | near as-is; the display-name map dropped as a bug |
+| `combine_curves` | A | ~260 → **355** | `_combined_qq` deleted, reliability + ROC/PR overlays added |
 
 ---
 
@@ -189,24 +189,53 @@ The orchestration is correct as written, and every function it calls exists with
 - ✅ Keep the ensemble pooling (`[N*M, H, W]` structure stack with obs replicated per member), the `> 8 GB` warning,
   and the CUDA-reported-but-unusable fallback.
 
-### `tabulate_metrics` — A (116), near as-is
+### `tabulate_metrics` — A (116) → 135. ✅ DONE in 4d
 
-`**kwargs` model→JSON mapping, `_display` restoring `Diffusion-Model` from Fire's `Diffusion_Model`. The substantive
-requirement is the phase gate's: **identical metric-key columns across families**, with the deterministic family's
-ensemble scalars `NaN`. Verify `_DISPLAY_NAMES` covers the three shipped labels (`Deterministic-UNet`, `MC-Dropout`,
-`Diffusion`).
+`**kwargs` family→JSON mapping, union columns, sorted, `selected-metrics` subsetting. Two changes to A:
 
-### `combine_curves` — A (252), 02a restyle
+- 🐛 **`_DISPLAY_NAMES` is GONE, and it was a bug, not a simplification.** A's map covered `U_net` / `Diffusion_Model`
+  — *neither of them a label any shipped config uses* — so ported as-is, `Deterministic-UNet` would have fallen through
+  to A's underscore→space fallback and appeared as `Deterministic UNet`, disagreeing with both the config and
+  `combine_curves`' legends. `_display` now undoes Fire's substitution instead (`key.replace('_', '-')`), which
+  restores all three shipped labels with no map to go stale when a family is added. A's own tests asserted its invented
+  labels, so the mislabelling was invisible; the replacement test derives the labels from
+  `probabilistic_eval*.yaml` and asserts each round-trips.
+- ➕ **The per-family missing-metric list is logged.** The phase gate wants *identical metric-key columns across
+  families*, but the columns are identical **by construction** — one DataFrame has one column set — so the CSV alone
+  cannot show a disagreement. What shows it is the NaN pattern, and the log is where it is stated in words: a
+  deterministic family missing `crps` is expected, a family missing `mae` is a merge failure.
 
-- ❌ **`_combined_qq` goes.** It reads `qq_table.csv`, which no longer exists — the target-space `qq_plot` was removed
-  with the 02a grammar and `reporting.py` never writes that file. Left in, it would log *"no model had a usable
-  qq_table.csv; skipped"* on every run forever.
-- ➕ **`_combined_reliability`** from `reliability_table.csv` and **`_combined_roc_pr`** from `roc_pr_summary.csv` —
-  the classification-first headline diagnostics, and the two figures a cross-family comparison most wants.
-- ✅ Keep `_combined_psd` (with its ±1σ ensemble band), `_combined_fss`, `_combined_rank_histogram`, `_model_colors`
-  (deterministic over sorted names), and `_read_csv`'s never-raise contract.
-- 🔧 The PSD x-axis in **kilometres**, inverted, matching `reporting._psd_curves` — A plots `wavelength_px`; the CSV
-  carries both columns.
+### `combine_curves` — A (252) → 355, 02a restyle. ✅ DONE in 4d
+
+- ❌ **`_combined_qq` is gone**, as planned: `qq_table.csv` is a file this repo never writes, so it would have logged
+  *"no model had a usable qq_table.csv; skipped"* on every run forever.
+- ➕ **`_combined_reliability`** from `reliability_table.csv` — two panels, the curve and the bin populations, because a
+  reliability curve carried by one populated bin is indistinguishable from a calibrated one without them.
+- ⚠️ **`_combined_roc_pr` could NOT be built from `roc_pr_summary.csv`** as this plan said. That file holds four
+  *scalars* per threshold (`roc_auc`, `average_precision`, `base_rate`, `from_probability`); the curve points live only
+  in the in-memory `curves['roc_pr']` block. From the summary alone the figure would have been a bar chart of numbers
+  already in `tabulate_metrics`' table — strictly worse than the table. So `reporting._roc_pr_curves` now also writes
+  **`roc_pr_curves.csv`** (long-format points), which is what every other curve figure already did; the summary keeps
+  its role, supplying the legend annotations and the PR no-skill floor. ~10 lines in the existing `if 'csv' in formats`
+  block, two tests, no signature change.
+- 🔧 **One threshold, not four.** `metrics.yaml` declares `[occurrence, h3, h6, h12]`, so overlaying every one across
+  three families is twelve lines per panel and a PR panel on a log axis is unreadable at that density.
+  `_headline_threshold` picks `occurrence` (the event `average_precision_occurrence`, the selection score's
+  discrimination term, is defined on) and falls back to the **first-listed** threshold — which is what makes it work
+  for the hourly task, whose thresholds are probability cuts with no `occurrence` among them.
+- 🔧 The PSD x-axis reads **`wavelength_km`**, inverted. Reading `wavelength_px` instead is a 27.75× error that still
+  draws a plausible loglog figure, which is why a test asserts the plotted x-data equals the kilometre column.
+- ✅ Kept: the ±1σ ensemble band, `_combined_fss`'s two legends, `_combined_rank_histogram`, `_model_colors` over
+  sorted names, and `_read_csv`'s never-raise contract.
+
+**On the tests.** Both placeholder files were rewritten rather than un-skipped. A's `report_dirs` fixture wrote
+`x,y\n1,0.5\n...` for every curve — a schema no figure matches — so every figure would have self-skipped and every test
+passed while drawing nothing. The fixture now builds each report directory by calling the real
+`reporting._psd_curves` / `_fss_vs_scale` / `_reliability` / `_roc_pr_curves` / `_rank_histogram`, so a column renamed
+on either side fails here; and the figures are inspected as **figures** (a `_save` spy over `axis.lines`) rather than as
+files, since a png existing says nothing about what is on it. Five mutations were run against the result — px for km,
+no inversion, no occurrence preference, a no-skill line per family, no finite mask — and each failed exactly the test
+that claims to catch it.
 
 ### Deletions and the utility move
 
@@ -307,8 +336,8 @@ What it asserts, in code:
 - the metrics JSON's keys ⊇ `EXPECTED_DAILY_KEYS` — the 34 keys `evaluation_test.py` already pins, so the unit suite
   and the pipeline suite cannot disagree about what the evaluation emits;
 - the report directory holds the configured figure set;
-- **the comparison CSV's columns are identical across the three families** (gate 5's real content), with the
-  deterministic family's ensemble scalars `NaN`;
+- **the comparison CSV's columns are identical across the three families**, with the deterministic family's ensemble
+  scalars `NaN` — the same property the by-hand cross-family gate reads, checked here on synthetic data;
 - the run exits 0 and the orchestrator logged one child run per stage.
 
 **What it deliberately does NOT prove** — the accepted cost of the synthetic-only choice:
@@ -317,8 +346,9 @@ What it asserts, in code:
 - that 8.7 MB × 5843 is tractable;
 - anything about GPU execution.
 
-Those stay **gates 4–6, run by hand**, as in Steps 2 and 3. The e2e test proves the pipeline is *wired*; the smoke run
-proves it *works on the data*. Both are needed and they are not substitutes.
+Those stay with the **three by-hand gates** of the verification list above, as in Steps 2 and 3 — the per-family smoke
+run on real data, the cross-family comparison over all three, and the hourly smoke. The e2e test proves the pipeline is
+*wired*; the smoke run proves it *works on the data*. Both are needed and they are not substitutes.
 
 ⚠️ **It will not necessarily move the coverage number.** `run_project.py` dispatches each stage through `mlflow.run` as
 a subprocess, and `pytest-cov` does not see into subprocesses without the `COV_CORE_*` `.pth` hook. Either enable
@@ -369,16 +399,37 @@ Per [`rebuild-plan.md`](rebuild-plan.md) §"Verification", in order:
 2. **`pytest tests/ -q`** — green, coverage floor met, and the skip count drops as the three placeholders flip.
 3. **`pipeline_e2e_test.py`** — the synthetic-root run, in the suite. This is what makes "the pipeline is wired"
    re-runnable by anyone, with no dataset.
-4. **Smoke run, per family** (by hand, real data): `python run_project.py config/<family>/<family>_smoke_cpu.yaml
-   <EXPERIMENT>` with `DATA_ROOT` exported. Proves what the synthetic test cannot — the real grid, the real sample
-   layout, the real split.
-   ⚠️ **Commit before running** — the lazy cache keys on the whole-repo dirty diff.
-5. **Phase gate** (by hand): all three `*_smoke_cpu` pipelines plus `config/eval/probabilistic_eval_smoke_cpu.yaml`
-   end to end. `tabulate_metrics` must emit one CSV with **identical metric-key columns across families**, and
-   `combine_curves` the overlaid figures. Identical *columns* is the requirement, not identical values — the
-   deterministic family's ensemble scalars are `NaN` and it contributes no rank histogram.
-6. **The hourly smoke** runs, and its metrics JSON carries the classification keys (`brier_skill_score`,
-   `explained_deviance`, `dice_occurrence`, `average_precision_occurrence`) that are absent in daily mode.
+4. **THE PER-FAMILY SMOKE RUN** — by hand, on real data, once per family (block `4e`):
+
+   ```shell
+   export DATA_ROOT=/path/to/era5_postprocess          # metadata.json, metadata.csv, samples/
+   export OUTPUT_ROOT=/scratch/$USER/lightning-outputs # everything the pipeline writes
+   python run_project.py config/<family>/<family>_smoke_cpu.yaml <EXPERIMENT>
+   ```
+
+   It proves the three things a synthetic fixture structurally cannot: the real **101 × 149** grid, the real
+   `samples/sample_XXXXXX.pt` layout, and the real year-based split. Green means all five stages ran in sequence and
+   each wrote the artifacts the next one reads.
+   ⚠️ **Commit before running** — the lazy cache keys on the whole-repo dirty diff, so any uncommitted edit busts every
+   entry and the run tells you nothing about the committed state.
+
+5. **THE CROSS-FAMILY COMPARISON** — by hand, and the gate that says whether the merge actually worked (block `4e`).
+   Run all three `*_smoke_cpu` pipelines, then `config/eval/probabilistic_eval_smoke_cpu.yaml` on top of them (it
+   needs three trained checkpoints, so it is downstream of all three and is the expensive gate, not a quick check).
+
+   The requirement: `tabulate_metrics` emits one CSV whose **metric-key COLUMNS are identical across the three
+   families**, and `combine_curves` emits the overlaid figures. Identical *columns*, not identical values — the
+   deterministic family's ensemble scalars are `NaN` and it contributes no rank histogram, which is correct.
+
+   ⚠️ **Read the LOG, not just the CSV.** The columns are identical *by construction* — one DataFrame has one column
+   set — so the CSV alone cannot fail this gate. What it is really reading is the **NaN pattern**, which is why
+   `tabulate_metrics` logs, per family, exactly which metrics it lacks. A deterministic family missing `crps` is
+   expected; a family missing `mae` is the merge failure the gate exists to catch.
+
+6. **THE HOURLY SMOKE** — by hand (block `4f`): the hourly pipeline runs end to end, and its metrics JSON carries the
+   classification keys that are **absent** in daily mode — `brier_skill_score`, `explained_deviance`,
+   `dice_occurrence`, `average_precision_occurrence`. Their presence is the proof that `probability` was populated and
+   the occurrence head reached the metric suite; in daily mode their absence is equally correct.
 7. **The closing review of `tests/`** (below).
 8. **Update this file and `rebuild-plan.md`**; flip Step 4 to ✅.
 
@@ -404,12 +455,13 @@ real gaps are.
 
 | Block | Contents |
 |---|---|
-| `4a` | `prepare_modeling` + the rename surface + the `compute_high_lightning_days` utility move + delete `hello_world` |
-| `4b` | `tune` + `retrain_best` (one commit — same dispatch, same wrappers) |
-| `4c` | `evaluate` |
-| `4d` | `tabulate_metrics` + `combine_curves` |
-| `4e` | `tests/pipeline_e2e_test.py`, then gates 4 + 5 by hand |
-| `4f` | the hourly pipeline (`metrics_hourly.yaml` + the hourly YAML + smoke tier), then gate 6 |
+| `4a` ✅ | `prepare_modeling` + the rename surface + the `compute_high_lightning_days` utility move (`hello_world` kept) |
+| `4b` ✅ | `tune` + `retrain_best` (one commit — same dispatch, same wrappers) |
+| `4c` ✅ | `evaluate` |
+| `4c-r` ✅ | *(unplanned)* every output behind `{{$OUTPUT_ROOT}}`, the `setup` unset-root guard, one shared U-net prepared dir |
+| `4d` ✅ | `tabulate_metrics` + `combine_curves` + `src/stages/README.md` — **every stage the configs name now exists** |
+| `4e` | `tests/pipeline_e2e_test.py`, then **by hand on real data**: (a) each family's `*_smoke_cpu` pipeline end to end, proving the real 101×149 grid / `samples/*.pt` layout / year split; (b) `probabilistic_eval_smoke_cpu.yaml` on top of all three, proving `tabulate_metrics` emits **identical metric-key columns across the families** and `combine_curves` the overlaid figures |
+| `4f` | the hourly pipeline (`metrics_hourly.yaml` + the hourly YAML + smoke tier), then **by hand**: the hourly smoke runs and its metrics JSON carries the classification keys absent in daily mode (`brier_skill_score`, `explained_deviance`, `dice_occurrence`, `average_precision_occurrence`) |
 | `4g` | the closing review of `tests/` |
 
 One commit per block, tests included, stopping after each to report — the pattern Steps 2 and 3 used.
@@ -426,7 +478,9 @@ avoidable version of this step going wrong.
   done in Step 3 blocks 3d/3e; `evaluate` consumes it.
 - **`combine_curves`: "modify"** so its plotting follows the 02a convention — block 4d.
 - **`compute_high_lightning_days`: keep** — as a utility, per decision 3.
-- **`hello_world`:** checked; deleted, per decision 4.
+- **`hello_world`:** checked; **KEPT** — decision 4 was reversed once the usefulness check it mandated actually ran (it
+  has two consumers: `README.md` and `config/hello_world.yaml`). This line said "deleted" until 4d; it was the one place
+  the plan still contradicted the tree.
 - The pipeline YAML shapes are already drafted in [Step 2](step-2-config.md) §5 and **shipped** — the twelve configs
   are the contract these stages must satisfy, not a draft to revise.
 - **Per-folder `README.md`** for `src/stages/`, capturing the agreed contracts (deferred from Step 1; write it as the

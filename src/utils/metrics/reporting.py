@@ -351,6 +351,10 @@ def _roc_pr_curves(curves, report_path, formats):
 
     Each PR panel carries its own no-skill line at the event's base rate (a random forecast's precision), which is
     why the two panels' reference lines differ: the ROC diagonal is universal, the PR floor is not.
+
+    Exports TWO tables: `roc_pr_summary.csv` (per-threshold roc_auc / average_precision / base_rate) and
+    `roc_pr_curves.csv` (the curve points, long-format). `combine_curves` needs both — the points to overlay the
+    families' curves, the summary for the no-skill line and the legend annotations.
     """
     roc_pr = curves.get('roc_pr')
     if not roc_pr:
@@ -407,6 +411,21 @@ def _roc_pr_curves(curves, report_path, formats):
                 'from_probability': block.get('from_probability', False),
             })
         pd.DataFrame(rows).to_csv(os.path.join(report_path, 'roc_pr_summary.csv'), index=False)
+
+        # The curve POINTS, long-format, one row per decision cut. Written alongside the scalar summary because a
+        # cross-family ROC/PR overlay cannot be rebuilt from AUC and AP -- combine_curves needs the points, and every
+        # other curve figure already exports its own (psd_curves.csv, fss_table.csv, reliability_table.csv). All four
+        # arrays share one length by construction (`finalize_ranking_metrics` derives them from one set of bin edges,
+        # and `tpr` IS `recall`; both columns are kept so a reader can follow which panel uses which).
+        points = [
+            pd.DataFrame({'threshold': threshold_name, 'fpr': block['fpr'], 'tpr': block['tpr'],
+                          'recall': block['recall'], 'precision': block['precision']})
+            for threshold_name, block in roc_pr.items() if np.asarray(block.get('fpr', [])).size
+        ]
+        if points:
+            pd.concat(points, ignore_index=True).to_csv(
+                os.path.join(report_path, 'roc_pr_curves.csv'), index=False
+            )
 
 
 def _confusion_matrix(curves, report_path, formats):

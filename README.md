@@ -172,6 +172,10 @@ The `YAML` file should contain some boilerplate (used by the
 [`src/stages/hello_world.py`](src/stages/hello_world.py)), each with a specification of the input arguments (use `{}`
 if there are no inputs to a stage).
 
+> **This section documents the pipeline *mechanism*.** For *this project's* seven stages — what each reads and writes,
+> and the cross-stage contracts (the `from __init__ import root_path` rule, `OUTPUT_PARAM_KEYS`, the two roots, and the
+> two places `UPSTREAM_MODEL` is read for different things) — see [`src/stages/README.md`](src/stages/README.md).
+
 See the following pseudocode example.
 ```yaml
 project_uri: 'src/stages'                                                           # the path of the directory where each stage scrip is saved

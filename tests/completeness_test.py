@@ -113,11 +113,9 @@ def test_no_test_file_outlives_its_module(repo_root):
     expected = {test_path for _, test_path in source_modules(repo_root)}
     expected |= {os.path.join(repo_root, TESTS, name)
                  for name in ('completeness_test.py',)}                      # this file mirrors nothing
-    # Step 4 still owes two stage modules; their test files exist and are skipped (see stages/*_test.py).
-    # `prepare_modeling` left this list in 4a, `tune`/`retrain_best` were never on it, and `evaluate` left in 4c —
-    # each one's module now exists, so the mirror covers it normally.
-    expected |= {os.path.join(repo_root, TESTS, 'stages', f'{stem}_test.py')
-                 for stem in ('tabulate_metrics', 'combine_curves')}
+    # ⚠️ EMPTY since Block 4d, and deliberately kept as an empty statement rather than deleted: every stage module the
+    # shipped configs name now exists, so the mirror covers all of them normally. Block 4e adds `pipeline_e2e_test.py`
+    # to the set above (it mirrors no single module because it exercises all of them), not to this one.
 
     orphans = [os.path.relpath(path, repo_root)
                for path in _iter_source_files(os.path.join(repo_root, TESTS))
@@ -171,10 +169,12 @@ def test_function_census_is_stable(repo_root):
 
     History: 291 at the end of Step 3. Step 4 block 4a added `prepare_modeling`'s 14 functions and
     `data.high_lightning_days` (306); block 4b added `tune`'s 2 and `retrain_best`'s 2 (310); block 4c added
-    `evaluate`'s 3 (313); block 4c-r added `setup.looks_like_an_unset_root` (314).
+    `evaluate`'s 3 (313); block 4c-r added `setup.looks_like_an_unset_root` (314); block 4d added
+    `tabulate_metrics`' 4 and `combine_curves`' 13 (331) — the last two stages, so every stage the shipped configs
+    name is now implemented.
     """
     total = sum(1 for _ in _all_functions(repo_root))
-    assert total == 314, f'the testable surface moved from 314 to {total}; re-scope the coverage work-list'
+    assert total == 331, f'the testable surface moved from 331 to {total}; re-scope the coverage work-list'
 
 
 def test_exemption_list_has_not_grown(repo_root):
