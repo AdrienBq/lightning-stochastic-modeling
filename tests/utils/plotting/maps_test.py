@@ -113,11 +113,11 @@ def _render_lit_row(row, context):
     projection, data_crs = context
     field = np.zeros((H, W))
     field[row, :] = 24.0
-    scales = maps.make_lightning_scales(24.0)
+    cmap, norm = maps.make_lightning_cmap(24.0)
 
     figure = plt.figure(figsize=(5, 5))
     ax = maps.add_map_axis(figure, figure.add_gridspec(1, 1)[0, 0], projection)
-    maps.draw_map(ax, field, f'row {row}', data_crs, scales.warm_cmap, scales.warm_norm)
+    maps.draw_map(ax, field, f'row {row}', data_crs, cmap, norm)
     figure.canvas.draw()
     buffer = np.asarray(figure.canvas.buffer_rgba())[:, :, :3].astype(int)
     bbox = ax.get_window_extent()
@@ -159,7 +159,7 @@ def test_the_southern_row_lands_in_the_lower_half_of_the_axes(orientation_probes
     assert south_rows.mean() > axes_mid
 
 
-@pytest.mark.parametrize('function_name', ['draw_map', 'draw_diff_map'])
+@pytest.mark.parametrize('function_name', ['draw_map'])
 def test_the_imshow_kwargs_are_right_at_the_SOURCE(function_name):
     """The layer an edit would break. It cannot be read back off the artifact — cartopy reprojects the array and
     re-emits it with ``origin='lower'`` in projected metres — so the kwargs are checked by AST."""
@@ -178,10 +178,10 @@ def test_the_imshow_kwargs_are_right_at_the_SOURCE(function_name):
 def test_cartopy_reprojects_the_field(context):
     """Pinned so nobody "fixes" the source to ``origin='lower'`` to match what they see on the drawn object."""
     projection, data_crs = context
-    scales = maps.make_lightning_scales(6.0)
+    cmap, norm = maps.make_lightning_cmap(6.0)
     figure = plt.figure(figsize=(4, 4))
     ax = maps.add_map_axis(figure, figure.add_gridspec(1, 1)[0, 0], projection)
-    image = maps.draw_map(ax, np.zeros((H, W)), 't', data_crs, scales.warm_cmap, scales.warm_norm)
+    image = maps.draw_map(ax, np.zeros((H, W)), 't', data_crs, cmap, norm)
     assert image.origin == 'lower'
     assert tuple(image.get_extent()) != maps.GRID_EXTENT
     plt.close(figure)
@@ -194,10 +194,10 @@ def test_cartopy_reprojects_the_field(context):
 def framed_axis(context):
     def build(**kwargs):
         projection, data_crs = context
-        scales = maps.make_lightning_scales(6.0)
+        cmap, norm = maps.make_lightning_cmap(6.0)
         figure = plt.figure(figsize=(4, 4))
         ax = maps.add_map_axis(figure, figure.add_gridspec(1, 1)[0, 0], projection)
-        maps.draw_map(ax, np.zeros((H, W)), 't', data_crs, scales.warm_cmap, scales.warm_norm, **kwargs)
+        maps.draw_map(ax, np.zeros((H, W)), 't', data_crs, cmap, norm, **kwargs)
         return figure, ax
     return build
 
@@ -298,15 +298,37 @@ def test_a_fractional_maximum_rounds_UP_to_a_whole_hour():
     assert list(norm.boundaries) == [0.0, 0.5] + list(range(1, 8))
 
 
-def test_the_warm_and_cool_palettes_share_an_identical_value_axis():
-    """The comparability invariant the two diff colorbars rest on: both are built against the same ``max_val``, so the
-    bars are directly readable against each other."""
-    scales = maps.make_lightning_scales(9.0)
-    assert list(scales.warm_norm.boundaries) == list(scales.cool_norm.boundaries)
-    assert scales.warm_cmap.N == scales.cool_cmap.N
-    assert scales.warm_cmap(scales.warm_norm(8.0)) != scales.cool_cmap(scales.cool_norm(8.0))
-    for cmap, norm in ((scales.warm_cmap, scales.warm_norm), (scales.cool_cmap, scales.cool_norm)):
-        assert tuple(np.round(cmap(norm(0.1))[:3], 6)) == (1.0, 1.0, 1.0)
+def test_the_LEGACY_cool_palette_still_lands_on_the_warm_ones_value_axis():
+    """``_BASE_COLORS_COOL`` outlives the diff encoding that used it (Step 4 block 4e), and this is what makes keeping
+    it worth anything: fed to ``make_lightning_cmap`` it still produces a cmap/norm on a value axis IDENTICAL to the
+    warm pair's, which is the whole property a second palette needed. Retaining a ramp that had quietly stopped being
+    interchangeable would be retaining a trap.
+    """
+    warm_cmap, warm_norm = maps.make_lightning_cmap(9.0)
+    cool_cmap, cool_norm = maps.make_lightning_cmap(9.0, maps._BASE_COLORS_COOL)
+
+    assert list(warm_norm.boundaries) == list(cool_norm.boundaries)
+    assert warm_cmap.N == cool_cmap.N
+    assert warm_cmap(warm_norm(8.0)) != cool_cmap(cool_norm(8.0)), 'the two ramps must remain distinguishable'
+    for cmap, norm in ((warm_cmap, warm_norm), (cool_cmap, cool_norm)):
+        assert tuple(np.round(cmap(norm(0.1))[:3], 6)) == (1.0, 1.0, 1.0), 'both start at white below 0.5 h'
+
+
+@pytest.mark.source_invariant
+def test_the_cool_palette_is_FLAGGED_as_legacy():
+    """It is unused by anything that ships, so the only thing standing between "deliberately retained" and "dead code
+    nobody dared delete" is the note next to it. If the flag goes, the constant should go with it."""
+    source = inspect.getsource(maps)
+    marker = source.index('_BASE_COLORS_COOL = [')
+    preamble = source[:marker]
+    assert 'LEGACY' in preamble[-900:], 'the cool ramp must carry its legacy note'
+
+
+def test_the_diff_map_MACHINERY_is_gone():
+    """The removal, pinned. The palette stays; the apparatus built on it does not, and half-restoring one of these
+    would give a figure a second palette with no colorbar to read it by."""
+    for name in ('draw_diff_map', 'add_shared_diff_colorbars', 'make_lightning_scales', 'LightningScales'):
+        assert not hasattr(maps, name), f'{name} came back without its counterparts'
 
 
 def test_there_is_no_log_colour_scale():
@@ -347,80 +369,91 @@ def test_both_ramps_start_at_WHITE():
     assert maps._hex_to_rgb(maps._BASE_COLORS_COOL[0]) == (1.0, 1.0, 1.0)
 
 
-# =====================================================================================================================
-# draw_diff_map: over/under in one panel
-# =====================================================================================================================
-def _render_diff(prediction, observation, max_val, context):
-    projection, data_crs = context
-    figure = plt.figure(figsize=(5, 5))
-    ax = maps.add_map_axis(figure, figure.add_gridspec(1, 1)[0, 0], projection)
-    maps.draw_diff_map(ax, prediction, observation, 'diff', data_crs, maps.make_lightning_scales(max_val))
-    n_layers = len(ax.get_images())
-    figure.canvas.draw()
-    buffer = np.asarray(figure.canvas.buffer_rgba())[:, :, :3].astype(int)
-    plt.close(figure)
-    red, blue = buffer[:, :, 0], buffer[:, :, 2]
-    return (red - blue > 40), (blue - red > 40), n_layers
-
-
-def test_the_diff_map_draws_exactly_two_layers(context):
-    observation = np.full((H, W), 4.0)
-    _, _, n_layers = _render_diff(observation, observation, 4.0, context)
-    assert n_layers == 2
-
-
-def test_OVER_prediction_renders_WARM_and_UNDER_renders_COOL(context):
-    """Tested behaviourally because the mask algebra cannot be read off the artifact: cartopy regrids the input, so
-    ``get_array()`` returns the resampled image rather than the ``[101, 149]`` field.
-
-    West of 7.5 E over-predicts by 2 h, east of it under-predicts by 2 h. Both halves sit inside the -5..20 E display
-    window, so a swapped palette assignment flips which side is red.
-    """
-    observation = np.full((H, W), 4.0)
-    prediction = np.where(np.arange(W)[None, :] < int((7.5 + 12) / 0.25), 6.0, 2.0) * np.ones((H, 1))
-    warm, cool, _ = _render_diff(prediction, observation, 6.0, context)
-
-    assert warm.sum() > 500 and cool.sum() > 500
-    assert np.nonzero(warm)[1].mean() < np.nonzero(cool)[1].mean()
-    assert not (warm & cool).any(), 'the two layers must not overlap'
-
-
-def test_an_exactly_correct_forecast_renders_WARM(context):
-    """The ``>=`` boundary. If ``pred == obs`` fell to the cool layer, a perfect forecast would read as
-    under-prediction."""
-    field = np.full((H, W), 3.0)
-    warm, cool, _ = _render_diff(field, field, 3.0, context)
-    assert warm.sum() > 500 and cool.sum() == 0
-
-
-def test_the_two_masks_are_exact_complements_at_the_source():
-    """``<`` and ``>=`` partition the grid, so every cell is painted by exactly one layer and neither hides the other."""
-    source = inspect.getsource(maps.draw_diff_map)
-    assert 'masked_where(prediction < observation, prediction)' in source
-    assert 'masked_where(prediction >= observation, prediction)' in source
-    assert source.count('masked_where') == 2
-
-
-def test_both_layers_draw_the_PREDICTION():
-    """The observation only decides which palette each cell is drawn in — drawing the observation in one layer would
-    make the panel a comparison of two different fields."""
-    source = inspect.getsource(maps.draw_diff_map)
-    assert source.count(', prediction)') == 2
 
 
 # =====================================================================================================================
-# The shared colorbars
+# The single shared colorbar
 # =====================================================================================================================
-def test_two_detached_diff_colorbars_are_added(context):
-    projection, _ = context
-    scales = maps.make_lightning_scales(6.0)
+def test_ONE_detached_colorbar_is_added():
+    """Every panel shares one palette and one value axis, so one bar serves the figure. The pair it replaced was
+    redundant in VALUE — both bars carried identical boundaries — and differed only in palette."""
+    cmap, norm = maps.make_lightning_cmap(6.0)
     figure = plt.figure(figsize=(6, 4))
     before = len(figure.axes)
-    maps.add_shared_diff_colorbars(figure, scales, 0.1, 0.8)
-    assert len(figure.axes) - before == 2
+
+    maps.add_lightning_colorbar(figure, cmap, norm, 0.1, 0.8)
+
+    assert len(figure.axes) - before == 1
     plt.close(figure)
 
 
-def test_the_colorbars_are_labelled_by_error_direction():
-    source = inspect.getsource(maps.add_shared_diff_colorbars)
-    assert 'obs' in source and 'h / day' in source
+def test_the_colorbar_is_labelled_in_HOURS_PER_DAY():
+    """Not by error direction any more: the panel titles say which field is which, and the bar says what the numbers
+    mean. `h / day` is the unit of the bounded 0-24 target."""
+    cmap, norm = maps.make_lightning_cmap(6.0)
+    figure = plt.figure(figsize=(6, 4))
+    maps.add_lightning_colorbar(figure, cmap, norm, 0.1, 0.8)
+
+    labels = [ax.get_ylabel() for ax in figure.axes]
+    assert 'h / day' in labels
+    assert not any('obs' in label for label in labels), 'the over/under labelling went with the diff encoding'
+    plt.close(figure)
+
+
+def test_the_colorbar_CLEARS_the_ensemble_std_bar():
+    """⚠️ The overlap this position exists to fix. On the 2x3 ensemble layout the std panel has its own viridis bar at
+    x=0.80 whose `h / day` label sits to its right; at the old x=0.85 the shared bar was drawn on top of that label.
+
+    Asserted as a gap rather than a magic number, so moving either bar deliberately still passes and moving one back
+    on top of the other does not.
+    """
+    std_bar_x, std_bar_width = 0.80, 0.016
+    assert maps.LIGHTNING_COLORBAR_X >= std_bar_x + std_bar_width + 0.05, 'no room for the std bar\'s label'
+    assert maps.LIGHTNING_COLORBAR_X + std_bar_width < 1.0, 'the bar and its ticks must stay on the canvas'
+
+
+def test_the_colorbar_x_position_is_actually_USED_by_default():
+    """Anti-vacuity for the test above: a constant nothing reads would pass it for ever."""
+    cmap, norm = maps.make_lightning_cmap(6.0)
+    figure = plt.figure(figsize=(6, 4))
+    maps.add_lightning_colorbar(figure, cmap, norm, 0.1, 0.8)
+
+    bar = figure.axes[-1]
+    assert abs(bar.get_position().x0 - maps.LIGHTNING_COLORBAR_X) < 1e-9
+    plt.close(figure)
+
+
+def test_the_panel_title_is_actually_DRAWN_not_just_SET(context):
+    """🐛 A title that exists in the object model and never renders.
+
+    Without an explicit ``y``, matplotlib's automatic title placement walks the axes' children to clear the tick
+    labels — and a cartopy ``Gridliner`` with ``draw_labels=True`` reports NON-FINITE extents, so the position comes out
+    ``inf`` and nothing is drawn. ``ax.get_title()`` returns the string either way, which is why every panel-title test
+    in ``reporting_test.py`` passed while the rendered figures carried no panel titles at all.
+
+    So this asserts the title has a FINITE window extent and sits above the axes — the two things ``get_title()`` cannot
+    tell you. Same cartopy behaviour that cropped every saved map figure.
+    """
+    projection, data_crs = context
+    cmap, norm = maps.make_lightning_cmap(6.0)
+    figure = plt.figure(figsize=(5, 4))
+    ax = maps.add_map_axis(figure, figure.add_gridspec(1, 1)[0, 0], projection)
+    maps.draw_map(ax, np.zeros((H, W)), 'observations', data_crs, cmap, norm)
+
+    figure.canvas.draw()
+    box = ax.title.get_window_extent(figure.canvas.get_renderer())
+    axes_box = ax.get_window_extent(figure.canvas.get_renderer())
+
+    assert np.isfinite([box.y0, box.y1, box.x0, box.x1]).all(), \
+        'non-finite title bbox: the gridliner poisoned the automatic placement again'
+    assert box.y0 >= axes_box.y1 - 2, 'the title must sit above the map, not inside it'
+    assert ax.title.get_text() == 'observations'
+    plt.close(figure)
+
+
+@pytest.mark.source_invariant
+def test_the_title_y_is_passed_EXPLICITLY():
+    """The one-line guard the test above would catch behaviourally, named here so a "tidy-up" that drops the argument
+    is understood as removing a fix rather than a redundant kwarg."""
+    source = inspect.getsource(maps.frame_map_axis)
+    assert 'y=1.02' in source, 'set_title needs an explicit y or the title is silently not drawn'

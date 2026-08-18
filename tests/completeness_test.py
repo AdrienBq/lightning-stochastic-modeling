@@ -171,9 +171,13 @@ def test_function_census_is_stable(repo_root):
     `evaluate`'s 3 (313); block 4c-r added `setup.looks_like_an_unset_root` (314); block 4d added
     `tabulate_metrics`' 4 and `combine_curves`' 13 (331) — the last two stages, so every stage the shipped configs
     name is now implemented.
+
+    Then the 4e plot rework took it DOWN to 329, the first net removal of the rebuild: `maps.draw_diff_map`,
+    `make_lightning_scales` and `LightningScales.*` went with the warm/cool over/under diff encoding (-3), against
+    `add_lightning_colorbar` arriving in their place (+1).
     """
     total = sum(1 for _ in _all_functions(repo_root))
-    assert total == 331, f'the testable surface moved from 331 to {total}; re-scope the coverage work-list'
+    assert total == 329, f'the testable surface moved from 329 to {total}; re-scope the coverage work-list'
 
 
 def test_exemption_list_has_not_grown(repo_root):

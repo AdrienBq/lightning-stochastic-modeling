@@ -355,13 +355,13 @@ def stochastic_figure():
     plt.close(figure)
 
 
-def test_the_deterministic_layout_is_two_map_panels_and_two_shared_colorbars(deterministic_figure):
-    """Observed and predicted, side by side, with ONE pair of colorbars serving both — which is what makes the two
+def test_the_deterministic_layout_is_two_map_panels_and_ONE_colorbar(deterministic_figure):
+    """Observations and predictions side by side, with a SINGLE colorbar serving both — which is what makes the two
     panels comparable by eye. A per-panel colour axis would rescale each independently and make a quiet day look like
-    an active one."""
+    an active one. One bar, not the two the diff encoding needed (block 4e)."""
     panels, colorbars = _map_and_colorbar_axes(deterministic_figure)
     assert len(panels) == 2
-    assert len(colorbars) == 2
+    assert len(colorbars) == 1
     assert tuple(deterministic_figure.get_size_inches()) == (11.0, 5.5)
 
 
@@ -398,21 +398,25 @@ def test_a_SAVED_map_figure_keeps_its_FULL_canvas(tmp_path, layout):
     assert os.path.exists(os.path.join(str(tmp_path), 'maps_canvas_probe.pdf')), 'the vector copy is saved too'
 
 
-def test_the_observed_panel_is_ONE_layer_and_the_predicted_panel_is_a_DIFF(deterministic_figure):
-    """The asymmetry is the point of the layout: the observation has nothing to be over or under, so it is drawn in the
-    warm palette alone, while the prediction is drawn as two masked layers against it."""
+def test_BOTH_panels_are_a_SINGLE_layer_on_the_SAME_scale(deterministic_figure):
+    """What replaced the diff encoding in block 4e: the prediction is one plain layer, like the observation, and both
+    read off the one colorbar. Two layers on the prediction panel would mean the masked over/under drawing came back —
+    and with a single colorbar its cool half would have no scale to be read against."""
     panels, _ = _map_and_colorbar_axes(deterministic_figure)
-    assert len(panels[0].get_images()) == 1
-    assert len(panels[1].get_images()) == 2
+    observed_image, predicted_image = panels[0].get_images(), panels[1].get_images()
+
+    assert len(observed_image) == 1 and len(predicted_image) == 1
+    assert observed_image[0].get_cmap().name == predicted_image[0].get_cmap().name
+    assert list(observed_image[0].norm.boundaries) == list(predicted_image[0].norm.boundaries)
 
 
-def test_the_stochastic_layout_is_a_two_by_three_grid_with_three_colorbars(stochastic_figure):
-    """Six panels — observed, mean, spread, and three members — and three colorbars: the shared diff pair plus the
-    spread panel's own, which is on a different quantity and cannot share theirs."""
+def test_the_stochastic_layout_is_a_two_by_three_grid_with_TWO_colorbars(stochastic_figure):
+    """Six panels — observations, ensemble mean, ensemble std, and three members — and TWO colorbars: the shared
+    lightning-hours bar, plus the std panel's own, which is on a different quantity and cannot share it."""
     figure, _ = stochastic_figure
     panels, colorbars = _map_and_colorbar_axes(figure)
     assert len(panels) == 6
-    assert len(colorbars) == 3
+    assert len(colorbars) == 2
     assert tuple(figure.get_size_inches()) == (15.0, 10.0)
 
 
@@ -438,12 +442,18 @@ def test_the_spread_colour_axis_is_derived_from_THE_DAY(stochastic_figure):
     assert image.get_clim()[1] == pytest.approx(float(members.std(axis=0).max()), abs=1e-9)
 
 
-def test_the_three_member_panels_are_DIFF_maps(stochastic_figure):
-    """Each member is scored against the same observation, so each is a two-layer diff — which is what lets a reader see
-    that the members disagree about WHERE, not just by how much."""
+def test_the_three_member_panels_share_the_OBSERVATION_scale(stochastic_figure):
+    """Each member is a single plain layer on the figure's one palette, like every other lightning panel. Sharing the
+    observation-driven scale is what lets a reader see that the members disagree about WHERE, not just by how much — if
+    each member rescaled to its own range, three different-looking panels could hold the same field."""
     figure, _ = stochastic_figure
     panels, _ = _map_and_colorbar_axes(figure)
-    assert all(len(axis.get_images()) == 2 for axis in panels[3:6])
+    reference = panels[0].get_images()[0]
+
+    for axis in panels[3:6]:
+        images = axis.get_images()
+        assert len(images) == 1
+        assert list(images[0].norm.boundaries) == list(reference.norm.boundaries)
 
 
 def test_a_SHORT_ensemble_blanks_the_spare_panel_without_erroring():
@@ -460,7 +470,7 @@ def test_a_SHORT_ensemble_blanks_the_spare_panel_without_erroring():
     panels, _ = _map_and_colorbar_axes(figure)
 
     member_axes = panels[3:6]
-    assert sum(len(axis.get_images()) == 2 for axis in member_axes) == 2
+    assert sum(len(axis.get_images()) == 1 for axis in member_axes) == 2
     assert sum(len(axis.get_images()) == 0 for axis in member_axes) == 1
     plt.close(figure)
 
@@ -1038,3 +1048,88 @@ def test_the_heteroscedasticity_figure_skips_when_every_decile_is_EMPTY(tmp_path
 
     assert not os.listdir(str(tmp_path))
     assert len(plt.get_fignums()) == before, 'the opened figure must be closed on the skip path'
+
+
+# =====================================================================================================================
+# Titles: the global one names the event AND the family, every panel names its own field
+# =====================================================================================================================
+def test_the_GLOBAL_title_names_the_event_and_the_family(tmp_path):
+    """`<date> event, <family> model`. The family matters on a figure that will sit beside two others in a comparison:
+    a map captioned only by date is unattributable the moment it leaves its own report directory."""
+    prediction, observation, _, items, dates = _report_arrays(n_items=2, seed=3)
+
+    captured = []
+    original = reporting._deterministic_day_figure
+
+    def spy(observation_map, prediction_map, title, *args, **kwargs):
+        captured.append(title)
+        return original(observation_map, prediction_map, title, *args, **kwargs)
+
+    reporting._deterministic_day_figure = spy
+    try:
+        reporting.maps_most_extreme_days(prediction, observation, items, str(tmp_path),
+                                         model_family='mc_dropout')
+    finally:
+        reporting._deterministic_day_figure = original
+
+    assert captured, 'no figure was built'
+    for title in captured:
+        assert title.endswith(' event, mc_dropout model'), title
+        assert any(title.startswith(date) for date in dates), title
+
+
+def test_an_UNKNOWN_family_leaves_the_title_at_the_event_alone(tmp_path):
+    """`model_family` is optional, and a figure built without one must not say "None model". Omitted rather than
+    guessed: `maps_most_extreme_days` is reachable outside the evaluate stage, where no checkpoint resolved a family."""
+    prediction, observation, _, items, _ = _report_arrays(n_items=2, seed=3)
+
+    captured = []
+    original = reporting._deterministic_day_figure
+
+    def spy(observation_map, prediction_map, title, *args, **kwargs):
+        captured.append(title)
+        return original(observation_map, prediction_map, title, *args, **kwargs)
+
+    reporting._deterministic_day_figure = spy
+    try:
+        reporting.maps_most_extreme_days(prediction, observation, items, str(tmp_path))
+    finally:
+        reporting._deterministic_day_figure = original
+
+    for title in captured:
+        assert title.endswith(' event'), title
+        assert 'None' not in title and 'model' not in title
+
+
+def test_the_DETERMINISTIC_panels_are_titled_observations_and_predictions(deterministic_figure):
+    panels, _ = _map_and_colorbar_axes(deterministic_figure)
+    assert [axis.get_title() for axis in panels] == ['observations', 'predictions']
+
+
+def test_the_STOCHASTIC_panels_name_the_mean_the_std_and_each_MEMBER(stochastic_figure):
+    """Six titles, in layout order. The members are numbered by DRAW order rather than by their index in the stack:
+    MC-dropout and diffusion members are exchangeable, so a stack position is not a fact about the member."""
+    figure, _ = stochastic_figure
+    panels, _ = _map_and_colorbar_axes(figure)
+
+    assert [axis.get_title() for axis in panels] == [
+        'observations', 'ensemble mean', 'ensemble std', 'member 1', 'member 2', 'member 3',
+    ]
+
+
+def test_a_SHORT_ensemble_titles_only_the_members_it_HAS():
+    """M = 2 is a legal smoke-tier setting, and the blanked third slot must carry no title — a "member 3" label over an
+    empty panel would read as a member that failed to render."""
+    import matplotlib.pyplot as plt
+
+    projection, data_crs = maps.geographic_context()
+    _, observation, members, _, _ = _report_arrays(n_items=1, seed=0)
+    day = members[0][:2]
+    figure = reporting._stochastic_day_figure(observation[0], day.mean(axis=0), day.std(axis=0), day,
+                                              '2015-07-14 event, mc_dropout model', projection, data_crs,
+                                              np.random.default_rng(0))
+    panels, _ = _map_and_colorbar_axes(figure)
+
+    titles = [axis.get_title() for axis in panels]
+    assert titles[3:] == ['member 1', 'member 2', '']
+    plt.close(figure)

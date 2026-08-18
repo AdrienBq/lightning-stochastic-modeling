@@ -138,8 +138,14 @@ The repo is built on the `plumber` MLflow pipeline template. See [README.md](REA
   busts every cache entry.
 - **Plotting** lives in `src/utils`, styled after the spec in
   [`.claude/plans/inventory-figures.md`](.claude/plans/inventory-figures.md) §1 — cartopy `EuroPP` axes with a
-  `PlateCarree` data transform, `origin='upper'`, integer unit bins in lightning-hours, and the warm/cool
-  over/under diff encoding. Notebooks are **not** part of the repo.
+  `PlateCarree` data transform, `origin='upper'`, integer unit bins in lightning-hours, and **one warm palette per
+  figure under a single colorbar**. Every map panel carries its own title (`observations`, `predictions` /
+  `ensemble mean`, `ensemble std`, `member 1..3`) under a global `<date> event, <family> model`.
+  ⛔ The **warm/cool over/under diff encoding was removed in Step 4 block 4e**: its second colorbar collided with the
+  ensemble-std one and the pair read as clutter. `_BASE_COLORS_COOL` is kept, flagged legacy, one
+  `make_lightning_cmap` call from being usable again; `draw_diff_map` and the two-colorbar helper are gone. Error
+  direction is now read by comparing panels, and quantitatively from `bias` / `under_frac_*` / `over_frac_*`.
+  Notebooks are **not** part of the repo.
 
 ## Rebuild in progress
 

@@ -71,7 +71,7 @@ from src.utils.metrics.evaluation import (
 )
 from src.utils.metrics.reporting import write_report
 from src.utils.modeling.dataset import LightningMapsDataset
-from src.utils.modeling.registry import load_model_module
+from src.utils.modeling.registry import load_model_module, read_module_class_name
 
 logger = logging.getLogger(__name__)
 logger.addHandler(console_handler)
@@ -380,7 +380,11 @@ def evaluate(
             metrics_spec.get('reporting', {}),
             flat_metrics, curves, prediction, observation, items,
             ensemble_members=ensemble_members_full,
-            plot_dates=_as_name_list(plot_dates) if plot_dates else None
+            plot_dates=_as_name_list(plot_dates) if plot_dates else None,
+            # the family the CHECKPOINT resolved to, not the CLI argument: it titles every map figure, and a stale
+            # `--model-family` would otherwise label a figure with a family it was not produced by
+            model_family=read_module_class_name(os.path.join(root_path, model_path),
+                                               model_family=model_family)
         )
 
     headline = {name: finite_metrics[name] for name in HEADLINE_METRICS if name in finite_metrics}

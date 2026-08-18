@@ -1,30 +1,38 @@
-"""The lightning map grammar: projection, colour system and the diff-map encoding.
+"""The lightning map grammar: projection and colour system.
 
 Implements the visual specification in ``.claude/plans/inventory-figures.md`` §1, whose design reference is
 ``notebooks/02a_visualize_val_event_diffusion.ipynb`` on the adrien-mc-dropout branch. The notebook itself is not
 ported — this module is the non-interactive reproduction of its styling, which the report figures in
 ``src/utils/metrics/reporting.py`` draw with.
 
-Three ideas carry the grammar:
+Two ideas carry the grammar:
 
 1. **Unit bins in lightning-hours.** The daily target is an integer count of hours, so the colour axis is one band
    per whole hour rather than a continuous ramp. The sub-1 interval is split: ``[0, 0.5)`` is white and
    ``[0.5, 1)`` is grey, which separates "no lightning" from "a prediction that rounds down to none".
 
-2. **Two structurally identical palettes.** A warm ramp (white -> yellow -> red) and a cool one
-   (white -> blue -> navy), both built against the SAME ``max_val`` so their two ``BoundaryNorm``s span an
-   identical range and their colorbars are directly comparable.
+2. **ONE palette, shared by every panel of a figure.** A warm ramp (white -> yellow -> red), built against a single
+   ``max_val`` and served by a single colorbar, so any two panels of one figure are directly comparable by eye.
 
-3. **The diff map.** One panel showing magnitude AND error direction at once, by drawing the prediction twice under
-   complementary masks: warm where ``pred >= obs``, cool where ``pred < obs``. A single panel then answers both
-   "how much lightning" and "over- or under-predicted", which two separate panels cannot.
+⛔ **The warm/cool DIFF ENCODING is gone** (Step 4 block 4e). Prediction panels used to be drawn twice under
+complementary masks — warm where ``pred >= obs``, cool where ``pred < obs`` — so one panel carried magnitude AND
+error direction, at the cost of a second palette and a second colorbar. The second colorbar collided with the
+ensemble-std one and the pair read as clutter, so the encoding was dropped in favour of plain single-palette maps.
+Error direction is now read by comparing the observed and predicted panels, and quantitatively from ``bias``,
+``under_frac_*`` / ``over_frac_*`` and the residual diagnostics.
+
+``_BASE_COLORS_COOL`` is **kept as legacy** — see its comment. What went is the *machinery* built on it
+(``draw_diff_map``, ``LightningScales`` / ``make_lightning_scales`` and the two-colorbar helper), which was only ever
+meaningful as a set; the palette itself survives one call away, so reinstating the encoding is a small piece of work
+rather than a re-derivation.
 
 The colour scale is observation-driven and PER DATE (``max_val = ceil(nanmax(obs))``), so every panel of one
 figure shares a scale; panels from different days deliberately do not.
 """
-from typing import NamedTuple, Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 import cartopy.crs as ccrs
+
 import numpy as np
 from matplotlib.colors import BoundaryNorm, ListedColormap
 
@@ -41,11 +49,17 @@ KM_PER_PIXEL = 27.75
 _BASE_COLORS_WARM = [
     '#FFFFFF', '#FFF5A6', '#FFE37B', '#FACA57', '#F5AD37',
     '#F08C1E', '#E36C16', '#D24D17', '#B33117', '#992015',
-]                                                    # white -> yellow -> red   (observed, and pred >= obs)
+]                                                    # white -> yellow -> red; THE palette, used by every panel
+# ⚠️ LEGACY, deliberately kept though nothing ships that uses it. This was the second palette of the warm/cool
+# over/under diff encoding dropped in Step 4 block 4e (see the module docstring). It is retained rather than deleted
+# because it is the one piece of that encoding worth keeping: the ramp is tuned to be perceptually the mirror of the
+# warm one, so it would have to be re-derived rather than re-typed. `make_lightning_cmap(max_val,
+# _BASE_COLORS_COOL)` still returns a cool cmap/norm on an axis identical to the warm pair's, which is all a second
+# palette ever needed.
 _BASE_COLORS_COOL = [
     '#FFFFFF', '#D6E6F5', '#A8CCE8', '#7FB0DB', '#5594CE',
     '#3576C0', '#1F5BA8', '#13428A', '#0A2E6B', '#06204D',
-]                                                    # white -> blue -> navy    (pred < obs)
+]                                                    # white -> blue -> navy
 _GREY = '#9E9E9E'                                    # values in [0.5, 1) lightning-hours
 
 
@@ -60,11 +74,11 @@ def make_lightning_cmap(max_val: float, base_colors: Sequence[str] = _BASE_COLOR
     Args:
         max_val: Upper end of the value axis, rounded up to a whole hour (``ceil``); at least 1. Pass
             ``nanmax(observation)`` so the scale is observation-driven and every panel of one figure shares it.
-        base_colors: The 10-stop ramp to interpolate, ``_BASE_COLORS_WARM`` (default) or ``_BASE_COLORS_COOL``.
+        base_colors: The 10-stop ramp to interpolate. Only ``_BASE_COLORS_WARM`` ships, but the parameter is what
+            keeps the binning logic independent of the ramp, and it is how a second palette would be reintroduced.
 
     Returns:
-        Tuple ``(ListedColormap, BoundaryNorm)``. Because both palettes are interpolated onto the same number of
-        intervals, a warm/cool pair built from one ``max_val`` shares an identical value axis.
+        Tuple ``(ListedColormap, BoundaryNorm)``, the pair every map panel and the figure's single colorbar share.
     """
     max_val = max(int(np.ceil(float(max_val))), 1)
     n_intervals = max_val
@@ -84,25 +98,6 @@ def make_lightning_cmap(max_val: float, base_colors: Sequence[str] = _BASE_COLOR
 
     cmap = ListedColormap(colors, 'lightnings')
     return cmap, BoundaryNorm(levels, cmap.N)
-
-
-class LightningScales(NamedTuple):
-    """The warm/cool colormap pair for one figure, both on the same value axis.
-
-    Kept as one object because the pair is only meaningful together: the diff-map encoding and its two colorbars
-    rely on the two ``BoundaryNorm``s spanning an identical range.
-    """
-    warm_cmap: ListedColormap
-    warm_norm: BoundaryNorm
-    cool_cmap: ListedColormap
-    cool_norm: BoundaryNorm
-
-
-def make_lightning_scales(max_val: float) -> LightningScales:
-    """Both palettes for one figure, built against a single ``max_val`` (see :func:`make_lightning_cmap`)."""
-    warm_cmap, warm_norm = make_lightning_cmap(max_val, _BASE_COLORS_WARM)
-    cool_cmap, cool_norm = make_lightning_cmap(max_val, _BASE_COLORS_COOL)
-    return LightningScales(warm_cmap, warm_norm, cool_cmap, cool_norm)
 
 
 def geographic_context():
@@ -131,7 +126,15 @@ def frame_map_axis(ax, title: str, left_labels: bool, data_crs) -> None:
     (inventory-figures.md §5) keeps the coast as the geographic anchor and leaves out political boundaries, whose
     line density would compete with a field that is 99.93 % zero.
     """
-    ax.set_title(title, fontsize=11)
+    # 🐛 `y=` is LOAD-BEARING, not styling. Without an explicit y, matplotlib runs its automatic title placement,
+    # which consults the axes' child artists to push the title clear of the tick labels — and a cartopy Gridliner with
+    # `draw_labels=True` reports NON-FINITE extents, so the computed position comes out `inf` and THE TITLE IS NEVER
+    # DRAWN. `ax.get_title()` still returns the string, so nothing in the object model looks wrong; the title is simply
+    # absent from the rendered figure. Setting y explicitly skips that pass entirely.
+    #
+    # Same underlying cartopy behaviour as the cropped-save bug in `reporting._save_map_figure`: non-finite gridliner
+    # extents poison every matplotlib layout computation that walks an axes' children.
+    ax.set_title(title, fontsize=11, y=1.02)
     ax.set_extent(DISPLAY_EXTENT, crs=data_crs)
     ax.coastlines(linewidth=0.8)
     ax.set_aspect('equal')
@@ -166,41 +169,22 @@ def draw_map(
     return image
 
 
-def draw_diff_map(
-        ax,
-        prediction: np.ndarray,
-        observation: np.ndarray,
-        title: str,
-        data_crs,
-        scales: LightningScales,
-        left_labels: bool = False
-) -> None:
-    """Draw a prediction with the over/under encoding: warm where ``pred >= obs``, cool where ``pred < obs``.
+LIGHTNING_COLORBAR_X = 0.89                          # see add_lightning_colorbar for why this and not 0.85
 
-    The prediction is drawn TWICE under complementary masks, both on the shared value axis, so one panel conveys
-    magnitude and error direction simultaneously. The two masks partition the grid exactly — ``<`` and ``>=`` are
-    complementary — so every cell is painted by exactly one layer and neither hides the other.
 
-    Note both layers show the PREDICTION; the observation only decides which palette each cell is drawn in.
+def add_lightning_colorbar(figure, cmap, norm, bottom: float, height: float,
+                           x_position: float = LIGHTNING_COLORBAR_X) -> None:
+    """The figure's ONE detached vertical colorbar, on the right, spanning the given rows.
+
+    Every panel shares one palette and one value axis, so one bar serves the whole figure.
+
+    ⚠️ ``x_position`` is 0.89, not the 0.85 the two-colorbar version used. On the ensemble layout the
+    ensemble-std panel has its own ``viridis`` bar at 0.80 whose ``h / day`` label sits to its right, and at 0.85 the
+    shared bar landed on top of that label. 0.89 clears it while leaving room for this bar's own tick labels inside
+    the canvas.
     """
-    over = np.ma.masked_where(prediction < observation, prediction)          # pred >= obs -> warm
-    under = np.ma.masked_where(prediction >= observation, prediction)        # pred <  obs -> cool
-    for field, cmap, norm in (
-            (over, scales.warm_cmap, scales.warm_norm),
-            (under, scales.cool_cmap, scales.cool_norm),
-    ):
-        ax.imshow(field, cmap=cmap, norm=norm, origin='upper', transform=data_crs, extent=GRID_EXTENT)
-    frame_map_axis(ax, title, left_labels, data_crs)
-
-
-def add_shared_diff_colorbars(figure, scales: LightningScales, bottom: float, height: float) -> None:
-    """Two detached vertical colorbars on the right, one per diff palette, spanning the given figure rows."""
     from matplotlib.cm import ScalarMappable
 
-    for x_position, cmap, norm, label in (
-            (0.85, scales.warm_cmap, scales.warm_norm, 'pred ≥ obs  (h / day)'),
-            (0.91, scales.cool_cmap, scales.cool_norm, 'pred < obs  (h / day)'),
-    ):
-        mappable = ScalarMappable(cmap=cmap, norm=norm)
-        mappable.set_array([])
-        figure.colorbar(mappable, cax=figure.add_axes([x_position, bottom, 0.016, height]), label=label)
+    mappable = ScalarMappable(cmap=cmap, norm=norm)
+    mappable.set_array([])
+    figure.colorbar(mappable, cax=figure.add_axes([x_position, bottom, 0.016, height]), label='h / day')

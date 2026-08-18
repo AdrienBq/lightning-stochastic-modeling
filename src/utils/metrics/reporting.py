@@ -20,7 +20,8 @@ Two things to know before adding a figure:
 
 The map styling follows ``.claude/plans/inventory-figures.md`` §1 (the 02a grammar), implemented in
 ``src/utils/plotting/maps.py``: cartopy ``EuroPP`` axes over a ``PlateCarree`` data transform, ``origin='upper'``,
-unit bins in lightning-hours, and the warm/cool over/under diff encoding.
+unit bins in lightning-hours, and ONE warm palette shared by every panel of a figure under a single colorbar. (The
+warm/cool over/under diff encoding was dropped in Step 4 block 4e — see that module's docstring.)
 """
 import logging
 import os
@@ -40,8 +41,8 @@ from src.utils.plotting.palettes import (
     get_color, ibm_diverging_palette_factory, ibm_linear_palette_factory,
 )
 from src.utils.plotting.maps import (
-    DISPLAY_EXTENT, GRID_EXTENT, KM_PER_PIXEL, add_map_axis, add_shared_diff_colorbars, draw_diff_map, draw_map,
-    geographic_context, make_lightning_scales,
+    DISPLAY_EXTENT, GRID_EXTENT, KM_PER_PIXEL, add_lightning_colorbar, add_map_axis, draw_map,
+    geographic_context, make_lightning_cmap,
 )
 
 # diverging map for the residual diagnostics (signed bias / log-surprise): orange (negative) -> white (0) ->
@@ -133,28 +134,30 @@ def _select_plot_indices(observation, prediction, items, plot_dates) -> List[Tup
 
 
 def _deterministic_day_figure(observation, prediction, title, projection, data_crs):
-    """1 x 2: Observed (warm) | Predicted (diff), with the two shared diff colorbars on the right."""
-    scales = make_lightning_scales(np.nanmax(observation))
+    """1 x 2: observations | predictions, both on the one shared palette, with a single colorbar on the right."""
+    cmap, norm = make_lightning_cmap(np.nanmax(observation))
     figure = plt.figure(figsize=(11, 5.5))
     grid = figure.add_gridspec(1, 2, left=0.05, right=0.80, top=0.88, bottom=0.10, wspace=0.05)
     figure.suptitle(title, fontsize=14, fontweight='bold')
-    draw_map(add_map_axis(figure, grid[0, 0], projection), observation, 'Observed', data_crs,
-             scales.warm_cmap, scales.warm_norm, left_labels=True)
-    draw_diff_map(add_map_axis(figure, grid[0, 1], projection), prediction, observation, 'Predicted',
-                  data_crs, scales)
-    add_shared_diff_colorbars(figure, scales, 0.10, 0.78)
+    for column, (field, panel_title) in enumerate(
+            ((observation, 'observations'), (prediction, 'predictions'))):
+        draw_map(add_map_axis(figure, grid[0, column], projection), field, panel_title, data_crs,
+                 cmap, norm, left_labels=(column == 0))
+    add_lightning_colorbar(figure, cmap, norm, 0.10, 0.78)
     return figure
 
 
 def _stochastic_day_figure(observation, mean, std, members, title, projection, data_crs, rng):
-    """2 x 3 — row 0: Observed (warm) | ensemble mean (diff) | ensemble std (viridis, its own scale);
-    row 1: up to three randomly chosen members (diff).
+    """2 x 3 — row 0: observations | ensemble mean | ensemble std; row 1: up to three randomly chosen members.
 
-    The ensemble MEAN is the point-prediction analogue of the deterministic "Predicted" pane, so it carries the same
-    over/under encoding and shares the same two colorbars. The STD is a spread, not a count, so it keeps its own
+    Every panel but the std shares the one lightning palette and its single colorbar, so the observation, the mean and
+    the members are directly comparable by eye. The STD is a spread, not a count of hours, so it keeps its own
     continuous ``viridis`` scale and a detached colorbar spanning row 0 only.
+
+    The members are labelled ``member 1..3`` in the order drawn, not by their index in the ensemble: MC-dropout and
+    diffusion members are exchangeable, so a member's position in the stack carries no meaning worth putting in a title.
     """
-    scales = make_lightning_scales(np.nanmax(observation))
+    cmap, norm = make_lightning_cmap(np.nanmax(observation))
     n_members = int(members.shape[0])
     k = min(3, n_members)
     chosen_index = rng.choice(n_members, size=k, replace=False)
@@ -170,27 +173,27 @@ def _stochastic_day_figure(observation, mean, std, members, title, projection, d
                                hspace=hspace, wspace=0.05)
     figure.suptitle(title, fontsize=14, fontweight='bold')
 
-    draw_map(add_map_axis(figure, grid[0, 0], projection), observation, 'Observed', data_crs,
-             scales.warm_cmap, scales.warm_norm, left_labels=True)
-    draw_diff_map(add_map_axis(figure, grid[0, 1], projection), mean, observation, 'Predicted (ensemble mean)',
-                  data_crs, scales)
-    std_image = draw_map(add_map_axis(figure, grid[0, 2], projection), std, 'Predicted (ensemble std)',
+    draw_map(add_map_axis(figure, grid[0, 0], projection), observation, 'observations', data_crs,
+             cmap, norm, left_labels=True)
+    draw_map(add_map_axis(figure, grid[0, 1], projection), mean, 'ensemble mean', data_crs, cmap, norm)
+    std_image = draw_map(add_map_axis(figure, grid[0, 2], projection), std, 'ensemble std',
                          data_crs, 'viridis', norm=None, vmin=0)
     for column in range(n_cols):
         ax = add_map_axis(figure, grid[1, column], projection)
         if column < k:
-            draw_diff_map(ax, chosen[column], observation, f'Member {int(chosen_index[column]) + 1}',
-                          data_crs, scales, left_labels=(column == 0))
+            draw_map(ax, chosen[column], f'member {column + 1}', data_crs, cmap, norm,
+                     left_labels=(column == 0))
         else:                                                            # fewer than 3 members: blank the slot
             ax.set_axis_off()
 
     # the std colorbar is detached, right of the std panel, spanning row 0 only
     figure.colorbar(std_image, cax=figure.add_axes([0.80, row0_bottom, 0.016, cell_height]), label='h / day')
-    add_shared_diff_colorbars(figure, scales, grid_bottom, grid_top - grid_bottom)
+    add_lightning_colorbar(figure, cmap, norm, grid_bottom, grid_top - grid_bottom)
     return figure
 
 
-def maps_most_extreme_days(prediction, observation, items, report_path, ensemble_members=None, plot_dates=None):
+def maps_most_extreme_days(prediction, observation, items, report_path, ensemble_members=None, plot_dates=None,
+                           model_family=None):
     """One map figure PER DAY (``maps_<date>.png`` + ``.pdf``) for the most extreme and median observed days, plus
     any requested ``plot_dates``.
 
@@ -200,8 +203,12 @@ def maps_most_extreme_days(prediction, observation, items, report_path, ensemble
 
     The colour scale is observation-driven and PER DATE (``ceil(nanmax(obs))``), so every panel of one figure shares
     a scale while different days may not — the accepted trade-off of the 02a grammar, which keeps each day's own
-    dynamic range legible. Each figure's title is the date (and hour); the selection category is encoded in the FILE
-    NAME instead.
+    dynamic range legible.
+
+    Each figure's title is ``<date>[ hHH] event, <family> model``; the selection category (most active / median /
+    worst error) is encoded in the FILE NAME instead, so the title says what was plotted rather than why it was
+    picked. ``model_family`` is the family the CHECKPOINT resolved to, so a figure cannot be mislabelled by a stale
+    CLI argument; it is omitted from the title when unknown rather than guessed at.
     """
     projection, data_crs = geographic_context()
     stochastic = ensemble_members is not None
@@ -218,7 +225,8 @@ def maps_most_extreme_days(prediction, observation, items, report_path, ensemble
         date = pd.Timestamp(items.iloc[index]['date']).date()
         hour = items.iloc[index].get('hour')
         suffix = f'_h{int(hour):02d}' if pd.notna(hour) else ''
-        title = f'{date}' + (f' h{int(hour):02d}' if pd.notna(hour) else '')
+        stamp = f'{date}' + (f' h{int(hour):02d}' if pd.notna(hour) else '')
+        title = f'{stamp} event' + (f', {model_family} model' if model_family else '')
         # FILE NAME: maps_<date>[_hHH]_<category>[_<n>]. The per-category ordinal is added only when that category
         # contributes more than one day; a leftover collision falls back to the item index rather than overwriting.
         ordinal = tag_seen.get(tag, 0)
@@ -746,7 +754,8 @@ def write_report(
         observation: np.ndarray,
         items: pd.DataFrame,
         ensemble_members: Optional[np.ndarray] = None,
-        plot_dates: Optional[Sequence[str]] = None
+        plot_dates: Optional[Sequence[str]] = None,
+        model_family: Optional[str] = None
 ) -> None:
     """Write all requested figures and tables to the report directory.
 
@@ -783,7 +792,7 @@ def write_report(
     builders = {
         'maps_most_extreme_days': lambda: maps_most_extreme_days(
             prediction, observation, items, report_path,
-            ensemble_members=ensemble_members, plot_dates=plot_dates
+            ensemble_members=ensemble_members, plot_dates=plot_dates, model_family=model_family
         ),
         'roc_pr_curves': lambda: _roc_pr_curves(curves, report_path, formats),
         'confusion_matrix': lambda: _confusion_matrix(curves, report_path, formats),
