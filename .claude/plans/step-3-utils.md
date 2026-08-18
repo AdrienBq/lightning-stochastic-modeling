@@ -140,7 +140,7 @@ produce the 0–24 daily target. Sub-threshold hours are therefore excluded at t
 written, so the file on disk excludes them permanently.
 
 There are two consequences. First, evaluation only has to ask whether the stored target is positive, because any
-positive value has already survived the two-stroke filter. This is why `config/eval/metrics.yaml` deliberately has
+positive value has already survived the two-stroke filter. This is why `config/eval/metrics_daily.yaml` deliberately has
 no `occurrence_threshold`, and why `resolve_occurrence_event` asserts that none has reappeared: an evaluation-side
 threshold would be a second, competing definition of "this cell had lightning", and the two definitions could
 disagree with each other. Second, changing `hourly_threshold` changes the target itself, so it requires re-running
@@ -168,7 +168,7 @@ A is a superset apart from two functions. Per [`inventory-scores.md`](inventory-
   `dice_loss` in the occurrence head.
 - ❌ **Drop D's `psd_full_fidelity`** as a function. **Unify `psd_fidelity` behind one `band:` argument**
   (`high`/`mid`/`low`/`full`); the *metric keys* `psd_full_fidelity` and `psd_high_fidelity` stay, served by it via
-  the runner's `*_fidelity`-suffix rule. `config/eval/metrics.yaml` needs no change for this.
+  the runner's `*_fidelity`-suffix rule. `config/eval/metrics_daily.yaml` needs no change for this.
 - ❌ **Remove** `tweedie_deviance_score` (🔢) and `uniform_histogram_ks` (the PIT test — its call site read the
   deleted gamma stats).
 - 🔧 **`stratified_mae`** — its bins were positive-count quantiles; they are now the absolute hour bands.
@@ -216,7 +216,7 @@ D's 198-line version renders raw pixel indices with no projection; A's has the f
   name to a lambda, and each line-or-table figure function begins by fetching its entry from the `curves` dictionary
   and returning immediately if it is missing. A deterministic run never populates `curves['rank_histogram']`, and a
   non-residual run never populates `curves['residual']`, so those figures skip themselves and
-  `config/eval/metrics.yaml` can list all fourteen unconditionally. Two caveats worth knowing before adding figures:
+  `config/eval/metrics_daily.yaml` can list all fourteen unconditionally. Two caveats worth knowing before adding figures:
   - `maps_most_extreme_days` does **not** consult `curves` at all. It receives `prediction`, `observation`, `items`
     and `ensemble_members` as direct arguments and picks its layout by checking whether `ensemble_members` is
     `None`. So the self-skipping mechanism covers the line and table figures only, not the map figure.
@@ -351,7 +351,7 @@ optimising the wrong objective.
 in-module `valid_regression_score` so that MC-dropout validates through this same shared path.
 
 > **⚠️ CONFIG FLAG — SELECTION SCORES.** All three files
-> `config/{deterministic_unet,mc_dropout,diffusion}/search_space.yaml` currently carry the single composite decided
+> `config/{deterministic_unet,mc_dropout,diffusion}/search_space_daily.yaml` currently carry the single composite decided
 > earlier in Step 2, which was `0.40 average_precision_occurrence + 0.30 mae_cond_ss_climatology +
 > 0.30 psd_full_fidelity`. Every pipeline runs `mode: daily`, so each `selection:` block should become
 > `metric: valid_regression_score` with `mae_cond_ss_climatology: 0.60` and `psd_full_fidelity: 0.40`. The
@@ -508,7 +508,7 @@ every score in this repo is computed on the arrays rather than on the rendered p
   perfect forecast reads as under-prediction. Swapping the two masks trips both checks.
 - Both layouts (panel and colorbar counts, figsize, the `M = 2` smoke case blanking its third slot), the std panel's
   vmax being **derived from the day** rather than 02b's hardcoded `vmax=8` (§5 issue 2), the PSD figure's kilometre
-  axis and inverted x, and `metrics.yaml` ⇄ `write_report` parity in **both** directions (no unconfigured builder,
+  axis and inverted x, and `metrics_daily.yaml` ⇄ `write_report` parity in **both** directions (no unconfigured builder,
   no undispatched figure, `qq_plot` absent from both).
 
 ## 5a. Tests — ✅ DONE (598 passing, 613 collected, 14 skipped — 815 / 830 after 5b)
@@ -645,7 +645,7 @@ The Lightning hooks, which the gates drove and the mirror never called: `validat
 (including that the finetune loss really **adds** its ensemble term — without it phase 2 is phase 1 at a lower
 learning rate, which fits, checkpoints and scores plausibly), diffusion's `_flow_loss` determinism and
 `prepare_full_validation`, the calibration phases freezing everything but their own layer, the two report layouts
-inspected as figures rather than as file names, and the shipped `metrics.yaml` suite driven end to end in both its
+inspected as figures rather than as file names, and the shipped `metrics_daily.yaml` suite driven end to end in both its
 daily and hourly configurations.
 
 Also closed a documented divergence risk nothing covered: **the numpy validation mirror agrees with the torch
@@ -786,7 +786,7 @@ This is the same reasoning that removed `min_hours` and that picks the selection
 value per mode adds a way to be wrong and no way to be right.
 
 > **⚠️ CONFIG FLAG — OUTPUT ACTIVATION.** Remove the `output_activation` key from all three
-> `config/{deterministic_unet,mc_dropout,diffusion}/search_space.yaml` files. Make `max_hours` daily-only, and say so
+> `config/{deterministic_unet,mc_dropout,diffusion}/search_space_daily.yaml` files. Make `max_hours` daily-only, and say so
 > in its comment: in hourly mode the ceiling is 1 and is guaranteed by the sigmoid, so `max_hours` does not apply.
 > This also retires the dangling cross-reference those three files currently carry to the deleted
 > "open question: where max_hours is enforced" section.

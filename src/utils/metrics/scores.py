@@ -1,6 +1,6 @@
 """Verification scores for rare-event map regression and occurrence classification.
 
-Two metric families address the two evaluation challenges of the project (see config/eval/metrics.yaml):
+Two metric families address the two evaluation challenges of the project (see config/eval/metrics_daily.yaml):
 
 Imbalance-aware (challenge A):
 - occurrence-conditional and intensity-stratified continuous errors;
@@ -646,7 +646,7 @@ def psd_fidelity(ratio: float) -> float:
 
     ONE function serves every band: the metric keys ``psd_full_fidelity`` and ``psd_high_fidelity`` are produced by
     the evaluation suite passing this the corresponding band's ratio (the ``band:`` argument of each
-    ``psd_*_fidelity`` entry in metrics.yaml). There is deliberately no separate ``psd_full_fidelity`` function.
+    ``psd_*_fidelity`` entry in metrics_daily.yaml). There is deliberately no separate ``psd_full_fidelity`` function.
     """
     if not np.isfinite(ratio):
         return 0.0

@@ -120,11 +120,23 @@ The repo is built on the `plumber` MLflow pipeline template. See [README.md](REA
 
   | Directory | Holds |
   |---|---|
-  | `config/split/` | `split.yaml` (the year split) + `split_smoke_cpu.yaml` / `split_smoke_gpu.yaml` subsets |
-  | `config/eval/` | `metrics.yaml` (**the** shared suite) + the cross-family `probabilistic_eval*.yaml` |
-  | `config/<family>/` | that family's pipeline, its two smoke tiers, and its `search_space.yaml` |
+  | `config/split/` | `split.yaml` (the year split) + `split_smoke_cpu.yaml` / `split_smoke_gpu.yaml` subsets — **task-agnostic**, shared by daily and hourly |
+  | `config/eval/` | `metrics_daily.yaml` and `metrics_hourly.yaml` (**the** two shared suites) + the cross-family `probabilistic_eval*.yaml` |
+  | `config/<family>/` | that family's pipelines, their smoke tiers, and one `search_space_<task>.yaml` per task |
 
-  Each family has three tiers: `<family>.yaml` (full), `<family>_smoke_cpu.yaml` and `<family>_smoke_gpu.yaml`.
+  **Every task-specific file names its task**, so an unsuffixed name is never ambiguous: `metrics_daily.yaml` /
+  `metrics_hourly.yaml`, `search_space_daily.yaml` / `search_space_hourly.yaml`, and
+  `<family>_<task>[_smoke_cpu|_smoke_gpu].yaml`. The three daily families therefore have three tiers each
+  (`<family>_daily.yaml`, `<family>_daily_smoke_cpu.yaml`, `<family>_daily_smoke_gpu.yaml`) and
+  `deterministic_unet` additionally has `deterministic_unet_hourly.yaml` + `deterministic_unet_hourly_smoke_cpu.yaml`.
+  ⚠️ **The `$OUTPUT_ROOT` directory names were deliberately NOT renamed** (`$OUTPUT_ROOT/deterministic_unet_smoke_cpu`,
+  not `..._daily_smoke_cpu`): they are where ~60 GiB of prepared data and checkpoints already live, and the config
+  rename was about disambiguating source files.
+- **An hourly pipeline swaps exactly three files** — `metrics-config`, `model-config` and (implicitly) the prepared
+  directory — and each has a *silent* failure mode if it does not move with the others. A daily metrics suite cuts a
+  probability field at `> 0` (POD ≈ 1, a contingency table of nonsense, nothing raised); a daily search space names
+  `valid_regression_score`, which `selection_metric_for_mode` **rejects**; a daily prepared directory makes
+  `prepare_modeling` raise on the mode mismatch. `parse_config_test.py` pins all three.
 - **Env vars in config use `{{$VAR}}`, not `${VAR}`.** `parse_config` substitutes textually *before* the YAML parse,
   and an **unset variable becomes the empty string** rather than an error — so quote interpolated scalars
   (`data-path: '{{$DATA_ROOT}}'`) and expect a missing variable to fail inside the stage, not at parse time.

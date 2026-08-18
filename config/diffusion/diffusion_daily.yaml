@@ -16,7 +16,7 @@ description: 'Flow-matching parameterization of lightning, optionally residual o
 # =====================================================================================================================
 # Pipeline: FLOW-MATCHING (conditional diffusion) parameterization of lightning from ERA5 reanalysis predictors.
 #
-# Same diagnostic ERA5 -> lightning mapping and same target as config/deterministic_unet/deterministic_unet.yaml. The model is a
+# Same diagnostic ERA5 -> lightning mapping and same target as config/deterministic_unet/deterministic_unet_daily.yaml. The model is a
 # transformer velocity field trained with the rectified-flow objective, and it generates an ENSEMBLE by taking
 # independent ODE draws per item -- so it feeds the same shared ensemble contract as MC-dropout.
 #
@@ -30,7 +30,7 @@ description: 'Flow-matching parameterization of lightning, optionally residual o
 #
 #     export UPSTREAM_MODEL=$OUTPUT_ROOT/deterministic_unet/best/best_model.ckpt
 #
-#   The upstream comes from config/deterministic_unet/deterministic_unet.yaml -- run that pipeline first. Toggling the mode changes the
+#   The upstream comes from config/deterministic_unet/deterministic_unet_daily.yaml -- run that pipeline first. Toggling the mode changes the
 #   input channel count, so switch output directories (or set overwrite: true on prepare) rather than reusing a
 #   directory prepared for the other setting; a stale residual flag would otherwise be picked up silently.
 #   `residual_target` in the search space must agree with how the directory was prepared.
@@ -80,8 +80,8 @@ stages:
         model-family: diffusion
         model-type: diffusion               # tagged on the mlflow run for ease of access
         input-path: '{{$OUTPUT_ROOT}}/diffusion/prepared/daily'
-        model-config: config/diffusion/search_space.yaml
-        metrics-config: config/eval/metrics.yaml # supplies the climatology baseline behind the
+        model-config: config/diffusion/search_space_daily.yaml
+        metrics-config: config/eval/metrics_daily.yaml # supplies the climatology baseline behind the
                                             # mae_cond_ss_climatology selection component
         output-path: '{{$OUTPUT_ROOT}}/diffusion/tuning'
         metrics-path: '{{$OUTPUT_ROOT}}/diffusion/tuning/best_trial_metrics.json'
@@ -107,7 +107,7 @@ stages:
         model-type: diffusion
         source-path: '{{$OUTPUT_ROOT}}/diffusion/tuning'
         input-path: '{{$OUTPUT_ROOT}}/diffusion/prepared/daily'
-        metrics-config: config/eval/metrics.yaml
+        metrics-config: config/eval/metrics_daily.yaml
         output-path: '{{$OUTPUT_ROOT}}/diffusion/best'
         metrics-path: '{{$OUTPUT_ROOT}}/diffusion/best/best_trial_metrics.json'
         max-epochs: 80
@@ -127,7 +127,7 @@ stages:
         input-path: '{{$OUTPUT_ROOT}}/diffusion/prepared/daily'
         model-path: '{{$OUTPUT_ROOT}}/diffusion/best/best_model.ckpt'
         output-path: '{{$OUTPUT_ROOT}}/diffusion/evaluation'
-        metrics-config: config/eval/metrics.yaml
+        metrics-config: config/eval/metrics_daily.yaml
         metrics-path: '{{$OUTPUT_ROOT}}/diffusion/evaluation/test_metrics.json'
         report-path: '{{$OUTPUT_ROOT}}/diffusion/reports'
         split: test                         # valid | test

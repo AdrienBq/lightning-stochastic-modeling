@@ -570,7 +570,7 @@ def test_every_parameter_the_configs_pass_is_accepted(repo_root):
 
     accepted = set(inspect.signature(prepare_modeling.prepare_modeling).parameters)
     for family in ('deterministic_unet', 'mc_dropout', 'diffusion'):
-        config = parse_config(os.path.join(repo_root, f'config/{family}/{family}.yaml'))
+        config = parse_config(os.path.join(repo_root, f'config/{family}/{family}_daily.yaml'))
         block = next(parameters for stage in config['stages']
                      for name, parameters in stage.items() if name == 'prepare_modeling')
         passed = {key.replace('-', '_') for key in block}

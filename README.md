@@ -108,10 +108,10 @@ partition is identical across all of them.
 ```
 config/
 ├── split/               split.yaml · split_smoke_cpu.yaml · split_smoke_gpu.yaml
-├── eval/                metrics.yaml · probabilistic_eval.yaml · probabilistic_eval_smoke_cpu.yaml
-├── deterministic_unet/  deterministic_unet.yaml · …_smoke_cpu.yaml · …_smoke_gpu.yaml · search_space.yaml
-├── mc_dropout/          mc_dropout.yaml          · …_smoke_cpu.yaml · …_smoke_gpu.yaml · search_space.yaml
-└── diffusion/           diffusion.yaml           · …_smoke_cpu.yaml · …_smoke_gpu.yaml · search_space.yaml
+├── eval/                metrics_daily.yaml · probabilistic_eval.yaml · probabilistic_eval_smoke_cpu.yaml
+├── deterministic_unet/  deterministic_unet_daily.yaml · …_smoke_cpu.yaml · …_smoke_gpu.yaml · search_space_daily.yaml
+├── mc_dropout/          mc_dropout_daily.yaml          · …_smoke_cpu.yaml · …_smoke_gpu.yaml · search_space_daily.yaml
+└── diffusion/           diffusion_daily.yaml           · …_smoke_cpu.yaml · …_smoke_gpu.yaml · search_space_daily.yaml
 ```
 
 Each family has three tiers, differing only in scale: the full pipeline, plus a **`_smoke_cpu`** tier (8 mid-July
@@ -124,14 +124,14 @@ occurrence base rate is non-zero — a winter slice would make every categorical
 export DATA_ROOT=/path/to/batta_torch
 
 # the deterministic baseline first: it is also the upstream for the other two
-python run_project.py config/deterministic_unet/deterministic_unet_smoke_cpu.yaml MY_EXPERIMENT
+python run_project.py config/deterministic_unet/deterministic_unet_daily_smoke_cpu.yaml MY_EXPERIMENT
 
 # then either stochastic family, standalone…
-python run_project.py config/mc_dropout/mc_dropout_smoke_cpu.yaml MY_EXPERIMENT
+python run_project.py config/mc_dropout/mc_dropout_daily_smoke_cpu.yaml MY_EXPERIMENT
 
 # …or built on the upstream (weights for mc_dropout, predictions for diffusion)
 export UPSTREAM_MODEL=$OUTPUT_ROOT/deterministic_unet_smoke_cpu/best/best_model.ckpt
-python run_project.py config/diffusion/diffusion_smoke_cpu.yaml MY_EXPERIMENT
+python run_project.py config/diffusion/diffusion_daily_smoke_cpu.yaml MY_EXPERIMENT
 
 # finally the cross-family comparison — the proof all three report the same metrics
 python run_project.py config/eval/probabilistic_eval_smoke_cpu.yaml MY_EXPERIMENT

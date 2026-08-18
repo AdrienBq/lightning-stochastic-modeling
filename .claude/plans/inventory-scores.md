@@ -3,7 +3,7 @@
 **Purpose.** Complete factual inventory of every score defined on the two source branches, grouped by category
 and by cross-branch similarity. **The `Decision` column is for you to fill in** (`keep` / `change` / `remove`,
 plus notes). Once annotated, this file is the single source of truth for the unified `src/utils/metrics/scores.py`
-and for `config/metrics.yaml` in Step 2.
+and for `config/metrics_daily.yaml` in Step 2.
 
 Nothing here is a recommendation — it is what exists, with the differences made explicit.
 
@@ -81,7 +81,7 @@ stay; what goes is machinery for **unbounded heavy-tailed counts** and for the t
 | `fss` | 253 | 223 | `A-SUPERSET` | Fractions skill score at threshold × neighbourhood scale. A takes extra params | keep |
 | `fss_useful_scale` | 291 | 256 | `IDENTICAL` | Smallest scale where `FSS > 0.5 + base_rate/2` | modify : do not recompute the fss at all scales, but used the precomputed scores from the passes of fss |
 | `mean_power_spectrum` | 313 | 277 | `A-SUPERSET` | Mean 2-D power spectrum. **A adds a `progress` callback** (for long streaming passes) | keep |
-| `_wavelength_grid` | 323 | 285 | `IDENTICAL` | Private: pixel-wavelength grid for radial binning | keep — the shared basis of every PSD score, so the band edges in `metrics.yaml` mean the same thing everywhere |
+| `_wavelength_grid` | 323 | 285 | `IDENTICAL` | Private: pixel-wavelength grid for radial binning | keep — the shared basis of every PSD score, so the band edges in `metrics_daily.yaml` mean the same thing everywhere |
 | `radial_psd` | 332 | 294 | `A-SUPERSET` | Radially-averaged PSD; A's signature is richer | keep |
 | `radial_psd_per_map` | 364 | — | `A-ONLY` | Per-map PSD instead of pre-averaged — required for **pooled ensemble** structure scoring (avoids averaging maps before spectra) | keep |
 | `psd_band_ratios` | 410 | 315 | `IDENTICAL` | Pred/obs PSD ratio per named wavelength band (`full`/`low`/`mid`/`high`, pixels) | keep |
@@ -140,7 +140,7 @@ Neither group is flagged — both are **task-agnostic** — but two points matte
 
 ## Threshold redefinition needed (🎯 `TAIL-THRESH` rows)
 
-`config/metrics.yaml` currently defines thresholds as quantiles of the **positive train-count marginal**:
+`config/metrics_daily.yaml` currently defines thresholds as quantiles of the **positive train-count marginal**:
 
 ```yaml
 thresholds:
@@ -187,11 +187,11 @@ recording explicitly, because doing it uniformly in either direction loses real 
 1. **`dice_coefficient`** — the only genuinely unique score on D. Keep it? It pairs with `dice_loss`, so its fate
    probably follows the occurrence-classifier decision.
 2. **`psd_full_fidelity`** — keep D's named convenience wrapper, or standardise on A's
-   `psd_band_ratios(...)['full']` + `psd_fidelity` composition? (`config/metrics.yaml` already declares
+   `psd_band_ratios(...)['full']` + `psd_fidelity` composition? (`config/metrics_daily.yaml` already declares
    `psd_full_fidelity` as a metric key either way.)
 3. **The two `CONTRACT-DIFFERS` functions** — confirm A's `float`-returning contract wins, so I can assert it in
    the design doc and add a test pinning the return type.
-4. **`config/metrics.yaml` is already an extensive design doc** on A (baselines, thresholds, and 6 metric groups
+4. **`config/metrics_daily.yaml` is already an extensive design doc** on A (baselines, thresholds, and 6 metric groups
    with rationale). Should the metrics design doc *reference* it as the source of truth rather than restating it?
 
 1. Keep

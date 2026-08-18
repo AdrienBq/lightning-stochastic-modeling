@@ -9,7 +9,7 @@ with no tests until now. CLAUDE.md states both halves:
     ``split-config`` / ``model-config`` pointing at files that exist.
 
 The stale-path degradation is the dangerous one and gets the sharpest test here. A pipeline whose ``metrics-config``
-points at a moved file does not fail: the parameter stops being recognised as an input, so editing ``metrics.yaml`` no
+points at a moved file does not fail: the parameter stops being recognised as an input, so editing ``metrics_daily.yaml`` no
 longer busts the cache and the stage keeps returning an old cached result.
 
 ``find_cached_run`` is driven against a stub client rather than a live tracking server: what matters about it is the
@@ -42,7 +42,7 @@ def test_an_existing_path_under_an_output_key_is_an_output(tmp_path, repo_root):
 
 
 def test_an_existing_path_under_ANY_other_key_is_an_input(tmp_path, repo_root):
-    config = tmp_path / 'metrics.yaml'
+    config = tmp_path / 'metrics_daily.yaml'
     config.write_text('metrics: {}\n')
     inputs, outputs = lazy.classify_params({'metrics-config': str(config)}, repo_root)
     assert 'metrics-config' in inputs
@@ -63,7 +63,7 @@ def test_a_REAL_tune_stage_has_its_config_parameters_classified_as_inputs(repo_r
 
     from src.utils.io.parse_config import parse_config
 
-    config = parse_config(os.path.join(repo_root, 'config/deterministic_unet/deterministic_unet.yaml'))
+    config = parse_config(os.path.join(repo_root, 'config/deterministic_unet/deterministic_unet_daily.yaml'))
     tune = next(params for stage in config['stages'] for name, params in stage.items() if name == 'tune')
 
     inputs, outputs = lazy.classify_params(dict(tune), repo_root)
@@ -79,7 +79,7 @@ def test_a_STALE_path_silently_stops_being_an_input(tmp_path, repo_root):
     """The documented corollary, and the reason to keep those config paths valid. A path that does not exist is not an
     error — it is simply not recognised as a path, so it degrades to a plain scalar and the cache stops fingerprinting
     its CONTENTS. Editing the file it used to point at then no longer invalidates the stage."""
-    missing = str(tmp_path / 'moved_away' / 'metrics.yaml')
+    missing = str(tmp_path / 'moved_away' / 'metrics_daily.yaml')
     assert not os.path.exists(missing)
 
     inputs, outputs = lazy.classify_params({'metrics-config': missing}, repo_root)
@@ -90,7 +90,7 @@ def test_a_STALE_path_silently_stops_being_an_input(tmp_path, repo_root):
 def test_the_cache_key_stops_changing_when_the_input_path_goes_stale(tmp_path, repo_root):
     """The consequence made concrete. With a LIVE path, editing the file changes the fingerprint and therefore the cache
     key. With a STALE path, the two edits are indistinguishable — same key, so a cached run is reused."""
-    config = tmp_path / 'metrics.yaml'
+    config = tmp_path / 'metrics_daily.yaml'
 
     def key_for(params):
         fingerprint = lazy.fingerprint_paths(lazy.classify_params(params, repo_root)[0], repo_root,
@@ -103,7 +103,7 @@ def test_the_cache_key_stops_changing_when_the_input_path_goes_stale(tmp_path, r
     live_after = key_for({'metrics-config': str(config)})
     assert live_before != live_after, 'a live input must invalidate the cache when it changes'
 
-    stale = str(tmp_path / 'gone' / 'metrics.yaml')
+    stale = str(tmp_path / 'gone' / 'metrics_daily.yaml')
     assert key_for({'metrics-config': stale}) == key_for({'metrics-config': stale})
 
 
@@ -279,8 +279,8 @@ def test_the_size_ladder_stops_at_terabytes():
 def test_a_relative_path_resolves_against_the_repo_root_and_an_absolute_one_is_untouched(repo_root):
     """Every path in a pipeline YAML is written relative to the repo root, and the cache has to fingerprint the same file
     the stage will open."""
-    assert lazy._resolve('config/eval/metrics.yaml', repo_root) == \
-        os.path.join(repo_root, 'config/eval/metrics.yaml')
+    assert lazy._resolve('config/eval/metrics_daily.yaml', repo_root) == \
+        os.path.join(repo_root, 'config/eval/metrics_daily.yaml')
     assert lazy._resolve('/absolute/elsewhere.yaml', repo_root) == '/absolute/elsewhere.yaml'
 
 

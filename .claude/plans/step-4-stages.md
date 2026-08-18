@@ -218,7 +218,7 @@ The orchestration is correct as written, and every function it calls exists with
   **`roc_pr_curves.csv`** (long-format points), which is what every other curve figure already did; the summary keeps
   its role, supplying the legend annotations and the PR no-skill floor. ~10 lines in the existing `if 'csv' in formats`
   block, two tests, no signature change.
-- 🔧 **One threshold, not four.** `metrics.yaml` declares `[occurrence, h3, h6, h12]`, so overlaying every one across
+- 🔧 **One threshold, not four.** `metrics_daily.yaml` declares `[occurrence, h3, h6, h12]`, so overlaying every one across
   three families is twelve lines per panel and a PR panel on a log axis is unreadable at that density.
   `_headline_threshold` picks `occurrence` (the event `average_precision_occurrence`, the selection score's
   discrimination term, is defined on) and falls back to the **first-listed** threshold — which is what makes it work
@@ -250,24 +250,70 @@ that claims to catch it.
 
 ---
 
-## The hourly pipeline
+## The hourly pipeline — ✅ DONE in 4f (4 configs, 23 tests, no `src/` change)
 
 The stage code above makes hourly *derivable*; these make it *runnable*.
 
-- ➕ **`config/eval/metrics_hourly.yaml`** — a sibling of `metrics.yaml`, whose own prose (L37-64) already specifies
-  what must change. The load-bearing edit is `metrics.categorical.thresholds`: entries must be `kind: probability`
+**The headline finding: block 4f wrote no Python at all.** Every layer was already mode-aware and the wiring was
+already right — `prepare_modeling._derive_target` emits the 0/1 field, `unet_module_base` reads `mode` from
+`target_stats.json` and flips head/prediction/calibration, the loss dispatch is by NAME so both loss families are
+admissible, `deterministic_module.predict_step` returns `probability=prediction` when hourly, `run_metric_suite`
+detects a probability field from the arrays, and `reporting` already suffixes figure names with the hour. So this block
+is **four config files, twenty-three tests, and a gate** — which is what blocks 4a–4c were paying for.
+
+- ➕ **`config/eval/metrics_hourly.yaml`** — a sibling of `metrics_daily.yaml`, whose own prose already specified what
+  must change. The load-bearing edit is `metrics.categorical.thresholds`: entries must be `kind: probability`
   (`p50: {kind: probability, value: 0.5}`), **not `occurrence`**. An `occurrence` entry resolves to `> 0` on a
   probability field, so it fires on every cell with any non-zero probability — POD ≈ 1, FAR ≈ base rate, a full
   contingency table of nonsense with no error raised. `run_metric_suite` warns at that configuration; the config must
-  not reach it.
-  Also drop `mae_stratified`, `estimation_tendency` and `rank_correlation` (block 2r2 §1: their bins or conditions
-  degenerate on a binary observation).
+  not reach it. Dropped as planned: `mae_stratified`, `estimation_tendency`, `rank_correlation` and the
+  `error_by_intensity_bin` figure that reads the first one's curve. **Kept, deliberately:** the whole `ensemble` group
+  (this is the hourly suite for *all* families, as `metrics_daily.yaml` is the daily one) and `mae`, which is
+  IMPROPER against a 0/1 observation but stays reported for comparability with the daily suite — no selection score
+  and no loss may use it.
+- ➕ **`config/deterministic_unet/search_space_hourly.yaml`** — ⚠️ **not in the original plan, and required.**
+  `selection_metric_for_mode` RAISES when a search space's `selection.metric` disagrees with the prepared mode, so an
+  hourly pipeline cannot reuse a daily space. Its four deltas: binary/proper losses only, `calibration.occurrence`
+  (Platt) with the daily-only `regression` warp gone, `output_activation`/`max_hours` omitted (unread in hourly), and
+  `valid_classification_score` with the classification weights.
+  ⛔ **Four loss names are excluded and each exclusion is load-bearing:** `weighted_mae` / `wmae_psd` because MAE is
+  IMPROPER on a 0/1 target (minimized by a sharp forecast, so the all-zero prediction wins and nothing in the code
+  objects); `asymmetric_huber` because conservativeness is a statement about a magnitude a probability does not have;
+  `crps_binary` because it needs a real ensemble and this family's single forward pass gives N = 1.
 - ➕ **`config/deterministic_unet/deterministic_unet_hourly.yaml`** + its `*_smoke_cpu` tier. Deterministic family
-  only — it is the upstream for the other two, and the point is to prove the classification path runs, not to sweep it.
-- ⚠️ **24× the items.** The 8-day CPU smoke split becomes 192 hourly items; `feature-aggregation` is ignored in hourly
-  mode (an item is already one hour) and **`DayGroupedShuffleSampler` becomes live for the first time** — it is dormant
-  today because every config sets `materialize-features: true`.
+  only — see the note below on why the other two are not a copy-paste away.
+- ⚠️ **24× the items**, and the plan's sampler claim needed one correction. `DayGroupedShuffleSampler` becomes live
+  when `mode == hourly` **and** `not uses_materialized_features` — hourly alone is not enough. So the hourly tiers set
+  **`materialize-features: false`**, which is load-bearing twice: materializing would cost a SECOND ~20 GiB (the daily
+  directory already holds every hour, laid out variable-major) and it is the only way the sampler ever runs. Both
+  tiers, so the smoke tier smokes the loader path the real run uses.
 - ⚠️ **`ensemble-size` ≥ 2** as always: `spread_skill_sums` uses `ddof=1`, and a single member yields a silent `NaN`.
+- ⚠️ **The hourly maps are honest but coarse.** The colour axis is observation-driven (`ceil(nanmax(obs))`) and an
+  hourly observation is 0/1, so `max_val = 1` and the warm palette collapses to white-below-0.5 / grey-above for every
+  hourly figure, under a `h / day` colorbar label naming the daily unit. Correct, not broken; recorded in the config
+  and left as a plotting matter rather than a metrics one.
+
+### ⚠️ Why there is no hourly `mc_dropout` or `diffusion`, and what each would cost
+
+Not an oversight, and the two are not the same distance away:
+
+| | reachable? | what it needs |
+|---|---|---|
+| `mc_dropout` | **yes, config only** | its own hourly search space (`dropout_p` + the `finetuning` block) and a tier pair. The module is fully mode-aware: `_to_prediction_differentiable` sigmoids when hourly, `predict_step` returns `probability`, and phase 2's ensemble loss consumes the TARGET space — probabilities — where continuous CRPS against a 0/1 outcome is a proper score. It could also warm-start from the hourly deterministic upstream and share its prepared directory, exactly as the daily pair does. |
+| `diffusion` | **no — a code-level gap** | its `predict_step` returns `'probability': None` by design ("no occurrence-probability head in this family") and its prediction is `clamp(upstream + residual, 0, max_hours)`, a continuous field rather than a value in [0, 1]. So `prediction_is_probability` is false and all four keys the hourly task exists for are absent or NaN, while `selection_metric_for_mode` still forces `valid_classification_score` with its 0.20 Brier term permanently NaN. Making flow matching emit a calibrated probability (generate logits and sigmoid? generate in probability space?) is a **design decision**, not a copy. |
+
+### The daily/hourly naming rename (4f, unplanned)
+
+With `metrics_hourly.yaml` beside `metrics.yaml`, an unsuffixed name became ambiguous — it read as "the metrics
+config" while being one of two. So **every task-specific config now names its task**: 13 files renamed with `git mv`
+(`metrics_daily.yaml`, 3 × `search_space_daily.yaml`, and 9 × `<family>_daily[_smoke_cpu|_smoke_gpu].yaml`) plus a
+60-file textual sweep over configs, `src/`, `tests/`, the plans, `README.md`, `CLAUDE.md` and `job_scripts/`.
+
+⚠️ **The `$OUTPUT_ROOT` directory names were deliberately NOT renamed.** `$OUTPUT_ROOT/deterministic_unet_smoke_cpu`
+stays as it is: ~60 GiB of prepared data and checkpoints from the 4e gates live there, and renaming would orphan every
+one of them to disambiguate a *source* file. `job_scripts/_common.sh` gained a `MODE=daily|hourly` variable that
+derives the prepared dir, the run dir, the search space and the metrics config **together**, so a stage run by hand
+cannot mix a daily search space with an hourly prepared directory.
 
 ## The rename surface
 
@@ -276,13 +322,13 @@ functional ones:
 
 | Where | What |
 |---|---|
-| 9 × `config/{family}/{family}{,_smoke_cpu,_smoke_gpu}.yaml` | the two stage keys |
+| 9 × `config/{family}/{family}_daily{,_smoke_cpu,_smoke_gpu}.yaml` | the two stage keys |
 | 2 × `config/eval/probabilistic_eval{,_smoke_cpu}.yaml` | `evaluate_regression:` × 3 each |
 | `tests/stages/evaluate_regression_test.py` | → `evaluate_test.py` |
 | `tests/completeness_test.py` | the hardcoded Step-4 set (L112-114) and the census (L170) |
 
-Prose-only (docstrings and comments naming the stage): `CLAUDE.md`, `README.md`, `config/eval/metrics.yaml`,
-`config/split/split*.yaml`, the three `search_space.yaml`, `src/utils/io/data.py`, `registry.py`, `search.py`,
+Prose-only (docstrings and comments naming the stage): `CLAUDE.md`, `README.md`, `config/eval/metrics_daily.yaml`,
+`config/split/split*.yaml`, the three `search_space_daily.yaml`, `src/utils/io/data.py`, `registry.py`, `search.py`,
 `mc_dropout_module.py`, `mc_dropout_eval.py`, and 4 test files. Update them — a comment naming a stage that does not
 exist is how the next reader loses an hour.
 
@@ -290,7 +336,7 @@ exist is how the next reader loses an hour.
 
 ## End-to-end verification
 
-A smoke run (`python run_project.py config/<family>/<family>_smoke_cpu.yaml <EXPERIMENT>`) has exactly the right
+A smoke run (`python run_project.py config/<family>/<family>_daily_smoke_cpu.yaml <EXPERIMENT>`) has exactly the right
 **coverage**: it drives `run_project.py` → the orchestrator → every stage subprocess → the whole library, and it is the
 only thing reaching the 413 statements of `tuning.py` + `stages/run.py` that no unit test can. It has none of the
 properties that make a test a test:
@@ -356,10 +402,10 @@ Two halves, both deliberate:
    `data_test.py`'s `sample_directory` fixture already builds exactly this shape and is the thing to lift into
    `conftest.py`.
 2. **A config DERIVED from the shipped smoke YAML**, not a fixture copy: parse
-   `config/<family>/<family>_smoke_cpu.yaml`, rewrite only `data-path`, `split-config` and the output paths into
+   `config/<family>/<family>_daily_smoke_cpu.yaml`, rewrite only `data-path`, `split-config` and the output paths into
    `tmp_path`, dump it, invoke `run_project.py` on that. Derived means it **cannot drift** from the real pipeline —
    the same principle as `test_a_REAL_tune_stage_has_its_config_parameters_classified_as_inputs`, which reads the
-   shipped `deterministic_unet.yaml` rather than a hand-built dict.
+   shipped `deterministic_unet_daily.yaml` rather than a hand-built dict.
 
 What it asserts, in code:
 
@@ -435,7 +481,7 @@ Per [`rebuild-plan.md`](rebuild-plan.md) §"Verification", in order:
    ```shell
    export DATA_ROOT=/path/to/era5_postprocess          # metadata.json, metadata.csv, samples/
    export OUTPUT_ROOT=/scratch/$USER/lightning-outputs # everything the pipeline writes
-   python run_project.py config/<family>/<family>_smoke_cpu.yaml <EXPERIMENT>
+   python run_project.py config/<family>/<family>_daily_smoke_cpu.yaml <EXPERIMENT>
    ```
 
    It proves the three things a synthetic fixture structurally cannot: the real **101 × 149** grid, the real
@@ -457,10 +503,21 @@ Per [`rebuild-plan.md`](rebuild-plan.md) §"Verification", in order:
    `tabulate_metrics` logs, per family, exactly which metrics it lacks. A deterministic family missing `crps` is
    expected; a family missing `mae` is the merge failure the gate exists to catch.
 
-6. **THE HOURLY SMOKE** — by hand (block `4f`): the hourly pipeline runs end to end, and its metrics JSON carries the
-   classification keys that are **absent** in daily mode — `brier_skill_score`, `explained_deviance`,
-   `dice_occurrence`, `average_precision_occurrence`. Their presence is the proof that `probability` was populated and
-   the occurrence head reached the metric suite; in daily mode their absence is equally correct.
+6. **THE HOURLY SMOKE** — by hand (block `4f`):
+   `python run_project.py config/deterministic_unet/deterministic_unet_hourly_smoke_cpu.yaml <EXPERIMENT>`, end to end.
+   Its metrics JSON must carry the keys that are **absent** in daily mode — `brier_skill_score`,
+   `explained_deviance`, `dice_p50` — plus a `reliability_table.csv` in the report directory. Their presence is the
+   proof that `probability` was populated and reached the metric suite; in daily mode their absence is equally correct.
+   Four more things this gate is the only place to read:
+   * `pod_p50 < 1` and a finite `csi_p50` — i.e. the `kind: probability` cut is on the PREDICTION side. A degenerate
+     table here is the `occurrence`-on-a-probability bug, and it does not raise.
+   * a non-zero occurrence base rate. The positive (cell, hour) pairs are the same strokes the daily smoke sees, spread
+     over 24× the cells, so mid-July gives percent-level — but a base rate of zero makes every categorical score,
+     skill score and reliability bin `NaN` while the run still reports success.
+   * `fss_s<scale>` keys, NOT `fss_occurrence_s<scale>` — the threshold-free FSS form, switched on by detecting the
+     probability field rather than by a config key.
+   * ⚠️ `ets_h6` is `NaN` in the trials table (its band is `>= 6 hours` on a 0/1 target, so the contingency table is
+     empty) and the hourly maps collapse to two colours. Both expected; see the block-4f section above.
 7. **The closing review of `tests/`** (below).
 8. **Update this file and `rebuild-plan.md`**; flip Step 4 to ✅.
 
@@ -492,7 +549,7 @@ real gaps are.
 | `4c-r` ✅ | *(unplanned)* every output behind `{{$OUTPUT_ROOT}}`, the `setup` unset-root guard, one shared U-net prepared dir |
 | `4d` ✅ | `tabulate_metrics` + `combine_curves` + `src/stages/README.md` — **every stage the configs name now exists** |
 | `4e` | `tests/pipeline_e2e_test.py` ✅ (18 tests, ~115 s), then **by hand on real data**: (a) each family's `*_smoke_cpu` pipeline end to end, proving the real 101×149 grid / `samples/*.pt` layout / year split; (b) `probabilistic_eval_smoke_cpu.yaml` on top of all three, proving `tabulate_metrics` emits **identical metric-key columns across the families** and `combine_curves` the overlaid figures |
-| `4f` | the hourly pipeline (`metrics_hourly.yaml` + the hourly YAML + smoke tier), then **by hand**: the hourly smoke runs and its metrics JSON carries the classification keys absent in daily mode (`brier_skill_score`, `explained_deviance`, `dice_occurrence`, `average_precision_occurrence`) |
+| `4f` | the hourly pipeline — **no `src/` change**: `metrics_hourly.yaml` + `search_space_hourly.yaml` (unplanned, required by `selection_metric_for_mode`) + the two hourly tiers + 23 tests, plus the unplanned daily/hourly naming rename (13 `git mv` + a 60-file sweep). Then **by hand**: the hourly smoke runs and its metrics JSON carries the classification keys absent in daily mode (`brier_skill_score`, `explained_deviance`, `dice_p50`, the reliability table) |
 | `4g` | the closing review of `tests/` |
 
 One commit per block, tests included, stopping after each to report — the pattern Steps 2 and 3 used.

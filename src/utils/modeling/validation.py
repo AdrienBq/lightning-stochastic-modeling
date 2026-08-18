@@ -49,17 +49,17 @@ from src.utils.metrics.scores import (
 )
 
 # wavelength band (in pixels) of the high-frequency PSD fidelity component; keep consistent with the `high` band
-# of config/eval/metrics.yaml
+# of config/eval/metrics_daily.yaml
 SELECTION_PSD_HIGH_BAND = (2.0, 8.0)
 # wavelength band (in pixels) of the full-band PSD fidelity component: all wavelengths >= 2 px (the low/mid/high
 # bands combined; the DC component and the sub-2 px diagonal-corner coefficients are excluded). Keep consistent
-# with the `full` band of config/eval/metrics.yaml
+# with the `full` band of config/eval/metrics_daily.yaml
 SELECTION_PSD_FULL_BAND = (2.0, np.inf)
 # FSS neighborhood scale (pixels) of the fss_occurrence_scale3 diagnostic
 SELECTION_FSS_SCALE = 3
 # absolute hour band of the ets_h6 diagnostic. These used to be quantiles of the positive marginal (`ets_p99`,
 # `fss_p90_scale3`), which collapse on a bounded 0-24 integer target -- the 0.99 and 0.999 quantiles land on the
-# same hour. Absolute bands also make the trials table use the SAME threshold definition as metrics.yaml.
+# same hour. Absolute bands also make the trials table use the SAME threshold definition as metrics_daily.yaml.
 SELECTION_ETS_THRESHOLD = 6.0
 
 MODE_SELECTION_METRICS = {

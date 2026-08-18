@@ -1,0 +1,188 @@
+# =====================================================================================================================
+# Search space + training options for the `tune` stage of the HOURLY OCCURRENCE pipeline
+# (config/deterministic_unet/deterministic_unet_hourly.yaml). The sibling of
+# config/deterministic_unet/search_space_daily.yaml — read that file first, then this one for the deltas.
+#
+# Same family (the deterministic U-net), same backbone, same optimizer, same ONE-HEAD design. What changes is the
+# TASK: `mode: hourly` prepares a 0/1 occurrence target, the head emits a LOGIT and the prediction is
+# `sigmoid(logit)`. Four blocks move with it:
+#
+#   1. loss              -> binary / proper-scoring options; the improper ones are excluded BY NAME (see below)
+#   2. calibration       -> `occurrence` (Platt) only; the monotone `regression` warp is daily-only and inert here
+#   3. output_activation -> ABSENT. Unread in hourly mode: `_head_output` is a pass-through and the sigmoid lives on
+#      + max_hours          the prediction path. `max_hours` likewise has no meaning on a 0/1 target. Both are
+#                           omitted rather than carried as ignored keys.
+#   4. selection         -> `valid_classification_score`, with the classification weights
+#
+# The backbone, optimizer and batch_size blocks are byte-identical to the daily space, deliberately: the hourly task
+# changes what the head MEANS, not what the network is, and keeping them identical is what makes an hourly and a daily
+# trials table comparable on architecture.
+#
+# There is deliberately NO `target_transform:` block, and no `occurrence_head:` block. See the daily search space.
+# =====================================================================================================================
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Loss on the 0/1 occurrence target. ⚠️ THE LOSS NAME PICKS THE BUILDER, NOT THE MODE — and the hourly task admits
+# BOTH families, which is why this list mixes them:
+#
+#   * a name in BINARY_LOSSES   -> build_binary_loss, called on the LOGIT (every binary loss applies its own sigmoid)
+#   * a name in REGRESSION_LOSSES -> build_regression_loss, called on the PROBABILITY (the target space here)
+#
+# The second is not a fallback but proper: `rmse(p, y) ** 2` IS `brier_score(p, y)`. The sigmoid exists in exactly one
+# place either way. (The reverse is rejected — a binary loss on the 0-24 daily target raises.)
+#
+# ⛔ WHAT IS EXCLUDED, and why each exclusion is load-bearing rather than a matter of taste:
+#
+#   * `weighted_mae` and `wmae_psd` — MAE IS IMPROPER AGAINST A 0/1 OBSERVATION. It is minimized by a sharp forecast,
+#     so at this base rate the all-zero prediction beats a calibrated one (0.0007 vs 0.0014). A sweep given these
+#     would be rewarded for the degenerate solution, and `valid_classification_score` — which does NOT contain mae —
+#     would then disagree with the training objective about which trial is best. config/eval/metrics_hourly.yaml
+#     reports `mae` for comparability with the daily suite and says the same thing about selecting on it.
+#   * `asymmetric_huber` — it encodes "penalize under-prediction tau/(1-tau) times more than over-prediction", a
+#     preference over the MAGNITUDE of a count. On a probability there is no magnitude to be conservative about;
+#     calibration is the goal and asymmetry is exactly what breaks it.
+#   * `crps_binary` — needs a genuine ensemble. This family predicts with a single forward pass, so N = 1, the spread
+#     term is identically zero and it degrades silently to a mean absolute error on probabilities. The module RAISES
+#     rather than letting that train, so naming it here would make some trials crash rather than mis-train — still
+#     wrong. It belongs to an hourly mc_dropout or diffusion pipeline.
+#
+# ✅ WHAT IS REACHABLE. Four names, and `weighted_mse` is reachable through the fifth as `alpha = 1.0` — the same
+# construction as the daily space's `gamma = 0` recovering plain mae/rmse:
+#
+#   focal_bce   BCE with the focusing term (1-p_t)^gamma and an explicit positive_class_weight: the imbalance-aware
+#               option, and the one designed for a 0.07 % base rate.
+#   dice        soft Dice on the probability. Optimizes overlap rather than a per-cell score, which is the other
+#               classical answer to extreme imbalance. `dice_occurrence` in the metric suite is its eval-time
+#               complement, so the reported number measures what this loss optimized.
+#   brier       the proper scoring rule, straight. The honest baseline objective for a calibrated probability.
+#   wmse_psd    alpha * <weighted MSE on the probability> + (1 - alpha) * psd_penalty. At alpha = 1.0 this IS
+#               `weighted_mse`, i.e. Brier by another route; below 1.0 it adds the anti-smoothing spectral term.
+#               ⚠️ Read this one against the reliability diagram: `psd_full_fidelity` is BIASED AGAINST a calibrated
+#               probability field (a calibrated forecast is intrinsically smoother than the 0/1 field it is compared
+#               with), so a PSD penalty pushes towards sharpness at the cost of calibration. Kept because the same
+#               term carries 0.30 of the selection composite — the loss and the score should be able to agree.
+# ---------------------------------------------------------------------------------------------------------------------
+loss:
+    name: {type: categorical, choices: [focal_bce, dice, brier, wmse_psd]}
+
+    # intensity weighting w(y) = (1 + y)^gamma, computed from the RAW target and applied samplewise.
+    #
+    # ⚠️ THIS IS THE POSITIVE-CLASS WEIGHT of the distance losses in this mode. On a binary target
+    # (1 + y)^gamma takes exactly two values {1, 2^gamma}, which IS a positive-class weight — and no distance loss
+    # carries one of its own, so gamma is the only reweighting knob `wmse_psd` has. `search.apply_constraints`
+    # therefore forces gamma to 0 for `focal_bce` ALONE, which brings its own positive_class_weight: sampling both
+    # would make the effective weight the product of two independently-tuned numbers, so the sweep would explore one
+    # quantity along two axes and the trials table would show neither. `dice` and `brier` ignore it (they consume
+    # logits and reduce their own way).
+    #
+    # ⚠️ The upper bound is 5.0 as in the daily space, but it means something much stronger here: 2^5 = 32x on the
+    # positive class, against a base rate near 0.0007.
+    intensity_weight_gamma: {type: float, low: 0.0, high: 5.0}
+
+    # focal_bce only. positive_class_weight multiplies the positive term; focal_gamma is the focusing exponent
+    # (0 = plain weighted BCE, 2 = the Lin et al. default). Both are UNREACHABLE in the daily spaces, where no
+    # binary loss is a choice — this pipeline is what makes `build_binary_loss`'s focal branch runnable.
+    positive_class_weight: {type: float, low: 1.0, high: 200.0, log: true}
+    focal_gamma: {type: float, low: 0.0, high: 4.0}
+
+    # dice only: the smoothing constant of 2*sum(p*o) / (sum(p) + sum(o) + smooth). At a 0.07 % base rate a whole
+    # batch can be nearly empty, where the ratio is 0/0 — `smooth` is what keeps the gradient finite there, so the
+    # useful range is "small but not negligible relative to the positive mass".
+    dice_smooth: {type: float, low: 0.1, high: 10.0, log: true}
+
+    # wmse_psd only: composite = alpha * <pointwise term> + (1 - alpha) * psd_penalty. Kept >= 0.5 so the pointwise
+    # (proper) term stays dominant; a PSD-dominated loss is a scale-invariant power ratio carrying no information
+    # about the probability's level, so it would admit degenerate uncalibrated solutions.
+    alpha: {type: float, low: 0.5, high: 1.0}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# U-net backbone — IDENTICAL to the daily search space, including the four fixed values and the reasons for them
+# (`normalization: group` so every checkpoint of this family is a valid upstream; `upsampling: bilinear_conv` because
+# transposed convolutions checkerboard and this project SELECTS on spatial structure; `dropout: 0.0` because this
+# family is deterministic; `kernel_size: 3` / `blocks_per_level: 2` as the standard double-conv block).
+# ---------------------------------------------------------------------------------------------------------------------
+unet:
+    base_channels: {type: categorical, choices: [16, 32, 64]}
+    depth: {type: int, low: 3, high: 5}                 # number of down/upsampling levels
+    kernel_size: 3                                      # FIXED -- see the daily search space
+    blocks_per_level: 2                                 # FIXED
+    upsampling: bilinear_conv                           # FIXED
+    dropout: 0.0                                        # FIXED -- deterministic family
+    normalization: group                                # FIXED
+    activation: {type: categorical, choices: [relu, gelu, silu]}
+    bottleneck_attention: {type: categorical, choices: [true, false]}
+
+# ⛔ NO `output_activation`, NO `max_hours`. In hourly mode `_head_output` is a pass-through — the head's raw output IS
+# the logit — and the single sigmoid is applied on the PREDICTION path. `max_hours` is the ceiling of a 0-24 count and
+# has no counterpart on a 0/1 target. Both keys would be read into the module and never used, which is worse than
+# absent: it reads as a configured choice that has no effect. (The module defaults them, so omitting them is safe.)
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Calibration of the model head, fitted in a dedicated FINAL phase with the backbone frozen. Treated as a
+# hyperparameter (on/off), identity-initialised so that "disabled" is an exact no-op.
+#
+# ⭐ THIS IS THE BLOCK THE HOURLY PIPELINE MAKES LIVE. Exactly one of the two calibrators applies to any run and WHICH
+# is decided by `mode`, not configured — Platt scaling recalibrates a LOGIT, the monotone warp recalibrates
+# non-negative HOURS. In the three daily pipelines `occurrence:` is inert (the module logs once and ignores it), so
+# `PlattScaling` has never been fitted by a shipped pipeline. Here it is:
+#
+#   platt   classical Platt scaling of the head's logit, p = sigmoid(a * z + b), fitted with PLAIN BCE on the
+#           occurrence labels — independent of which loss above trained the head. Rank-preserving, so it moves the
+#           probabilities (Brier / reliability / explained deviance) without moving a decision mask: `roc_auc`,
+#           `average_precision` and the p50 contingency table are unchanged by it, and the reliability diagram is
+#           where its effect shows. The layer lives inside the net, so it travels in `state_dict()`.
+#
+# The `regression:` sub-block is OMITTED: `regression_calibration_enabled` is `(not hourly) and ...`, so it could
+# only ever be a no-op here.
+# ---------------------------------------------------------------------------------------------------------------------
+calibration:
+    occurrence: {type: categorical, choices: [none, platt]}
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Optimization — identical to the daily search space.
+# ---------------------------------------------------------------------------------------------------------------------
+optimizer:
+    name: adamw
+    lr: {type: float, low: 1.0e-4, high: 1.0e-2, log: true}
+    weight_decay: {type: float, low: 1.0e-6, high: 1.0e-3, log: true}
+    scheduler: {type: categorical, choices: [cosine, reduce_on_plateau]}
+    gradient_clip_val: 1.0
+
+batch_size: {type: int, low: 4, high: 32}
+max_epochs: 50
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Trial selection: the CLASSIFICATION composite, computed on the validation split in the target space.
+#
+#   valid_classification_score = 0.50 * average_precision_occurrence   (discrimination: PR-AUC of the occurrence
+#                                                                       event, threshold-free, and the only term
+#                                                                       that sees a FALSE ALARM)
+#                              + 0.20 * brier_skill_score              (calibration: Brier skill vs the per-cell
+#                                                                       climatological occurrence frequency)
+#                              + 0.30 * psd_full_fidelity              (structure: 1 - |1 - full-band PSD ratio|,
+#                                                                       clipped to [0, 1])
+#
+# ⚠️ `metric:` is a DECLARATION, not a choice. The composite is determined by the prepared data's `mode`, and
+# `validation.selection_metric_for_mode` RAISES when this line disagrees rather than overriding it — because a file
+# naming the wrong composite has the wrong `components` weights too. This is the one place the hourly/daily split is
+# visible in a search space, and getting it wrong is caught at trial construction.
+#
+# ⚠️ THE STRUCTURE TERM IS BIASED AGAINST CALIBRATION, and it is weighted 0.30 anyway, by decision. A calibrated
+# probability field is intrinsically smoother than the 0/1 field it is compared with — spreading probability mass is
+# what calibration MEANS at a 0.07 % base rate — so a correct model reads LOW on `psd_full_fidelity` and a sharp
+# over-confident one reads high. `brier_skill_score` at 0.20 is the counterweight. Read both against the reliability
+# diagram before concluding anything about a trial's texture.
+#
+# ✅ Note what this composite does NOT share with the regression one: the regression composite has no false-alarm term
+# at all (see the daily search space's KNOWN GAP note). Here `average_precision_occurrence` carries half the weight,
+# so an over-forecast is penalized directly. Two diagnostics ride along unweighted in the trials table: `ets_h6` and
+# `fss_occurrence_scale3`. ⚠️ `ets_h6` is NaN on this task — its band is `>= 6 hours` on a 0/1 target, so the
+# contingency table is empty. Expected, not a failure.
+# ---------------------------------------------------------------------------------------------------------------------
+selection:
+    metric: valid_classification_score
+    mode: max
+    components:
+        average_precision_occurrence: 0.50
+        brier_skill_score:            0.20
+        psd_full_fidelity:            0.30

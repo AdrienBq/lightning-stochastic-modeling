@@ -49,9 +49,15 @@ from typing import Callable, NamedTuple
 import torch
 import torch.nn.functional as F
 
-# exactly the `loss.name` choices offered by config/<family>/search_space.yaml
+# exactly the `loss.name` choices of the three DAILY search spaces (config/<family>/search_space_daily.yaml). An
+# hourly space names a SUBSET — a distance loss on the predicted probability is proper (`rmse ** 2` IS the Brier
+# score) — but never `weighted_mae` / `wmae_psd`, which are IMPROPER against a 0/1 observation.
 REGRESSION_LOSSES = ('weighted_mae', 'weighted_rmse', 'weighted_mse', 'asymmetric_huber', 'wmae_psd', 'wmse_psd')
-# exactly the `occurrence_head.loss` choices; see BinaryLoss for the input space of each
+# the `loss.name` choices of an HOURLY search space; see BinaryLoss for the input space of each.
+# ⚠️ These were once `occurrence_head.loss`, and that block is GONE by decision (search_space_daily.yaml records it):
+# they are the MAIN loss of the hourly classification task, not an auxiliary head's, read from the same `loss:` section
+# as the regression names above. config/deterministic_unet/search_space_hourly.yaml offers three of the four —
+# `crps_binary` needs a genuine ensemble, so it belongs to an hourly mc_dropout or diffusion pipeline.
 BINARY_LOSSES = ('focal_bce', 'dice', 'brier', 'crps_binary')
 # exactly the `finetuning.loss` choices (MC-dropout phase 2)
 ENSEMBLE_LOSSES = ('crps', 'almost_fair_crps', 'afcrps_psd')

@@ -162,7 +162,7 @@ def test_the_search_space_SAYS_its_loss_block_is_not_the_objective(repo_root):
     conclusion from the YAML is that ``loss.name`` selects this family's objective too."""
     import os
 
-    text = open(os.path.join(repo_root, 'config/diffusion/search_space.yaml')).read()
+    text = open(os.path.join(repo_root, 'config/diffusion/search_space_daily.yaml')).read()
     assert 'NOT THE TRAINING OBJECTIVE' in text
 
 

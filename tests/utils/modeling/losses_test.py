@@ -65,7 +65,7 @@ def test_the_regression_loss_set_matches_the_search_spaces(search_spaces):
 @pytest.mark.parametrize('family', ['deterministic_unet', 'mc_dropout', 'diffusion'])
 def test_no_shipped_search_space_offers_a_binary_loss(family, search_spaces):
     """All three shipped spaces are DAILY spaces, so all three offer only the six distance losses. This is the state,
-    not an omission: ``deterministic_unet/search_space.yaml`` says an hourly space "just sets ``loss.name`` to one of
+    not an omission: ``deterministic_unet/search_space_daily.yaml`` says an hourly space "just sets ``loss.name`` to one of
     focal_bce / dice / brier / crps_binary and changes nothing else", and no hourly space exists yet.
 
     Pinned so that when one is added, whoever adds it sees this test and updates it deliberately.

@@ -1,4 +1,5 @@
-"""Evaluation-suite runner: trivial baselines and the full metric suite of config/eval/metrics.yaml.
+"""Evaluation-suite runner: trivial baselines and the full metric suite of the active metrics config
+(config/eval/metrics_daily.yaml for the daily task, config/eval/metrics_hourly.yaml for the hourly one).
 
 ONE evaluation for all three model families. ``run_metric_suite`` is the single path; there is no family-specific
 evaluation, which is what lets a deterministic U-net, an MC-dropout ensemble and a flow-matching model be put in
@@ -92,7 +93,7 @@ def resolve_occurrence_event(metrics_config: dict, target_stats: dict) -> Tuple[
 
 
 def resolve_threshold(spec: dict, target_stats: dict, occurrence_event: Tuple[float, bool]) -> EventThreshold:
-    """Resolve one named threshold spec from metrics.yaml into an :class:`EventThreshold`.
+    """Resolve one named threshold spec from the metrics config into an :class:`EventThreshold`.
 
     Supported kinds:
 
@@ -238,7 +239,7 @@ def build_baselines(
 
     Args:
         baseline_names: Names to build (subset of zero / climatology).
-        baselines_config: The ``baselines`` section of metrics.yaml (the climatology window).
+        baselines_config: The ``baselines`` section of the metrics config (the climatology window).
         split_index: Full split index (all splits; train rows feed the climatology).
         eval_items: One row per evaluated item, in prediction order (columns ``date``, ``hour``, ``target_file``).
         mode: Preparation mode.
@@ -336,7 +337,7 @@ def climatology_conditional_mae(
         split_index: Full split index (train rows feed the climatology).
         eval_items: One row per validation item (columns ``date``, ``hour``, ``target_file``), in item order.
         prepared_config: Contents of prepared_config.json (mode, hours_per_day).
-        metrics_config: Parsed metrics.yaml (the climatology window).
+        metrics_config: The parsed metrics config (the climatology window).
         target_stats: Train target statistics (accepted for signature stability).
     """
     baselines, _, observation, occurrence, occurrence_event = _climatology_reference(
@@ -390,7 +391,8 @@ def run_metric_suite(
     """Compute the full metric suite. THE single evaluation path, for every family and both tasks.
 
     Args:
-        metrics_config: Parsed metrics.yaml.
+        metrics_config: The parsed metrics config — `metrics_daily.yaml` or `metrics_hourly.yaml`. This function
+            is mode-agnostic and decides what to compute from the ARRAYS it is handed, never from a mode key.
         prediction: Model predictions in the target space, ``[N, H, W]``. The point/skill/categorical/calibration
             scores are computed on this stack (the ensemble MEAN for a stochastic family, the single deterministic
             prediction otherwise).
@@ -773,7 +775,7 @@ def finalize_ensemble_metrics(
     Args:
         partials: Accumulated partials from :func:`src.utils.metrics.scores.ensemble_partials` summed over every
             batch (None when the model produced no ensemble, e.g. the deterministic U-net); then this is a no-op.
-        ensemble_config: The ``ensemble`` section of metrics.yaml; its keys select which metrics are emitted
+        ensemble_config: The ``ensemble`` section of the metrics config; its keys select which metrics are emitted
             (``crps``, ``almost_fair_crps``, ``spread_skill_ratio``, ``rank_histogram``).
         n_members: Ensemble size M (the rank histogram has M+1 bins).
 

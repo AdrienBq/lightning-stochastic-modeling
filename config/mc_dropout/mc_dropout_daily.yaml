@@ -16,7 +16,7 @@ description: 'MC-dropout stochastic parameterization of lightning from ERA5 rean
 # =====================================================================================================================
 # Pipeline: MC-DROPOUT parameterization of lightning from ERA5 reanalysis predictors.
 #
-# Same diagnostic ERA5 -> lightning mapping and same target as config/deterministic_unet/deterministic_unet.yaml, but STOCHASTIC: dropout
+# Same diagnostic ERA5 -> lightning mapping and same target as config/deterministic_unet/deterministic_unet_daily.yaml, but STOCHASTIC: dropout
 # stays active at inference, so M forward passes give M ensemble members. MCDropoutEnsembleModule re-expresses those
 # passes in the shared ensemble contract (observation / prediction = ensemble mean / ensemble_members [B,M,H,W]),
 # which is what lets this family feed the SHARED streaming ensemble scores rather than a bespoke accumulator.
@@ -32,7 +32,7 @@ description: 'MC-dropout stochastic parameterization of lightning from ERA5 rean
 #
 #     export UPSTREAM_MODEL=$OUTPUT_ROOT/deterministic_unet/best/best_model.ckpt
 #
-#   The upstream comes from config/deterministic_unet/deterministic_unet.yaml -- run that pipeline first.
+#   The upstream comes from config/deterministic_unet/deterministic_unet_daily.yaml -- run that pipeline first.
 #
 # !! Note how this DIFFERS from the diffusion family, which reads the same environment variable at a different stage.
 # !! Diffusion's residual mode needs the upstream PREDICTION, so prepare_modeling materializes it as per-day
@@ -41,11 +41,11 @@ description: 'MC-dropout stochastic parameterization of lightning from ERA5 rean
 # !! full-target preparation, unchanged from the deterministic pipeline.
 #
 # Warm-starting requires the upstream to be shape- and norm-compatible, which is why
-# config/deterministic_unet/search_space.yaml fixes `unet.normalization: group`. Both search spaces are group-norm,
+# config/deterministic_unet/search_space_daily.yaml fixes `unet.normalization: group`. Both search spaces are group-norm,
 # so any best_model.ckpt of that family loads here. A mismatch in any architecture field is a hard error at load
 # time, never a silent partial load.
 #
-# Both modes live in config/mc_dropout/search_space.yaml (`loss` and the nested `finetuning` block); see its header
+# Both modes live in config/mc_dropout/search_space_daily.yaml (`loss` and the nested `finetuning` block); see its header
 # for which knobs are searched in which mode.
 #
 # Stages are the same shared five as every other family; only `model-family`, `model-config` and the upstream switch
@@ -77,7 +77,7 @@ stages:
     # !! mismatch on in_channels. It keeps $OUTPUT_ROOT/diffusion/prepared.
     #
     # !! The two blocks must stay IDENTICAL apart from nothing. They now write one directory, so a parameter changed
-    # !! here and not in config/deterministic_unet/deterministic_unet.yaml means the second pipeline to run finds
+    # !! here and not in config/deterministic_unet/deterministic_unet_daily.yaml means the second pipeline to run finds
     # !! targets built under different settings -- prepare_modeling RAISES on that (mode / hourly-threshold are
     # !! baked into targets/), rather than silently training on the other family's target.
     # !! tests/utils/io/parse_config_test.py enforces the equality.
@@ -104,8 +104,8 @@ stages:
         model-family: mc_dropout
         model-type: mc_dropout              # tagged on the mlflow run for ease of access
         input-path: '{{$OUTPUT_ROOT}}/deterministic_and_mc_dropout/prepared/daily'
-        model-config: config/mc_dropout/search_space.yaml
-        metrics-config: config/eval/metrics.yaml # supplies the climatology baseline behind the
+        model-config: config/mc_dropout/search_space_daily.yaml
+        metrics-config: config/eval/metrics_daily.yaml # supplies the climatology baseline behind the
                                             # mae_cond_ss_climatology selection component
         output-path: '{{$OUTPUT_ROOT}}/mc_dropout/tuning'
         metrics-path: '{{$OUTPUT_ROOT}}/mc_dropout/tuning/best_trial_metrics.json'
@@ -120,7 +120,7 @@ stages:
                                             # (one, in warm-start mode -- but a warm-started trial is also cheaper)
         sampler: tpe                        # random | tpe (tpe requires optuna)
         max-epochs: 50                      # phase 1 only, so IGNORED in warm-start mode; phase 2 always uses
-                                            # search_space.yaml -> finetuning.max_epochs
+                                            # search_space_daily.yaml -> finetuning.max_epochs
         early-stopping-patience: 10
         pruning: true
         accelerator: auto
@@ -148,7 +148,7 @@ stages:
         model-type: mc_dropout
         source-path: '{{$OUTPUT_ROOT}}/mc_dropout/tuning'
         input-path: '{{$OUTPUT_ROOT}}/deterministic_and_mc_dropout/prepared/daily'
-        metrics-config: config/eval/metrics.yaml
+        metrics-config: config/eval/metrics_daily.yaml
         output-path: '{{$OUTPUT_ROOT}}/mc_dropout/best'
         metrics-path: '{{$OUTPUT_ROOT}}/mc_dropout/best/best_trial_metrics.json'
         max-epochs: 80
@@ -161,14 +161,14 @@ stages:
     # ------------------------------------------------------------------------------------------------------------
     # 4) Evaluation and reporting -- THE common evaluation, the same stage and the same metric suite as every other
     # family. With ensemble-size > 1 the checkpoint is wrapped in MCDropoutEnsembleModule, so the ensemble group of
-    # config/eval/metrics.yaml (CRPS, almost-fair CRPS, spread-skill ratio, rank histogram) is populated here whereas it
+    # config/eval/metrics_daily.yaml (CRPS, almost-fair CRPS, spread-skill ratio, rank histogram) is populated here whereas it
     # is skipped for the deterministic family.
     # ------------------------------------------------------------------------------------------------------------
     - evaluate:
         input-path: '{{$OUTPUT_ROOT}}/deterministic_and_mc_dropout/prepared/daily'
         model-path: '{{$OUTPUT_ROOT}}/mc_dropout/best/best_model.ckpt'
         output-path: '{{$OUTPUT_ROOT}}/mc_dropout/evaluation'
-        metrics-config: config/eval/metrics.yaml
+        metrics-config: config/eval/metrics_daily.yaml
         metrics-path: '{{$OUTPUT_ROOT}}/mc_dropout/evaluation/test_metrics.json'
         report-path: '{{$OUTPUT_ROOT}}/mc_dropout/reports'
         split: test                         # valid | test

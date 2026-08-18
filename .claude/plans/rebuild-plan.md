@@ -12,7 +12,7 @@ to no single step.
 | [`step-1-design.md`](step-1-design.md) | Design decisions via the inventories; global `CLAUDE.md` + `README.md` | ✅ **done** (2026-07-28) |
 | [`step-2-config.md`](step-2-config.md) | Every config file and its contents | ✅ **done** (2026-07-29) |
 | [`step-3-utils.md`](step-3-utils.md) | Shared `src/utils` | ✅ **done** (2026-08-14) |
-| [`step-4-stages.md`](step-4-stages.md) | Stages + common evaluation — **expanded 2026-08-14**, blocks `4a`–`4g` | 🔵 **in progress** — `4a`–`4d` done; **every stage the configs name now exists**. Next: `4e`, the synthetic-root e2e test plus the two by-hand real-data runs (per-family smoke, then the cross-family comparison) |
+| [`step-4-stages.md`](step-4-stages.md) | Stages + common evaluation — **expanded 2026-08-14**, blocks `4a`–`4g` | 🔵 **in progress** — `4a`–`4f` done; every stage exists, all three families ran on real data and reported one 129-metric comparison table, and the **hourly** task is now runnable. Next: `4g`, the fresh-eyes review of `tests/` |
 | [`step-5-portability.md`](step-5-portability.md) | User- and machine-agnostic | ⚪ provisional |
 
 ### Design decision record (the Step 1 deliverable — all annotated)
@@ -27,24 +27,28 @@ to no single step.
 
 **Block order** a → b → c → d → e. Each step ends with the verification gate below and a plan update.
 
-> **▶ To resume work:** Step 4 is at block **`4e`**. All seven stages exist (`4a`–`4d`), every written path is behind
-> `{{$OUTPUT_ROOT}}` (`4c-r`), and `tests/` is the verification of record — 331/331 functions tested, ~88 % line
-> coverage. `4e` has three parts, in order:
+> **▶ To resume work:** Step 4 is at block **`4g`**, the last one. Done: all seven stages (`4a`–`4d`), every written
+> path behind `{{$OUTPUT_ROOT}}` (`4c-r`), the synthetic-root e2e test and the three by-hand real-data gates (`4e`), and
+> the hourly pipeline (`4f`). `tests/` is the verification of record — 1378 passing, 329/329 functions tested,
+> ~88 % line coverage.
 >
-> 1. `tests/pipeline_e2e_test.py` — a synthetic `$DATA_ROOT` and a config *derived* from the shipped smoke YAML, so it
->    cannot drift from the real pipeline. Proves the pipeline is **wired**, runnable by anyone with no dataset.
-> 2. **The per-family smoke run**, by hand with `DATA_ROOT` + `OUTPUT_ROOT` exported:
->    `python run_project.py config/<family>/<family>_smoke_cpu.yaml <EXPERIMENT>`, once per family. Proves what the
->    synthetic test cannot — the real 101 × 149 grid, the real `samples/*.pt` layout, the real year split.
->    ⚠️ Commit first; the lazy cache keys on the whole-repo dirty diff.
-> 3. **The cross-family comparison**, by hand: `config/eval/probabilistic_eval_smoke_cpu.yaml` over all three trained
->    families. `tabulate_metrics` must emit one CSV with **identical metric-key columns across families** (the
->    deterministic family's ensemble scalars `NaN`) and `combine_curves` the overlaid figures. This is the gate that
->    says whether the merge worked; read its per-family missing-metric **log**, since the columns match by construction.
+> What `4e` and `4f` settled, so it is not re-litigated:
 >
-> Read [`step-4-stages.md`](step-4-stages.md) §Verification for all eight checks. Two standing obligations hold for
-> every block: **a new function's test lands in the same commit as the function**, and the step ends with a fresh-eyes
-> review of `tests/`.
+> * **The merge works.** All three families ran their `*_smoke_cpu` pipeline on the real dataset and
+>   `probabilistic_eval_smoke_cpu.yaml` produced **one CSV, 3 families × 129 metrics**. Every point / categorical /
+>   skill / spatial metric is present for every family; the only gaps are capability-explained (6 ensemble scalars
+>   absent for the deterministic family, 33 `resid_*` present only for the residual diffusion run) plus one
+>   data-dependent `fss_useful_scale_h3`.
+> * **Six bugs came out of `4e`, five of them visible only in real output** — three found by a human reading a figure.
+>   Cartopy's non-finite gridliner extents were behind two of them (cropped saves, invisible titles).
+> * **`4f` needed no `src/` change**: every layer was already mode-aware, so the hourly task was four configs and 23
+>   tests. It did need an unplanned `search_space_hourly.yaml` (`selection_metric_for_mode` raises otherwise) and
+>   brought the daily/hourly **config naming rename** with it — every task-specific file now names its task.
+>
+> ⚠️ Standing rules for `4g` and beyond: **a new function's test lands in the same commit as the function**, and
+> **commit before running a pipeline** — the lazy cache keys on the whole-repo dirty diff. Read
+> [`step-4-stages.md`](step-4-stages.md) §Verification for all eight checks and §"Closing review of `tests/`" for what
+> `4g` actually asks for (an assessment with evidence, not a pass/fail).
 
 ---
 
@@ -109,7 +113,7 @@ to no single step.
    > ➕ Retiring them will DROP line coverage, since a tokenize sweep still executes the module it parses. Re-measure
    > and re-set the floor at that point rather than treating the fall as a regression.
 3. Smoke run: the affected `*_smoke_cpu.yaml` via
-   `python run_project.py config/<family>/<family>_smoke_cpu.yaml <EXPERIMENT>` (CPU, `n-trials 1`,
+   `python run_project.py config/<family>/<family>_daily_smoke_cpu.yaml <EXPERIMENT>` (CPU, `n-trials 1`,
    `max-epochs 1`, the 8-day mid-July split, **`ensemble-size 2`** — never 1, see below); assert declared
    artifacts + expected metric keys. A `*_smoke_gpu.yaml` tier exists for GPU hosts (18 days, 2 trials,
    `bf16-mixed`, `ensemble-size 5`) but cannot be run here.

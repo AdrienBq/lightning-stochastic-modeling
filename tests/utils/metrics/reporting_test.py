@@ -243,7 +243,7 @@ def test_each_curve_figure_renders(figure, curves, tmp_path):
 @pytest.mark.parametrize('figure', ['psd_curves', 'fss_vs_scale', 'reliability', 'roc_pr_curves', 'confusion_matrix',
                                     'error_by_intensity_bin', 'rank_histogram'])
 def test_each_curve_figure_self_skips_when_its_curve_is_absent(figure, tmp_path):
-    """The self-skip is what lets metrics.yaml list all fourteen figures unconditionally: a deterministic run never
+    """The self-skip is what lets metrics_daily.yaml list all fourteen figures unconditionally: a deterministic run never
     populates ``rank_histogram`` and a non-residual run never populates ``residual``."""
     getattr(reporting, f'_{figure}')({}, str(tmp_path), ['png', 'csv'])
     assert not os.listdir(str(tmp_path))

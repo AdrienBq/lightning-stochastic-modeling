@@ -242,7 +242,7 @@ def _headline_threshold(table: pd.DataFrame) -> Optional[str]:
 
     One event, not all of them. Four thresholds x three families is twelve lines per panel, and a PR panel on a log
     axis is unreadable at that density — the per-family reports carry every threshold. `occurrence` is the headline
-    because `average_precision_occurrence` is the discrimination term of the selection score (config/eval/metrics.yaml).
+    because `average_precision_occurrence` is the discrimination term of the selection score (config/eval/metrics_daily.yaml).
     The fallback is first-listed rather than alphabetical because the rows keep the config's declaration order, which
     is what makes it meaningful for the hourly task, whose thresholds are probability cuts with no `occurrence` among
     them.

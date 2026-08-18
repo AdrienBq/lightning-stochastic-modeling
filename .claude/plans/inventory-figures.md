@@ -151,12 +151,12 @@ pipeline concerns for Step 3/4, and A's existing machinery (`_select_plot_indice
 
 ## 2. Pipeline figures — A's set, to be restyled per §1
 
-| Figure | A | in `metrics.yaml` | What it shows | Decision |
+| Figure | A | in `metrics_daily.yaml` | What it shows | Decision |
 |---|---|---|---|---|
-| `maps_worst_best_days` | `_maps_per_day` (413) | ✅ | Observed vs predicted day maps → **restyle to §1** | keep — **renamed `maps_most_extreme_days`** in Step 2's `metrics.yaml`: "worst/best" reads as a judgement of the *model*, when what the figure actually selects is the most extreme *observed* day (plus the median) |
+| `maps_worst_best_days` | `_maps_per_day` (413) | ✅ | Observed vs predicted day maps → **restyle to §1** | keep — **renamed `maps_most_extreme_days`** in Step 2's `metrics_daily.yaml`: "worst/best" reads as a judgement of the *model*, when what the figure actually selects is the most extreme *observed* day (plus the median) |
 | `psd_curves` | 481 | ✅ | Radially-averaged PSD vs obs and baselines → **restyle to §1's PSD figure** | keep |
 | `fss_vs_scale` | 514 | ✅ | FSS curve per threshold | keep |
-| `reliability_and_pit` | 540 | ✅ | Reliability diagram + PIT histogram — ⚠️ **split, see §4** | **renamed `reliability`** in Step 2's `metrics.yaml` — the reliability half is kept and promoted to a headline diagnostic; the PIT half is dropped with the transform that fitted its CDF |
+| `reliability_and_pit` | 540 | ✅ | Reliability diagram + PIT histogram — ⚠️ **split, see §4** | **renamed `reliability`** in Step 2's `metrics_daily.yaml` — the reliability half is kept and promoted to a headline diagnostic; the PIT half is dropped with the transform that fitted its CDF |
 | `error_by_intensity_bin` | 598 | ✅ | Stratified error across intensity bins | keep — bins become the explicit hour bands (`occurrence`/`h3`/`h6`/`h12`) |
 | `rank_histogram` | 615 | ✅ | Talagrand diagram (ensemble runs only) | keep |
 | `roc_pr_curves` | — | **NEW (Step 2)** | ROC **and** precision-recall curves, one pair per event threshold. PR is backed by the existing `average_precision`; ROC by the new `roc_auc`. Plotting them together is the point: on a 0.07 % base rate the ROC curve looks flattering while the PR curve exposes the real operating trade-off | keep — **new code in Step 3** |
@@ -254,7 +254,7 @@ Nothing in any of the three implementations covers these, and they'd be the natu
 | 1 | **Display extent ≠ data extent.** Data drawn at `[-12, 25, 35, 60]`, view set to `[-5, 20, 30, 55]` — shows 5° of empty space south of the data and **clips 55–60 °N where real data exists** (southern Scandinavia, northern UK) | **02a and 02b**, `_frame` | ⚠️ likely bug |
 | 2 | Hardcoded `vmax=8` on the std panel | **02b only** — 02a uses `vmin=0` | avoided by taking 02a. drop the hardcoded vmax and derive it with max for the given day |
 | 3 | Cell 7 / 7b near-total duplication | **02b only** — 02a has one plotting cell | avoided by taking 02a |
-| 4 | `qq_plot` declared in `metrics.yaml` but no figure function exists | A/D vs config | inconsistency |
+| 4 | `qq_plot` declared in `metrics_daily.yaml` but no figure function exists | A/D vs config | inconsistency |
 | 5 | Stray `µ` character inside `run_inference`'s docstring | 02a, cell 7 | cosmetic |
 
 ## Open questions for you

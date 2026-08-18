@@ -71,7 +71,7 @@ def test_metrics_yaml_ensemble_section_is_reachable(metrics_config):
     ensemble_spec = metrics_config.get('metrics', {}).get('ensemble') or metrics_config.get('ensemble', {})
     assert ensemble_spec, 'ensemble section not reachable -> the probabilistic suite would be silently disabled'
     for key in ('crps', 'almost_fair_crps', 'spread_skill_ratio', 'rank_histogram'):
-        assert key in ensemble_spec, f'{key} missing from the metrics.yaml ensemble section'
+        assert key in ensemble_spec, f'{key} missing from the metrics_daily.yaml ensemble section'
     assert 'ensemble' in metrics_config.get('metrics', {}), 'the ensemble section must live under `metrics:`'
 
 
@@ -246,7 +246,7 @@ def test_the_suite_RECORDS_which_scores_are_hourly_only(repo_root):
     to become "hourly mode only", with the daily consequence stated where a reader meets the key."""
     import os
 
-    text = open(os.path.join(repo_root, 'config/eval/metrics.yaml')).read()
+    text = open(os.path.join(repo_root, 'config/eval/metrics_daily.yaml')).read()
     assert 'HOURLY ONLY' in text
 
 
@@ -257,7 +257,7 @@ def test_the_suite_records_that_the_RANKING_scores_survive_a_daily_run(repo_root
     written down beside the hourly-only note, a reader concludes the whole categorical group is lost on daily."""
     import os
 
-    text = open(os.path.join(repo_root, 'config/eval/metrics.yaml')).read()
+    text = open(os.path.join(repo_root, 'config/eval/metrics_daily.yaml')).read()
     assert 'monotone' in text and 'roc_auc' in text
 
 
@@ -385,7 +385,7 @@ EXPECTED_DAILY_KEYS = (
 
 
 def test_the_shipped_suite_emits_every_expected_key(daily_suite):
-    """Driven from ``config/eval/metrics.yaml`` itself, so this is the test that catches a score silently dropping out
+    """Driven from ``config/eval/metrics_daily.yaml`` itself, so this is the test that catches a score silently dropping out
     of the report — the failure mode where every number present is correct and one is simply absent."""
     flat, _ = daily_suite
     missing = [key for key in EXPECTED_DAILY_KEYS if key not in flat]
@@ -473,32 +473,24 @@ def test_the_reliability_curve_is_absent_without_a_probabilistic_forecast(suite_
 # =====================================================================================================================
 # The HOURLY configuration of the same suite — kind: probability, and the FSS form switch
 # =====================================================================================================================
-def _hourly_config(metrics_config):
-    """``metrics.yaml`` retargeted for the hourly task, exactly as its own note prescribes: the categorical group cuts
-    the PROBABILITY at 0.5, and every group that bins or conditions on observed intensity is pointed at the occurrence
-    event instead of an hour band."""
-    import copy
-
-    config = copy.deepcopy(metrics_config)
-    config['thresholds'] = {'occurrence': {'kind': 'occurrence'},
-                            'p50': {'kind': 'probability', 'value': 0.5}}
-    config['metrics']['categorical']['thresholds'] = ['p50']
-    for group, key in (('continuous', 'r2'), ('continuous', 'estimation_tendency'),
-                       ('calibration', 'rank_correlation')):
-        config['metrics'][group][key]['thresholds'] = ['occurrence']
-    config['metrics']['continuous']['mae_stratified']['bins'] = ['occurrence']
-    config['metrics']['spatial']['fss']['thresholds'] = ['occurrence']
-    return config
-
-
 @pytest.fixture(scope='module')
-def hourly_suite(metrics_config):
+def hourly_suite(metrics_config_hourly):
+    """Driven by the SHIPPED ``config/eval/metrics_hourly.yaml`` (Step 4 block 4f).
+
+    ⚠️ It used to be driven by a ``_hourly_config`` helper that deep-copied ``metrics_daily.yaml`` and retargeted it in
+    Python — a faithful transcription of that file's own hourly note, and therefore a copy that could agree with these
+    tests while disagreeing with whatever an hourly pipeline actually ran. Now that the config exists, reading it is
+    what makes these tests catch a drift in it. The helper's one behavioural difference is deliberate and lives in the
+    config: ``mae_stratified``, ``estimation_tendency`` and ``rank_correlation`` are DROPPED there rather than
+    retargeted at the occurrence event, because their bins or conditions degenerate on a binary observation (see the
+    file's delta list). No test below reads a key from any of the three.
+    """
     rng = np.random.default_rng(0)
     observation = (rng.random((6, 24, 28)) < 0.05).astype(np.float64)
     prediction = np.clip(0.35 * observation + 0.1 * rng.random(observation.shape), 0, 1)
     baselines = {'zero': np.zeros_like(observation),
                  'climatology': np.full_like(observation, observation.mean())}
-    flat, curves = run_metric_suite(_hourly_config(metrics_config), prediction, observation, prediction,
+    flat, curves = run_metric_suite(metrics_config_hourly, prediction, observation, prediction,
                                     baselines, np.full_like(observation, observation.mean()), {})
     return flat, curves, prediction, observation
 
@@ -531,10 +523,13 @@ def test_the_hourly_run_emits_the_ranking_metrics_and_explained_deviance(hourly_
     assert 'explained_deviance' in flat
 
 
-def test_a_shared_occurrence_cut_on_a_probability_field_WARNS(metrics_config, caplog):
+def test_a_shared_occurrence_cut_on_a_probability_field_WARNS(metrics_config_hourly, caplog):
     """The runtime guard for the degenerate configuration above, caught at the point it would produce garbage rather than
     left to be noticed in a report. It names the fix — ``kind: probability`` — because the config edit is not obvious from
-    the symptom."""
+    the symptom.
+
+    The shipped hourly config, MUTATED back to the mistake it exists to avoid: this is the one place a copy is the point.
+    """
     import copy
     import logging
 
@@ -542,7 +537,7 @@ def test_a_shared_occurrence_cut_on_a_probability_field_WARNS(metrics_config, ca
     observation = (rng.random((4, 16, 16)) < 0.05).astype(np.float64)
     prediction = np.clip(0.35 * observation + 0.1 * rng.random(observation.shape), 0, 1)
 
-    config = copy.deepcopy(_hourly_config(metrics_config))
+    config = copy.deepcopy(metrics_config_hourly)
     config['metrics']['categorical']['thresholds'] = ['occurrence']       # the degenerate choice
 
     with caplog.at_level(logging.WARNING, logger='src.utils.metrics.evaluation'):
@@ -641,7 +636,7 @@ def test_obs_event_hands_back_exactly_the_pair_the_score_functions_take():
 
 
 def test_every_threshold_in_the_SHIPPED_suite_resolves(metrics_config):
-    """Driven from the real ``config/eval/metrics.yaml`` rather than a fixture: an unresolvable kind raises inside the
+    """Driven from the real ``config/eval/metrics_daily.yaml`` rather than a fixture: an unresolvable kind raises inside the
     evaluation stage, long after the model has been trained."""
     resolved = resolve_thresholds(metrics_config, {'mode': 'daily'})
 

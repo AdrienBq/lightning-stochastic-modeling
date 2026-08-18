@@ -83,7 +83,7 @@ def retrain_best(
         source_path: str,
         input_path: str,
         output_path: str,
-        metrics_config: str = 'config/eval/metrics.yaml',
+        metrics_config: str = 'config/eval/metrics_daily.yaml',
         model_type: str = 'model',
         upstream_model_path: Optional[str] = None,
         metrics_path: Optional[str] = None,

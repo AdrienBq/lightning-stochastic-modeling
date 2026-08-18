@@ -1,8 +1,8 @@
 # =====================================================================================================================
 # Search space + training options for the `tune` stage with `model-family: mc_dropout` (referenced as model-config in
-# config/mc_dropout/mc_dropout.yaml, and logged as a run artifact by the orchestrator).
+# config/mc_dropout/mc_dropout_daily.yaml, and logged as a run artifact by the orchestrator).
 #
-# Same shared skeleton as config/deterministic_unet/search_space.yaml (read that file for the loss / occurrence-head /
+# Same shared skeleton as config/deterministic_unet/search_space_daily.yaml (read that file for the loss / occurrence-head /
 # calibration / selection rationale, which is identical), plus the three things that make this family stochastic:
 # a mandatory dropout rate, a group-norm-only backbone, and a FINETUNING phase that calibrates the MC ensemble.
 #
@@ -37,7 +37,7 @@
 # `regression_loss(pred, y, weights, mask) + finetuning.loss_weight * ensemble_loss(samples, y)` — and their
 # signatures differ, so there is no single builder to fold them into.
 #
-# There is deliberately NO `target_transform:` block. See config/eval/metrics.yaml.
+# There is deliberately NO `target_transform:` block. See config/eval/metrics_daily.yaml.
 # =====================================================================================================================
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -93,7 +93,7 @@ finetuning:
 # checkpoint (see the two-modes note in the file header). Used only for a from-scratch fit.
 #
 # Two constraints are HARD for this family and are why `normalization` is a fixed value here rather than the shared
-# skeleton's three-way choice (config/deterministic_unet/search_space.yaml now fixes it to `group` too, precisely so
+# skeleton's three-way choice (config/deterministic_unet/search_space_daily.yaml now fixes it to `group` too, precisely so
 # that its checkpoints are warm-start compatible):
 #
 #   1. GROUP NORM ONLY. Batch norm keeps running mean/var statistics that are updated in train() mode and frozen in
@@ -104,7 +104,7 @@ finetuning:
 #      deterministic predictor and cannot produce an ensemble at all (and with ensemble-size >= 2 every member would
 #      be identical, giving zero spread and a NaN spread-skill ratio).
 # ---------------------------------------------------------------------------------------------------------------------
-# The four FIXED values match config/deterministic_unet/search_space.yaml exactly — read that file for why each is
+# The four FIXED values match config/deterministic_unet/search_space_daily.yaml exactly — read that file for why each is
 # fixed rather than searched. Matching MATTERS beyond tidiness: a warm start loads the upstream's weights, so any
 # architectural difference makes the two checkpoints incompatible.
 unet:
@@ -121,7 +121,7 @@ unet:
 
 dropout_p: {type: float, low: 0.05, high: 0.3}          # MC-dropout rate; strictly > 0 — see constraint 2 above
 
-# Output head -- see config/deterministic_unet/search_space.yaml. softplus gives the 0-hour floor structurally;
+# Output head -- see config/deterministic_unet/search_space_daily.yaml. softplus gives the 0-hour floor structurally;
 # ⚠️ it is unbounded above, so `max_hours` is not enforced by the activation (Step 3 decides where).
 output_activation: {type: categorical, choices: [softplus]}
 max_hours: 24                                           # the bounded-target ceiling, in hours per day
@@ -154,7 +154,7 @@ max_epochs: 50                                          # phase 1; phase 2 uses 
 
 # ---------------------------------------------------------------------------------------------------------------------
 # Trial selection — the SAME composite and the SAME name as every other family (see
-# config/deterministic_unet/search_space.yaml for the full derivation). For this family the pointwise and
+# config/deterministic_unet/search_space_daily.yaml for the full derivation). For this family the pointwise and
 # categorical components are computed on the MC ensemble MEAN, while psd_full_fidelity is POOLED over members, which
 # is the same mean-vs-pooled split the evaluation stage uses.
 # ---------------------------------------------------------------------------------------------------------------------

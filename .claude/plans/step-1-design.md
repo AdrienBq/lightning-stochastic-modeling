@@ -30,7 +30,7 @@
 
 These four files **are** the Step 1 design decision record — they replace the originally-planned prose design
 docs. Sources already consolidated into them: adrien's `docs/metrics_and_losses.md` (285 lines) and
-`docs/distr_regression_pipeline.md` (140 lines), and aru's commented `config/metrics.yaml`.
+`docs/distr_regression_pipeline.md` (140 lines), and aru's commented `config/metrics_daily.yaml`.
 
 ## Decisions taken
 
@@ -52,7 +52,7 @@ docs. Sources already consolidated into them: adrien's `docs/metrics_and_losses.
 | `mae` / `rmse` | **Collapse into their weighted versions** → requires `intensity_weight_gamma` low bound extended to **0.0** |
 | `build_finetune_loss` | **Remove** — finetuning becomes an option inside `build_regression_loss` / `build_binary_loss` |
 | Per-folder `README.md`s | **Deferred to [Step 3](step-3-utils.md)**, when those folders exist |
-| `metrics.yaml` as design doc | **Restate as a clean reference doc** rather than pointing at the YAML |
+| `metrics_daily.yaml` as design doc | **Restate as a clean reference doc** rather than pointing at the YAML |
 | Tuning | **Unify all tuning** — one harness; `tune_mc_dropout` removed as a separate stage |
 | `compute_high_lightning_days` | **Keep** — "this is the extremes" |
 | `hello_world` | Check usefulness; remove if not |
@@ -81,7 +81,7 @@ docs. Sources already consolidated into them: adrien's `docs/metrics_and_losses.
    `DATA_ROOT`, which the configs read. **This also explains this plan's original wrong data path** — copied from
    `mc_dropout_local.sh` (correct locally, wrong on the remote).
 5. **Most of Step 1's prose already existed.** adrien's `docs/metrics_and_losses.md` + `docs/distr_regression_pipeline.md`
-   plus aru's commented `config/metrics.yaml` meant Step 1 was **consolidation, not authoring**.
+   plus aru's commented `config/metrics_daily.yaml` meant Step 1 was **consolidation, not authoring**.
 6. **Both branches vendored stale copies of each other.** aru has `modeling/mc_dropout/` (5 files); adrien has
    `unet_aru.py` + `distr_regression_aru.py`. Confirmed stale by identical function order / line offsets with the
    newer additions missing. **Both sets deletable** — merge task #1, now evidence-backed.

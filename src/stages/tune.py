@@ -40,8 +40,8 @@ Usage (standalone)::
         --model_family deterministic_unet \\
         --input_path $OUTPUT_ROOT/deterministic_unet/prepared/daily \\
         --output_path $OUTPUT_ROOT/deterministic_unet/tuning \\
-        --model_config config/deterministic_unet/search_space.yaml \\
-        --metrics_config config/eval/metrics.yaml \\
+        --model_config config/deterministic_unet/search_space_daily.yaml \\
+        --metrics_config config/eval/metrics_daily.yaml \\
         --n_trials 60
 """
 import logging
@@ -108,7 +108,7 @@ def tune(
         input_path: str,
         output_path: str,
         model_config: str,
-        metrics_config: str = 'config/eval/metrics.yaml',
+        metrics_config: str = 'config/eval/metrics_daily.yaml',
         model_type: str = 'model',
         n_trials: int = 60,
         sampler: str = 'tpe',
@@ -144,7 +144,7 @@ def tune(
             fitting phases, the loss dispatch and the prediction contract.
         input_path: A prepared directory from `prepare_modeling`.
         output_path: Where `best_model.ckpt` / `best_trial.json` / `trials.csv` / the optuna journal are written.
-        model_config: That family's `search_space.yaml`. Also the SINGLE SOURCE OF TRUTH for the selection
+        model_config: That family's `search_space_<task>.yaml`. Also the SINGLE SOURCE OF TRUTH for the selection
             composite — its `selection:` block is read here and recorded into `best_trial.json`.
         metrics_config: The shared metric suite. Supplies the climatology baselines behind the selection
             components (`mae_cond_ss_climatology`, and the Brier denominator in hourly mode).

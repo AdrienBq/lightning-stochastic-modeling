@@ -1,6 +1,6 @@
 # =====================================================================================================================
 # Search space + training options for the `tune` stage with `model-family: deterministic_unet` (referenced as
-# model-config in config/deterministic_unet/deterministic_unet.yaml, and logged as a run artifact by the orchestrator).
+# model-config in config/deterministic_unet/deterministic_unet_daily.yaml, and logged as a run artifact by the orchestrator).
 #
 # This family is the deterministic U-net: the baseline, AND the upstream model whose prediction the residual
 # diffusion corrects. It carries the SHARED SKELETON only — no ensemble knobs (it is deterministic, so
@@ -15,7 +15,7 @@
 # simply ignored by the trial when their parent switch is off.
 #
 # There is deliberately NO `target_transform:` block. The gamma F-transform is gone: training space == target space
-# (see config/eval/metrics.yaml). Do not reintroduce it.
+# (see config/eval/metrics_daily.yaml). Do not reintroduce it.
 # =====================================================================================================================
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -173,7 +173,7 @@ max_epochs: 50
 # ---------------------------------------------------------------------------------------------------------------------
 # Trial selection: ONE composite per TASK, shared by all three families so their trials tables are directly
 # comparable. Computed on the validation split, in the target space, on the ensemble MEAN for stochastic families.
-# Component definitions are exactly the metric keys emitted by config/eval/metrics.yaml.
+# Component definitions are exactly the metric keys emitted by config/eval/metrics_daily.yaml.
 #
 #   valid_regression_score = 0.60 * mae_cond_ss_climatology       (magnitude: conditional-MAE skill vs the
 #                                                                  climatology baseline on occurrence cells;

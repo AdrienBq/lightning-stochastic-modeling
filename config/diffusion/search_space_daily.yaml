@@ -1,6 +1,6 @@
 # =====================================================================================================================
 # Search space + training options for the `tune` stage with `model-family: diffusion` (referenced as model-config in
-# config/diffusion/diffusion.yaml, and logged as a run artifact by the orchestrator).
+# config/diffusion/diffusion_daily.yaml, and logged as a run artifact by the orchestrator).
 #
 # The model is a conditional FLOW-MATCHING velocity field: a conv stem fuses the conditioning channels (standardized
 # ERA5 predictors, plus the upstream-prediction channel in residual mode) with the noisy-target channel and patch-
@@ -8,7 +8,7 @@
 # emits the velocity map. The path is the straight (rectified-flow) interpolant and the loss is the plain velocity
 # MSE, so `loss:` below governs the TARGET-SPACE selection/auxiliary terms, not the flow objective itself.
 #
-# Same shared skeleton as config/deterministic_unet/search_space.yaml (read that file for the loss / occurrence-head /
+# Same shared skeleton as config/deterministic_unet/search_space_daily.yaml (read that file for the loss / occurrence-head /
 # calibration / selection rationale), plus the residual switch and the flow block.
 #
 # There is deliberately NO `target_transform:` block, and — unlike the source branch — no `flow.log_warp` knob: it
@@ -84,7 +84,7 @@ loss:
 # ODE draw is a member, so the spread term is real.
 # ---------------------------------------------------------------------------------------------------------------------
 
-# Output head -- see config/deterministic_unet/search_space.yaml. softplus gives the 0-hour floor structurally;
+# Output head -- see config/deterministic_unet/search_space_daily.yaml. softplus gives the 0-hour floor structurally;
 # ⚠️ it is unbounded above, so `max_hours` is not enforced by the activation (Step 3 decides where). In residual
 # mode `max_hours` is ALSO the ceiling of the reconstruction clamp: clamp(upstream + residual, 0, max_hours).
 output_activation: {type: categorical, choices: [softplus]}
@@ -115,7 +115,7 @@ max_epochs: 50
 
 # ---------------------------------------------------------------------------------------------------------------------
 # Trial selection — the SAME composite and the SAME name as every other family (see
-# config/deterministic_unet/search_space.yaml for the full derivation). Ranking on this target-space composite rather
+# config/deterministic_unet/search_space_daily.yaml for the full derivation). Ranking on this target-space composite rather
 # than on the validation flow-matching loss is deliberate: the flow loss lives in the generation space and says
 # nothing about occurrence skill or structure fidelity. The pointwise and categorical components score the ensemble
 # MEAN of the validation draws; psd_full_fidelity is POOLED over members.

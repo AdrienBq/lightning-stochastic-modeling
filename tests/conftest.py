@@ -149,18 +149,35 @@ def write_split_config(path, n_days=6, train_fraction=None):
 def metrics_config():
     """The shipped shared metric suite, parsed. Tests assert against the REAL config, not a fixture copy of it —
     that is what catches a config/code drift rather than agreeing with itself."""
-    with open(os.path.join(REPO_ROOT, 'config/eval/metrics.yaml')) as handle:
+    with open(os.path.join(REPO_ROOT, 'config/eval/metrics_daily.yaml')) as handle:
+        return yaml.safe_load(handle)
+
+
+@pytest.fixture(scope='session')
+def metrics_config_hourly():
+    """The shipped HOURLY metric suite, parsed (Step 4 block 4f). Same principle as ``metrics_config``: the hourly tests
+    drive the REAL config rather than a copy mutated in a helper, so the two cannot agree with each other while
+    disagreeing with what the hourly pipeline actually runs."""
+    with open(os.path.join(REPO_ROOT, 'config/eval/metrics_hourly.yaml')) as handle:
         return yaml.safe_load(handle)
 
 
 @pytest.fixture(scope='session')
 def search_spaces():
-    """``{family: parsed search_space.yaml}`` for all three families."""
+    """``{family: parsed search_space_daily.yaml}`` for all three families."""
     spaces = {}
     for family in ('deterministic_unet', 'mc_dropout', 'diffusion'):
-        with open(os.path.join(REPO_ROOT, f'config/{family}/search_space.yaml')) as handle:
+        with open(os.path.join(REPO_ROOT, f'config/{family}/search_space_daily.yaml')) as handle:
             spaces[family] = yaml.safe_load(handle)
     return spaces
+
+
+@pytest.fixture(scope='session')
+def search_space_hourly():
+    """The shipped HOURLY search space (Step 4 block 4f). One file, not a per-family dict: only the deterministic family
+    has an hourly pipeline, because the point is to prove the classification path runs rather than to sweep it."""
+    with open(os.path.join(REPO_ROOT, 'config/deterministic_unet/search_space_hourly.yaml')) as handle:
+        return yaml.safe_load(handle)
 
 
 @pytest.fixture

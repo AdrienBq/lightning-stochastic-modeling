@@ -3,7 +3,7 @@ diffusion model.
 
 ``evaluate`` drives every family through one duck-typed contract:
   * eval-time knobs set on the loaded module — ``eval_ensemble_size`` (``> 1`` enables the probabilistic suite),
-    ``eval_occurrence_event`` (the metrics.yaml occurrence event), ``eval_ensemble_seed``, ``target_stats``;
+    ``eval_occurrence_event`` (the metrics_daily.yaml occurrence event), ``eval_ensemble_seed``, ``target_stats``;
   * ``predict_step(batch, batch_idx)`` returning, in the target space:
       - single-sample run: ``{'prediction': [B,H,W], 'probability': ..., 'observation': [B,H,W]}``;
       - ensemble run:      ``{'prediction'` (ensemble mean) ``[B,H,W], 'ensemble_members' [B,M,H,W],

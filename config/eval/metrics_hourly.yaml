@@ -1,0 +1,261 @@
+# =====================================================================================================================
+# THE metric suite for the HOURLY OCCURRENCE task — the sibling of config/eval/metrics_daily.yaml.
+#
+# Referenced as `metrics-config` by the `tune`, `retrain_best` and `evaluate` stages of an HOURLY pipeline
+# (config/deterministic_unet/deterministic_unet_hourly*.yaml). Same role, same shape, same one-evaluation-for-all-
+# families rule as its daily sibling: read that file first, then this one for the deltas.
+#
+# ---------------------------------------------------------------------------------------------------------------------
+# WHAT THE HOURLY TASK IS. `mode: hourly` prepares one item per (day, hour) and a 0/1 OCCURRENCE target: the cell had
+# an hour of lightning reaching `hourly-threshold` strokes, or it did not. The model's single head emits a LOGIT and
+# the prediction is `sigmoid(logit)` — a PROBABILITY in [0, 1]. So in this file:
+#
+#     observation = the 0/1 event          prediction = a probability, never a 0/1 field
+#
+# Metric space is still TRAINING SPACE == EVALUATION SPACE: no transform, no back-transform. The evaluation is
+# mode-agnostic by construction — `run_metric_suite` detects a probability field from the arrays it is handed rather
+# than from a config key — so most of the suite carries over unchanged and this file is a TRIM plus one retarget.
+#
+# ---------------------------------------------------------------------------------------------------------------------
+# THE COMPLETE DELTA FROM metrics_daily.yaml, and why each entry moved. (metrics_daily.yaml's own "HOURLY BINARY TARGET" note is
+# the specification; this is that note applied.)
+#
+#   1. thresholds        h3/h6/h12 REMOVED — hour bands are defined on a 0-24 daily count and do not exist on a 0/1
+#                        target. `p50` ADDED as `kind: probability`: the decision cut, on the PREDICTION side only.
+#   2. categorical       thresholds -> [p50]. ⚠️ THE LOAD-BEARING EDIT OF THIS FILE — see the block below.
+#   3. continuous        `r2.thresholds` -> [occurrence] (the only non-empty observed subgroup).
+#                        `mae_stratified` REMOVED — its bins partition OBSERVED intensity, and a 0/1 target has one
+#                        non-empty band, so the profile is a single point.
+#                        `estimation_tendency` REMOVED — conditioned on obs > 0, `pred - obs = p - 1 <= 0` always, so
+#                        `under_frac` ~ 1 and `over_frac` = 0 for every model, including a perfect one.
+#   4. calibration       `rank_correlation` REMOVED — Spearman against a dichotomous observation is exactly
+#                        (2*AUC - 1) * sqrt(3*n1*n0/n^2): no information beyond `roc_auc`, and scaled by ~sqrt(base
+#                        rate) it MISREADS (an AUC of 0.998 shows as 0.049). Its obs > 0 subgroups are constant
+#                        anyway, so every key would be NaN.
+#   5. spatial           `fss.thresholds` -> [occurrence], and unread in practice: the suite detects the probability
+#                        field and switches FSS to its THRESHOLD-FREE form, where the keys are `fss_s<scale>`.
+#   6. reporting         `error_by_intensity_bin` REMOVED with `mae_stratified` — a figure list naming a figure that
+#                        can never be drawn is how a report silently loses a panel.
+#
+# NOTHING ELSE IS TRIMMED, and two absences are worth stating because they look like oversights:
+#   * `baselines` is UNCHANGED. The climatology baseline is per (month, hour-of-day) in hourly mode rather than per
+#     day-of-year — that switch is in `_climatology_tables`, keyed on the prepared mode, not configured here.
+#   * `metrics.ensemble` is KEPT although the only hourly pipeline that ships is the deterministic family, whose
+#     `predict_step` emits no members and for which the whole group is silently skipped. This file is the hourly
+#     suite for ALL families, exactly as its daily sibling is; an hourly mc_dropout or diffusion pipeline must not
+#     have to add a metrics config to get its ensemble scores.
+#
+# ---------------------------------------------------------------------------------------------------------------------
+# WHAT THE HOURLY TASK GAINS — the four keys that are structurally NaN or absent in a daily run:
+#
+#     brier_skill_score  ·  explained_deviance  ·  dice_occurrence (here `dice_p50`)  ·  the reliability diagram
+#
+# All four need a CALIBRATED PROBABILITY, and the one-head design gives a daily model none (there is no occurrence
+# head — see config/deterministic_unet/search_space_daily.yaml for that decision). Here the prediction IS the probability,
+# so they are all well defined. They are the reason the hourly pipeline exists: without it `build_binary_loss`,
+# `PlattScaling`, `kind: probability`, `climatology_brier`, `explained_deviance`, `dice_occurrence`, the
+# threshold-free FSS and `valid_classification_score` are all code with no runnable consumer.
+#
+# ---------------------------------------------------------------------------------------------------------------------
+# ⚠️ TWO WAYS TO MISREAD THIS SUITE, both of which look like model failures and are not.
+#
+#   * `mae` IS IMPROPER against a 0/1 observation. It is minimized by a SHARP forecast, so the all-zero prediction
+#     beats a calibrated one (0.0007 vs 0.0014 at this base rate). It stays REPORTED — it is the same number the
+#     daily suite reports and comparability is worth more than tidiness — but no selection score may use it in this
+#     mode, and no hourly search space may name `mae`/`weighted_mae`/`wmae_psd` as its LOSS for the same reason.
+#     `rmse` has the opposite property and is exactly what you want: `rmse ** 2` IS the Brier score. Unconditioned
+#     `r2` is likewise the Brier SKILL score against a constant base-rate reference — compare it with
+#     `brier_skill_score` below, whose reference is the stronger per-cell climatology. And `bias` becomes
+#     calibration-in-the-large, `mean(p) - base_rate`.
+#
+#   * THE SPATIAL GROUP IS BIASED AGAINST CORRECTNESS HERE. A calibrated probability field is intrinsically smoother
+#     than the 0/1 field it is compared with — spreading probability mass is what calibration MEANS at a 0.07 % base
+#     rate — so `psd_band_ratio` (high band), `sharpness_ratio` and `variance_ratio` read LOW for a well-calibrated
+#     model. `psd_full_fidelity` carries 0.30 of `valid_classification_score`, so a sharp over-confident model is
+#     rewarded on that term. Read the reliability diagram before concluding a model is over-smoothed.
+# =====================================================================================================================
+
+# Unchanged from metrics_daily.yaml. There is deliberately NO `persistence` baseline: this is a diagnostic ERA5 -> lightning
+# parameterization, so at inference the model sees reanalysis predictors only and no lightning observation of any time.
+# In hourly mode `climatology` is the per-(month, hour-of-day) mean rather than the per-day-of-year one — the switch is
+# in the code, keyed on the prepared mode.
+baselines:
+    zero: {}                                            # all-zero predictor: the imbalance-exploiting cheat, and
+                                                        # the floor every model must clear
+    climatology:
+        window_days: 90                                 # read in DAILY mode only (the day-of-year smoothing window);
+                                                        # the hourly table bins by (month, hour) instead and ignores
+                                                        # it. Kept so the two files' baseline blocks stay identical.
+
+# =====================================================================================================================
+# Named events. TWO entries, and they are not two levels of one quantity — they cut DIFFERENT SIDES.
+#
+#   occurrence  the OBSERVED event. On a 0/1 target `target > 0` is the label itself, read as it is.
+#   p50         the DECISION THRESHOLD, on the PREDICTION only. `kind: probability` keeps the observation side at the
+#               occurrence event and cuts the prediction at `p >= 0.5`.
+#
+# ⚠️ `occurrence` carries NO `pred_value` here, unlike in metrics_daily.yaml where it must (`pred_value: 1`, or a softplus
+# head satisfies `hours > 0` almost everywhere and the contingency table collapses). Nothing in THIS file cuts the
+# prediction at the occurrence level: `occurrence` is used only where a score conditions on the OBSERVED event — the
+# `r2` subgroup, FSS's observed fractions, the reliability diagram, the Brier/deviance baselines and the ensemble rank
+# histogram. The prediction-side cut is `p50`'s job and `p50`'s alone.
+# =====================================================================================================================
+thresholds:
+    occurrence: {kind: occurrence}                      # observed: target > 0 — the 0/1 label
+    p50: {kind: probability, value: 0.5}                # observed: the label; predicted: p >= 0.5
+
+metrics:
+    # -----------------------------------------------------------------------------------------------------------
+    # Continuous errors on the PROBABILITY field. The group does NOT degenerate — see the `mae` / `rmse` / `r2`
+    # note in the header for what each number means once the observation is dichotomous.
+    # -----------------------------------------------------------------------------------------------------------
+    continuous:
+        rmse: {}                                        # `rmse ** 2` IS the Brier score
+        mae: {}                                         # ⚠️ IMPROPER here; reported, never selected on
+        bias: {}                                        # calibration-in-the-large, mean(p) - base_rate
+        rmse_conditional_positive: {condition: obs_positive}    # error on the observed-positive cells
+        mae_conditional_positive: {condition: obs_positive}     # `mae_cond_pos`; the base of the
+                                                                # mae_cond_ss_climatology skill term
+        r2:                                             # overall (`r2` = the Brier skill score against a constant
+            thresholds: [occurrence]                    # base rate) and within the observed-positive subgroup.
+                                                        # Only ONE subgroup exists on a 0/1 target.
+        # `mae_stratified` and `estimation_tendency` are REMOVED — see delta 3 in the header.
+
+    # -----------------------------------------------------------------------------------------------------------
+    # Categorical scores — THE HEADLINE GROUP, and the one edit in this file that is a change of KIND rather than a
+    # trim.
+    #
+    # ⚠️ `thresholds: [p50]`, NEVER `[occurrence]`. `kind: occurrence` cuts BOTH sides at `> 0`, which on a
+    # ⚠️ probability field marks every cell carrying any non-zero probability as a predicted event: POD ~ 1,
+    # ⚠️ FAR ~ 1 - base_rate, an entire contingency table of nonsense — and NO error is raised, because every value
+    # ⚠️ involved is individually legal. `run_metric_suite` warns when it detects the combination (a probability
+    # ⚠️ prediction under a shared cut) and names `kind: probability` in the message, but the config is what has to
+    # ⚠️ be right. This is the exact class of bug that made the DAILY occurrence table read "lightning everywhere"
+    # ⚠️ until `pred_value: 1` was added there.
+    #
+    # Two of the ten scores are THRESHOLD-FREE and unaffected by where p50 sits — they rank or integrate the whole
+    # probability field:
+    #   * roc_auc / average_precision: PR-AUC is the more informative at this base rate (ROC-AUC is optimistic when
+    #     negatives dominate), which is why `average_precision` — not ROC-AUC — carries 0.50 of the classification
+    #     selection composite.
+    #   * dice: SOFT dice, computed on the probability with no cut, so it is the eval-time complement of the `dice`
+    #     TRAINING loss. In a daily run it is emitted nowhere (no probability); here it is emitted as `dice_p50`
+    #     and measures exactly what that loss optimized.
+    # -----------------------------------------------------------------------------------------------------------
+    categorical:
+        thresholds: [p50]
+        scores: [pod, far, csi, ets, hss, sedi, frequency_bias, roc_auc, average_precision, dice]
+
+    # -----------------------------------------------------------------------------------------------------------
+    # Skill vs the trivial baselines. ⭐ THE GROUP THE HOURLY TASK EXISTS FOR: all four entries are live here, where
+    # a daily run reports only `mae_conditional_skill_score` and leaves the two probabilistic ones NaN for want of a
+    # calibrated probability.
+    # -----------------------------------------------------------------------------------------------------------
+    skill:
+        mse_skill_score: {baselines: [zero, climatology]}                       # 1 - MSE/MSE_baseline; on a 0/1
+                                                                               # target this is Brier skill against
+                                                                               # each baseline
+        mae_conditional_skill_score: {baselines: [zero, climatology], condition: obs_positive}
+                                                                               # ⚠️ built on the IMPROPER mae; read
+                                                                               # it as "recall-ish", and prefer the
+                                                                               # two below for calibration
+        brier_skill_score: {baselines: [climatology], target: occurrence}       # ⭐ LIVE HERE. Reference is the
+                                                                               # per-cell climatological occurrence
+                                                                               # frequency, which is a far stronger
+                                                                               # competitor than a constant rate;
+                                                                               # carries 0.20 of the composite
+        explained_deviance: {baseline: climatology, target: occurrence}         # ⭐ LIVE HERE. Bernoulli explained
+                                                                               # deviance, 1 - logloss(model) /
+                                                                               # logloss(clim) — the log-score
+                                                                               # counterpart of the Brier skill,
+                                                                               # and the harsher of the two on an
+                                                                               # over-confident forecast
+
+    # -----------------------------------------------------------------------------------------------------------
+    # Calibration. `rank_correlation` is REMOVED (delta 4), which leaves the reliability diagram alone here — and
+    # promoted from "self-skips on every daily run" to THE calibration diagnostic of this task. Read it beside the
+    # spatial group, whose bias against a calibrated forecast is stated in the header.
+    # -----------------------------------------------------------------------------------------------------------
+    calibration:
+        reliability_diagram: {target: occurrence, bins: 10}
+
+    # -----------------------------------------------------------------------------------------------------------
+    # Spatial structure / high-frequency fidelity. Identical to metrics_daily.yaml except `fss.thresholds`.
+    # ⚠️ Read the header's second warning before using this group to judge an hourly model.
+    #
+    # `fss` switches to its THRESHOLD-FREE form automatically: with a probability prediction the neighbourhood mean
+    # IS a fraction, so no cut is needed, and FSS is then exactly a fractions Brier skill score at that scale. Keys
+    # become `fss_s<scale>` (not `fss_<threshold>_s<scale>`) and `fss_useful_scale` loses its threshold suffix. The
+    # `thresholds` list below is therefore UNREAD on a genuine probability field — kept because the switch is
+    # detected from the arrays, so a run whose predictions somehow fall outside [0, 1] falls back to the thresholded
+    # form and needs a valid event to cut at.
+    # -----------------------------------------------------------------------------------------------------------
+    spatial:
+        psd_band_ratio:
+            bands:                                      # wavelengths in pixels
+                full: [2, .inf]
+                low: [32, .inf]
+                mid: [8, 32]
+                high: [2, 8]
+        psd_full_fidelity: {band: full}                 # selection-score structure term (0.30 of the composite)
+        psd_high_fidelity: {band: high}                 # sharper over-smoothing detector, diagnostic only
+        log_spectral_distance: {}
+        fss:
+            thresholds: [occurrence]                    # unread in the probabilistic form; see above
+            scales: [1, 3, 5, 9, 17]                    # square neighbourhood side, in pixels
+            report_useful_scale: true
+        sharpness_ratio: {}                             # std of spatial gradient magnitude, pred / obs
+        variance_ratio: {}                              # spatial variance, pred / obs
+
+    # -----------------------------------------------------------------------------------------------------------
+    # Ensemble / probabilistic scores. Kept in full, unchanged — see the header for why this file carries them
+    # though no hourly pipeline currently ships a stochastic family. Silently skipped for a family whose
+    # `predict_step` emits no `ensemble_members`.
+    #
+    # !! The ensemble size is the `ensemble-size` parameter of the evaluate STAGE, never set here, and it MUST BE
+    # !! >= 2: spread_skill_sums computes the member variance with ddof=1, so a single-member ensemble yields a
+    # !! silent NaN rather than an error.
+    # -----------------------------------------------------------------------------------------------------------
+    ensemble:
+        crps: {}
+        almost_fair_crps: {}
+        spread_skill_ratio: {}
+        rank_histogram: {}                              # conditioned on the occurrence event; M+1 bins
+
+# Figures and tables written to the stage's `report-path`. Styled to the spec in
+# .claude/plans/inventory-figures.md section 1: cartopy EuroPP axes with a PlateCarree data transform,
+# origin='upper' (array row 0 is the NORTH edge), ONE warm palette per figure under a single colorbar.
+#
+# ⚠️ `maps_most_extreme_days` is honest but coarse on this task. The colour axis is observation-driven
+# (`ceil(nanmax(obs))`) and an hourly observation is 0/1, so `max_val` is 1 and the palette collapses to its first
+# two bins — white below 0.5, grey above — for every hourly figure, with a `h / day` colorbar label that names the
+# daily unit. The panels are correct (an obs cell is white or grey; a predicted probability shades by which side of
+# 0.5 it falls on) and the file names carry the hour (`maps_<date>_h<HH>_*`), but this is a probability field drawn
+# on a scale built for integer hour counts. Left as-is deliberately: the hourly task's headline diagnostics are the
+# reliability diagram and the ROC/PR curves, and a probability-aware colour axis is a plotting change, not a
+# metrics one.
+reporting:
+    figures:
+        - maps_most_extreme_days      # observed vs predicted maps for the most extreme (day, hour) of the split and
+                                      # the median one; see the caveat above
+        - roc_pr_curves               # ⭐ ROC + precision-recall per threshold — THE discrimination figure of this
+                                      # task, and the one backing average_precision
+        - confusion_matrix            # 2x2 contingency counts at p50, behind pod/far/csi/ets
+        - reliability                 # ⭐ the occurrence reliability diagram: self-skips on every daily run, and is
+                                      # THE calibration diagnostic here
+        - psd_curves                  # radially-averaged PSD, model vs obs vs baselines
+        - fss_vs_scale                # one curve, labelled `probabilistic` (the threshold-free form)
+        - rank_histogram              # Talagrand diagram (ensemble runs only; skipped otherwise)
+        # `error_by_intensity_bin` is REMOVED with `mae_stratified` (delta 6): it reads curves['error_by_bin'], which
+        # this suite never populates, so it would self-skip on every run forever.
+        #
+        # Residual-mode diffusion diagnostics — the learnt-discrepancy sanity check. They self-skip unless a residual
+        # run populated curves['residual'], which no hourly pipeline currently produces; kept for the same reason the
+        # ensemble group above is kept.
+        - residual_bias_map           # mean predicted discrepancy D_pred (diverging)
+        - residual_surprise           # magnitude + direction surprise vs the true discrepancy
+        - residual_histograms         # D_pred vs D_true distributions (pixel + per-image)
+        - residual_qq                 # residual QQ
+        - residual_scatters           # D_pred vs target / discrepancy / upstream
+        - residual_heteroscedasticity # correction-error spread vs upstream / target
+    formats: [png, csv]

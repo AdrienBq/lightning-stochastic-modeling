@@ -142,7 +142,7 @@ def test_no_space_still_carries_the_dangling_average_precision_WEIGHT(family, re
     """
     import os
 
-    text = open(os.path.join(repo_root, f'config/{family}/search_space.yaml')).read()
+    text = open(os.path.join(repo_root, f'config/{family}/search_space_daily.yaml')).read()
     assert 'average_precision_occurrence: 0.40' not in text
 
 
@@ -153,7 +153,7 @@ def test_the_prose_no_longer_documents_a_THIRD_weighting(repo_root):
     answers; the prose is the one a reader trusts first."""
     import os
 
-    text = open(os.path.join(repo_root, 'config/deterministic_unet/search_space.yaml')).read()
+    text = open(os.path.join(repo_root, 'config/deterministic_unet/search_space_daily.yaml')).read()
     assert '0.40 * average_precision_occurrence' not in text
 
 
@@ -164,7 +164,7 @@ def test_the_mc_dropout_prose_names_the_RENAMED_ensemble_builder(repo_root):
     have different signatures. The builder was RENAMED to ``build_ensemble_loss`` for what it actually is."""
     import os
 
-    text = open(os.path.join(repo_root, 'config/mc_dropout/search_space.yaml')).read()
+    text = open(os.path.join(repo_root, 'config/mc_dropout/search_space_daily.yaml')).read()
     assert 'build_finetune_loss is removed' not in text
     assert 'build_ensemble_loss' in text
 
@@ -341,3 +341,119 @@ def test_the_sampler_is_reproducible_under_a_fixed_generator():
     node = {'type': 'float', 'low': 0.0, 'high': 1.0}
     assert search._sample_value(node, np.random.default_rng(11)) == \
         search._sample_value(node, np.random.default_rng(11))
+
+
+# =====================================================================================================================
+# The HOURLY search space  (Step 4 block 4f)
+#
+# The daily spaces above are proven usable by SAMPLING them. That is not enough here, and the difference is the point:
+# the hourly space is the first to reach `build_binary_loss`, whose `focal_bce` branch reads `positive_class_weight`
+# and `focal_gamma` with `[]` rather than `.get`, and the first whose loss names are checked against the MODE at module
+# construction (`UnetModuleBase` raises for a binary loss on daily and for `crps_binary` on a single-pass family). A
+# sampled dict that looks fine is exactly what shipped the two `KeyError`s the test above commemorates, so this one
+# builds the module and takes a training step.
+# =====================================================================================================================
+def test_the_hourly_space_samples_a_usable_trial(search_space_hourly):
+    rng = np.random.default_rng(0)
+    for _ in range(10):
+        trial = apply_constraints(sample_trial(search_space_hourly, rng))
+        assert isinstance(trial['batch_size'], int)
+        assert 'lr' in trial['optimizer']
+        assert trial['loss']['name'] in ('focal_bce', 'dice', 'brier', 'wmse_psd')
+        # ⚠️ NOT `trial['max_hours'] == 24` like the daily spaces: the key is absent here by decision (a 0/1 target has
+        # no hour ceiling), and the module defaults it. Asserting its absence is asserting the decision.
+        assert 'max_hours' not in trial and 'output_activation' not in trial
+
+
+def test_the_focal_bce_rule_FIRES_on_the_hourly_space(search_space_hourly):
+    """``apply_constraints``' first rule is documented as *"inert in the three daily search spaces, whose loss.name
+    choices are all distance losses; it fires only where focal_bce is reachable, i.e. an hourly pipeline"*. This is that
+    pipeline, so the rule stops being unreachable-by-configuration — and gamma must come back exactly 0 whenever
+    focal_bce is sampled, because focal BCE already carries its own positive_class_weight."""
+    rng = np.random.default_rng(3)
+    fired = 0
+    for _ in range(60):
+        trial = apply_constraints(sample_trial(search_space_hourly, rng))
+        if trial['loss']['name'] == 'focal_bce':
+            fired += 1
+            assert trial['loss']['intensity_weight_gamma'] == 0.0
+        else:
+            assert 'intensity_weight_gamma' in trial['loss']       # the reweighting knob the distance losses need
+    assert fired, 'focal_bce was never sampled in 60 draws -- the rule is still unreachable'
+
+
+@pytest.mark.parametrize('loss_name', ['focal_bce', 'dice', 'brier', 'wmse_psd'])
+def test_every_hourly_LOSS_CHOICE_builds_a_module_and_takes_a_step(
+        loss_name, search_space_hourly, normalization, target_stats
+):
+    """⭐ The end-to-end check on the space: each of the four reachable losses, built into a real hourly module, one
+    forward + backward on a 0/1 target. Two of the four take LOGITS through ``build_binary_loss`` and two take the
+    PROBABILITY through ``build_regression_loss``, and the module dispatches on the NAME — so this is also the test that
+    the mixed list is admissible rather than merely plausible.
+    """
+    import torch
+
+    from src.utils.modeling.deterministic_module import DeterministicUnetModule
+
+    rng = np.random.default_rng(11)
+    trial = None
+    for _ in range(200):                                   # draw until this loss comes up, keeping every other key
+        candidate = apply_constraints(sample_trial(search_space_hourly, rng))
+        if candidate['loss']['name'] == loss_name:
+            trial = candidate
+            break
+    assert trial is not None, f'{loss_name} never sampled'
+    trial['unet'] = {**trial['unet'], 'base_channels': 8, 'depth': 2}          # keep the step cheap
+
+    module = DeterministicUnetModule(trial, 5, target_stats(mode='hourly'), normalization)
+    assert module.hourly
+    assert module.loss_takes_logits is (loss_name in ('focal_bce', 'dice', 'brier'))
+
+    x = torch.randn(2, 5, 16, 24)
+    y = (torch.rand(2, 16, 24) < 0.05).float()              # a 0/1 occurrence target at a plausible base rate
+    loss = module.training_step((x, y), 0)
+    assert torch.isfinite(loss), loss
+    loss.backward()
+
+
+def test_an_hourly_module_reports_its_PREDICTION_as_the_probability(search_space_hourly, normalization, target_stats):
+    """The one line that makes the reliability diagram, ``explained_deviance`` and ``dice`` appear on this task and be
+    absent on the daily one. Checked through the shipped space rather than a hand-built trial, so it covers the
+    configuration a real hourly sweep would produce."""
+    import torch
+
+    from src.utils.modeling.deterministic_module import DeterministicUnetModule
+
+    trial = apply_constraints(sample_trial(search_space_hourly, np.random.default_rng(5)))
+    trial['unet'] = {**trial['unet'], 'base_channels': 8, 'depth': 2}
+    module = DeterministicUnetModule(trial, 5, target_stats(mode='hourly'), normalization).eval()
+
+    x = torch.randn(2, 5, 16, 24)
+    y = (torch.rand(2, 16, 24) < 0.05).float()
+    with torch.no_grad():
+        output = module.predict_step((x, y), 0)
+    assert output['probability'] is not None
+    assert torch.equal(output['probability'], output['prediction'])
+    assert float(output['prediction'].min()) >= 0.0 and float(output['prediction'].max()) <= 1.0
+
+
+def test_the_hourly_space_can_fit_PLATT_calibration(search_space_hourly, normalization, target_stats):
+    """``calibration.occurrence: platt`` has never been fitted by a shipped pipeline — it is inert in all three daily
+    spaces, where the head emits hours and there is no logit to scale. Here it is the ONE calibrator the task admits, so
+    the space must be able to reach it and the module must schedule its phase."""
+    import torch
+
+    from src.utils.modeling.deterministic_module import DeterministicUnetModule
+
+    assert 'platt' in search_space_hourly['calibration']['occurrence']['choices']
+
+    trial = apply_constraints(sample_trial(search_space_hourly, np.random.default_rng(2)))
+    trial['calibration'] = {'occurrence': 'platt'}
+    trial['unet'] = {**trial['unet'], 'base_channels': 8, 'depth': 2}
+    module = DeterministicUnetModule(trial, 5, target_stats(mode='hourly'), normalization)
+
+    assert module.training_phases() == ('train', 'occurrence_calibration')
+    assert module.net.output_calibration is not None, 'the Platt layer must live in the net, so it travels in state_dict'
+    module.set_phase('occurrence_calibration')
+    loss = module.training_step((torch.randn(2, 5, 16, 24), (torch.rand(2, 16, 24) < 0.05).float()), 0)
+    assert torch.isfinite(loss), loss

@@ -7,14 +7,14 @@ banner: true
 description: 'Flow-matching diffusion -- GPU smoke tier'
 
 # =====================================================================================================================
-# GPU SMOKE TIER of config/diffusion/diffusion.yaml. Read that file for what the pipeline does and why, and
-# config/deterministic_unet/deterministic_unet_smoke_gpu.yaml for the full list of smoke overrides and their rationale.
+# GPU SMOKE TIER of config/diffusion/diffusion_daily.yaml. Read that file for what the pipeline does and why, and
+# config/deterministic_unet/deterministic_unet_daily_smoke_gpu.yaml for the full list of smoke overrides and their rationale.
 #
 # 18 mid-July days (10 train / 4 valid / 4 test), 2 trials, 1 epoch, accelerator gpu, bf16-mixed, ensemble-size 5,
 # sampling-steps 16 (a GPU can afford more ODE steps than the CPU tier's 8, so generation is exercised closer to how
 # it will actually run).
 #
-# RESIDUAL MODE: to smoke-test the residual path, run config/deterministic_unet/deterministic_unet_smoke_gpu.yaml first and point
+# RESIDUAL MODE: to smoke-test the residual path, run config/deterministic_unet/deterministic_unet_daily_smoke_gpu.yaml first and point
 # UPSTREAM_MODEL at ITS checkpoint -- not at a real one, whose feature normalization was fitted on different days:
 #
 #     export UPSTREAM_MODEL=$OUTPUT_ROOT/deterministic_unet_smoke_gpu/best/best_model.ckpt
@@ -55,8 +55,8 @@ stages:
         model-family: diffusion
         model-type: diffusion
         input-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_gpu/prepared/daily'
-        model-config: config/diffusion/search_space.yaml
-        metrics-config: config/eval/metrics.yaml
+        model-config: config/diffusion/search_space_daily.yaml
+        metrics-config: config/eval/metrics_daily.yaml
         output-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_gpu/tuning'
         metrics-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_gpu/tuning/best_trial_metrics.json'
         n-trials: 2
@@ -80,7 +80,7 @@ stages:
         model-type: diffusion
         source-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_gpu/tuning'
         input-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_gpu/prepared/daily'
-        metrics-config: config/eval/metrics.yaml
+        metrics-config: config/eval/metrics_daily.yaml
         output-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_gpu/best'
         metrics-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_gpu/best/best_trial_metrics.json'
         max-epochs: 1
@@ -95,7 +95,7 @@ stages:
         input-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_gpu/prepared/daily'
         model-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_gpu/best/best_model.ckpt'
         output-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_gpu/evaluation'
-        metrics-config: config/eval/metrics.yaml
+        metrics-config: config/eval/metrics_daily.yaml
         metrics-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_gpu/evaluation/test_metrics.json'
         report-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_gpu/reports'
         split: test

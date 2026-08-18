@@ -200,7 +200,7 @@ def test_every_parameter_the_shipped_configs_pass_is_accepted(repo_root):
     accepted = set(inspect.signature(retrain_best.retrain_best).parameters)
     for family in ('deterministic_unet', 'mc_dropout', 'diffusion'):
         for tier in ('', '_smoke_cpu', '_smoke_gpu'):
-            config = parse_config(os.path.join(repo_root, f'config/{family}/{family}{tier}.yaml'))
+            config = parse_config(os.path.join(repo_root, f'config/{family}/{family}_daily{tier}.yaml'))
             block = next(parameters for stage in config['stages']
                          for name, parameters in stage.items() if name == 'retrain_best')
             passed = {key.replace('-', '_') for key in block}

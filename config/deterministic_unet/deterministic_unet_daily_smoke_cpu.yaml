@@ -7,7 +7,7 @@ banner: true
 description: 'Deterministic U-net -- CPU smoke tier'
 
 # =====================================================================================================================
-# CPU SMOKE TIER of config/deterministic_unet/deterministic_unet.yaml. Read that file for what the pipeline does and why.
+# CPU SMOKE TIER of config/deterministic_unet/deterministic_unet_daily.yaml. Read that file for what the pipeline does and why.
 #
 # Purpose: run the whole pipeline end to end on a CPU-only host in minutes, to prove every stage executes, every
 # declared artifact appears and every expected metric key is emitted. It proves NOTHING about model quality.
@@ -58,8 +58,8 @@ stages:
         model-family: deterministic_unet
         model-type: deterministic_unet
         input-path: '{{$OUTPUT_ROOT}}/deterministic_and_mc_dropout_smoke_cpu/prepared/daily'
-        model-config: config/deterministic_unet/search_space.yaml
-        metrics-config: config/eval/metrics.yaml
+        model-config: config/deterministic_unet/search_space_daily.yaml
+        metrics-config: config/eval/metrics_daily.yaml
         output-path: '{{$OUTPUT_ROOT}}/deterministic_unet_smoke_cpu/tuning'
         metrics-path: '{{$OUTPUT_ROOT}}/deterministic_unet_smoke_cpu/tuning/best_trial_metrics.json'
         n-trials: 2
@@ -82,7 +82,7 @@ stages:
         model-type: deterministic_unet
         source-path: '{{$OUTPUT_ROOT}}/deterministic_unet_smoke_cpu/tuning'
         input-path: '{{$OUTPUT_ROOT}}/deterministic_and_mc_dropout_smoke_cpu/prepared/daily'
-        metrics-config: config/eval/metrics.yaml
+        metrics-config: config/eval/metrics_daily.yaml
         output-path: '{{$OUTPUT_ROOT}}/deterministic_unet_smoke_cpu/best'
         metrics-path: '{{$OUTPUT_ROOT}}/deterministic_unet_smoke_cpu/best/best_trial_metrics.json'
         max-epochs: 2
@@ -96,7 +96,7 @@ stages:
         input-path: '{{$OUTPUT_ROOT}}/deterministic_and_mc_dropout_smoke_cpu/prepared/daily'
         model-path: '{{$OUTPUT_ROOT}}/deterministic_unet_smoke_cpu/best/best_model.ckpt'
         output-path: '{{$OUTPUT_ROOT}}/deterministic_unet_smoke_cpu/evaluation'
-        metrics-config: config/eval/metrics.yaml
+        metrics-config: config/eval/metrics_daily.yaml
         metrics-path: '{{$OUTPUT_ROOT}}/deterministic_unet_smoke_cpu/evaluation/test_metrics.json'
         report-path: '{{$OUTPUT_ROOT}}/deterministic_unet_smoke_cpu/reports'
         split: test

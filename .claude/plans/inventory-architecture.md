@@ -165,7 +165,7 @@ needed, but D's file is worth citing as corroboration.
 | `docs/metrics_and_losses.md` | 285 | Reference with LaTeX math: intensity weighting, weighted MSE, asymmetric Huber, Tweedie, Poisson NLL, focal BCE, hierarchy + target transform; then continuous / categorical / skill / calibration / spatial metrics; the tuning selection score; a best-practice checklist |
 | `docs/distr_regression_pipeline.md` | 140 | Running it, stages and artifacts, code map, design decisions, extending |
 
-Together with A's heavily-commented `config/metrics.yaml`, **most of Step 1's written material already exists.**
+Together with A's heavily-commented `config/metrics_daily.yaml`, **most of Step 1's written material already exists.**
 The work is consolidation and reconciliation against your annotations, not authoring from scratch.
 
 ## 6. Transform removal checklist (scope decision, 2026-07-28)
@@ -186,9 +186,9 @@ Every touchpoint of the gamma F-transform, so the removal can be done completely
 | 10 | `module.log1p_huber` / `log1p_huber_quantile` | 🔢 Remove, or re-derive without log1p if residual mode needs them |
 | 11 | `scores.tweedie_deviance_score`, `quantile_ratios`, `quantile_quantile` | 🔢 Remove or re-scope (see `inventory-scores.md`) |
 | 12 | `scores.uniform_histogram_ks` (PIT) | 🔀 **Decide.** The function is generic (a uniformity test); the dependency is in `evaluation.py:468-470`, which reads `target_stats['gamma_shape']`/`['gamma_scale']` and calls `gammainc` to build the PIT values. Item 7 removes those parameters ⇒ those two call sites break. Either drop PIT, or re-derive without a fitted CDF (**ensemble-rank PIT**, needing only member ranks vs the observation) |
-| 13 | `config/metrics.yaml` | Remove the `power: 1.9` Tweedie entry, `pit_histogram.space: transformed`, and the tail-quantile thresholds (see §"Threshold redefinition" in the scores inventory). ✅ **DONE in Step 2**, and the threshold question is now **settled**: the `train_positive_quantile` p90/p99/p99_9 levels are replaced by absolute hour bands `occurrence` / `h3` / `h6` / `h12`. No new code was needed — `evaluation.resolve_threshold` already supports `kind: absolute` (it is the default kind), contrary to what `step-2-config.md` §3.2 assumed. The file now lives at `config/eval/metrics.yaml` |
+| 13 | `config/metrics_daily.yaml` | Remove the `power: 1.9` Tweedie entry, `pit_histogram.space: transformed`, and the tail-quantile thresholds (see §"Threshold redefinition" in the scores inventory). ✅ **DONE in Step 2**, and the threshold question is now **settled**: the `train_positive_quantile` p90/p99/p99_9 levels are replaced by absolute hour bands `occurrence` / `h3` / `h6` / `h12`. No new code was needed — `evaluation.resolve_threshold` already supports `kind: absolute` (it is the default kind), contrary to what `step-2-config.md` §3.2 assumed. The file now lives at `config/eval/metrics_daily.yaml` |
 | 14 | search-space YAMLs | Remove the whole `target_transform:` block (`enabled`, `zero_handling`, `clip_eps`, `gaussianize`) and the `calibration.regression` monotone option |
-| 15 | Metrics-space invariant | `metrics.yaml` states *"all metrics are computed in the ORIGINAL target space… back-transformed through the inverse CDF first"*. **With no transform, training space == target space** — the invariant becomes trivially true and the back-transform plumbing can go |
+| 15 | Metrics-space invariant | `metrics_daily.yaml` states *"all metrics are computed in the ORIGINAL target space… back-transformed through the inverse CDF first"*. **With no transform, training space == target space** — the invariant becomes trivially true and the back-transform plumbing can go |
 
 **Net simplification:** item 15 is the real prize — training space and evaluation space become the same space, so
 an entire class of "which space am I in?" bug disappears. That is the strongest argument for this scope decision.

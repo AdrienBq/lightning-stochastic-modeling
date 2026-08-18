@@ -1,0 +1,129 @@
+project_uri: 'src/stages'                                                           # the path of the directory where each stage script is saved
+log_artifacts: false                                                                # whether to log the output file/directory as artifact
+log_models: false                                                                   # whether to log the output model
+lazy: false                                                                         # NEVER cache a smoke run: the point is to execute every stage
+ensure_determinism: false
+banner: true
+description: 'Deterministic U-net, hourly occurrence -- CPU smoke tier'
+
+# =====================================================================================================================
+# CPU SMOKE TIER of config/deterministic_unet/deterministic_unet_hourly.yaml. Read that file for what the pipeline does
+# and why, and config/deterministic_unet/deterministic_unet_daily_smoke_cpu.yaml for the smoke-tier conventions.
+#
+# Purpose: run the whole HOURLY pipeline end to end on a CPU-only host in minutes, to prove the classification path
+# executes and that the metrics JSON carries the four keys a daily run cannot emit — `brier_skill_score`,
+# `explained_deviance`, `dice_p50` and the reliability table. It proves NOTHING about model quality.
+#
+# Everything is inherited by copy from the full hourly tier; the only differences are:
+#   split-config      -> config/split/split_smoke_cpu.yaml (the same 8 mid-July days the daily smoke uses)
+#   output paths      -> $OUTPUT_ROOT/deterministic_unet_hourly_smoke_cpu/...
+#   n-trials 2        -> two trials, so the sweep compares something and the bar reads "trial 1/2" / "trial 2/2"
+#   sampler random    -> TPE has nothing to learn from two trials
+#   max-epochs 2      -> two epochs, patience 1, no pruning
+#   restart true      -> sweep from trial 0 every time; see the key itself
+#   accelerator cpu   -> this tier is CPU-only by definition
+#   num-workers 0     -> in-process loading
+#   lazy false        -> above
+#
+# `materialize-features: false` is INHERITED, not a smoke-tier choice: it is the full hourly pipeline's setting, and
+# keeping it is what makes this tier smoke the loader path and the `DayGroupedShuffleSampler` the real run uses.
+#
+# ---------------------------------------------------------------------------------------------------------------------
+# THE SPLIT, at hourly resolution. The same 8 days, 24x the items:
+#   train  4 days -> 96 items      valid  2 days -> 48 items      test  2 days -> 48 items
+#
+# ✅ The base rate survives the split, which is the thing that could have made this tier vacuous. The positive
+# (cell, hour) pairs are the SAME strokes the daily smoke tier sees — the daily target is their per-cell sum — spread
+# over 24x the cells, so the hourly base rate is ~1/24 of the daily one. On these mid-July days that is percent-level,
+# not zero: metadata.csv gives the two test days 5697 and 1876 cells with lightning against 101 x 149 cells, so every
+# categorical score, the climatology baseline and the reliability bins are all populated. A WINTER subset would not
+# be — it would drive the base rate to zero and make every score NaN while the run still "passed".
+#
+# ⚠️ There is no `_smoke_gpu` sibling, unlike the three daily families. The GPU tier's job is to smoke the CUDA path
+# with a family's real device settings, and this pipeline shares its family, module, loss dispatch and evaluation with
+# `deterministic_unet_daily_smoke_gpu.yaml` — only `mode` differs, and `mode` is a data property that no device path reads.
+# A fourth GPU tier would be a copy that could only drift.
+#
+# ⚠️ num-workers 0 and no materialized features means every item is sliced out of a full day checkpoint. That is
+# cheap here only because the dataset keeps a 2-day LRU cache AND the day-grouped sampler visits each day's hours
+# contiguously: 4 day reads per epoch rather than 96. If either were missing this tier would read ~840 MB per epoch.
+#
+# Environment: export DATA_ROOT and OUTPUT_ROOT before running.
+# =====================================================================================================================
+
+stages:
+    - setup:
+        outputs: '{{$OUTPUT_ROOT}}'
+        prepared: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly_smoke_cpu/prepared'
+        tuning: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly_smoke_cpu/tuning'
+        best: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly_smoke_cpu/best'
+        evaluation: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly_smoke_cpu/evaluation'
+        reports: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly_smoke_cpu/reports'
+
+    - prepare_modeling:
+        data-path: '{{$DATA_ROOT}}'
+        split-config: config/split/split_smoke_cpu.yaml
+        output-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly_smoke_cpu/prepared/hourly'
+        mode: hourly                        # ⭐ THE key -- the only thing that selects the classification task
+        features: MU_LI,MU_MIXR,RH_500850,cp,lsm
+        hourly-threshold: 2
+        overwrite: false
+        materialize-features: false         # inherited from the full hourly tier; turns on DayGroupedShuffleSampler
+
+    - tune:
+        model-family: deterministic_unet
+        model-type: deterministic_unet_hourly
+        input-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly_smoke_cpu/prepared/hourly'
+        model-config: config/deterministic_unet/search_space_hourly.yaml
+        metrics-config: config/eval/metrics_hourly.yaml
+        output-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly_smoke_cpu/tuning'
+        metrics-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly_smoke_cpu/tuning/best_trial_metrics.json'
+        n-trials: 2
+        sampler: random
+        max-epochs: 2
+        early-stopping-patience: 1
+        pruning: false
+        restart: true                       # ALWAYS sweep from trial 0. run_sweep resumes from the optuna store in
+                                            # output-path, which the pipeline's `lazy: false` does NOT govern -- so a
+                                            # re-run silently skipped every trial and restored the previous best,
+                                            # defeating a tier whose purpose is to execute every stage.
+        accelerator: cpu
+        devices: 1
+        num-workers: 0
+        progress-bar: true
+        feature-stats-days: 4               # DAYS -- cannot exceed the 4 train days of the smoke split
+
+    - retrain_best:
+        model-family: deterministic_unet
+        model-type: deterministic_unet_hourly
+        source-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly_smoke_cpu/tuning'
+        input-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly_smoke_cpu/prepared/hourly'
+        metrics-config: config/eval/metrics_hourly.yaml
+        output-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly_smoke_cpu/best'
+        metrics-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly_smoke_cpu/best/best_trial_metrics.json'
+        max-epochs: 2
+        early-stopping-patience: 1
+        accelerator: cpu
+        devices: 1
+        num-workers: 0
+        progress-bar: true
+
+    - evaluate:
+        input-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly_smoke_cpu/prepared/hourly'
+        model-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly_smoke_cpu/best/best_model.ckpt'
+        output-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly_smoke_cpu/evaluation'
+        metrics-config: config/eval/metrics_hourly.yaml
+        metrics-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly_smoke_cpu/evaluation/test_metrics.json'
+        report-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly_smoke_cpu/reports'
+        split: test
+        baselines: zero,climatology
+        ensemble-size: 2                    # NEVER 1: spread_skill_sums uses ddof=1, so M=1 yields a silent NaN
+        accelerator: cpu
+        devices: 1
+        num-workers: 0
+        batch-size: 2
+        progress-bar: true
+
+tags:                                                                               # tags to be applied to the run
+    version: 1.0
+    experiment: deterministic_unet_hourly_smoke_cpu

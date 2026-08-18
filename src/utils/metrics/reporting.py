@@ -1,13 +1,14 @@
 """Report generation for the evaluation stage: figures (png) and tables (csv) from the metric-suite curves.
 
-The figure list is driven by the ``reporting`` section of config/eval/metrics.yaml; every figure is also exported as a
+The figure list is driven by the ``reporting`` section of the active metrics config (``metrics_daily.yaml`` or
+``metrics_hourly.yaml``); every figure is also exported as a
 CSV table when ``csv`` is among the requested formats, so results can be compared numerically across families and
 across team members' experiments.
 
 **How one config serves every family without branching.** ``write_report`` holds a dict mapping each figure name to
 a lambda, and each line-or-table figure fetches its entry from ``curves`` and returns immediately when it is
 missing. A deterministic run never populates ``curves['rank_histogram']`` and a non-residual run never populates
-``curves['residual']``, so those figures skip themselves and metrics.yaml can list all fourteen unconditionally.
+``curves['residual']``, so those figures skip themselves and a metrics config can list all fourteen unconditionally.
 
 Two things to know before adding a figure:
 
@@ -761,7 +762,7 @@ def write_report(
 
     Args:
         report_path: Output directory (created if missing).
-        reporting_config: The ``reporting`` section of metrics.yaml (``figures`` and ``formats`` lists).
+        reporting_config: The ``reporting`` section of the metrics config (``figures`` and ``formats`` lists).
         metrics_flat: Flat scalar metrics (always exported as metrics.csv when csv is requested).
         curves: Curves payload returned by ``run_metric_suite`` (plus ``residual`` from ``residual_diagnostics``
             and ``rank_histogram`` from ``finalize_ensemble_metrics`` when those ran).

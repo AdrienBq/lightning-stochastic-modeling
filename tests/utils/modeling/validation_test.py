@@ -79,14 +79,42 @@ def test_the_two_default_weightings_are_the_DECIDED_ones():
 
 
 def test_every_shipped_space_declares_the_regression_composite_and_its_weights(search_spaces):
-    """All nine pipelines are daily, so all three spaces must name the regression composite — and their weights must
-    equal the module default for it, or a family would rank on a different score from its siblings while the comparison
-    table presented the numbers as equivalent."""
+    """The three ``search_space_daily.yaml`` belong to the nine DAILY pipelines, so all three must name the regression
+    composite — and their weights must equal the module default for it, or a family would rank on a different score from
+    its siblings while the comparison table presented the numbers as equivalent.
+
+    ``search_space_hourly.yaml`` is deliberately outside the ``search_spaces`` fixture and is checked below: it is the
+    one shipped space that must name the OTHER composite.
+    """
     for family, space in search_spaces.items():
         selection = space['selection']
         assert selection['metric'] == 'valid_regression_score', family
         assert selection['components'] == DEFAULT_SELECTION_WEIGHTS['valid_regression_score'], family
         assert selection_metric_for_mode('daily', selection['metric']) == 'valid_regression_score', family
+
+
+def test_the_HOURLY_space_declares_the_classification_composite_and_its_weights(search_space_hourly):
+    """⭐ The hourly counterpart (Step 4 block 4f), and the one search space where getting this wrong RAISES rather than
+    drifting: ``selection_metric_for_mode`` rejects a declaration that disagrees with the prepared mode, on the grounds
+    that a file naming the wrong composite has the wrong component weights too.
+
+    Both directions are asserted, because the raise is only half the protection — a space could name the right composite
+    and still carry the regression weights, which nothing in the code would notice.
+    """
+    selection = search_space_hourly['selection']
+    assert selection['metric'] == 'valid_classification_score'
+    assert selection['mode'] == 'max'
+    assert selection['components'] == DEFAULT_SELECTION_WEIGHTS['valid_classification_score']
+    assert selection_metric_for_mode('hourly', selection['metric']) == 'valid_classification_score'
+    with pytest.raises(ValueError):
+        selection_metric_for_mode('daily', selection['metric'])
+
+
+def test_the_hourly_space_weights_are_exactly_the_emitted_keys(search_space_hourly):
+    """Same check as the daily one below, on the composite whose components were dead until block 4f gave them a
+    pipeline: ``brier_skill_score`` needs a calibrated probability, which no daily run produces."""
+    weights = set(search_space_hourly['selection']['components'])
+    assert weights <= COMPONENT_KEYS, f'unknown components: {sorted(weights - COMPONENT_KEYS)}'
 
 
 def test_search_space_weights_are_exactly_the_emitted_keys(search_spaces):
@@ -157,7 +185,7 @@ def test_the_brier_skill_score_IS_one_minus_the_ratio_to_its_denominator(fixture
 
 def test_ets_h6_matches_an_INDEPENDENT_contingency_table_at_six_hours(fixture):
     """``ets_h6`` was re-keyed from A's ``ets_p99`` so that the trials table uses the same threshold definition as
-    ``config/eval/metrics.yaml`` — an absolute 6-hour band rather than a distribution quantile. This computes the table
+    ``config/eval/metrics_daily.yaml`` — an absolute 6-hour band rather than a distribution quantile. This computes the table
     from scratch at that threshold, so the re-keying is checked rather than assumed."""
     from src.utils.metrics import scores
 

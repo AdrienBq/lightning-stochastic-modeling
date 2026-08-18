@@ -1,0 +1,211 @@
+project_uri: 'src/stages'                                                           # the path of the directory where each stage script is saved
+log_artifacts: false                                                                # whether to log the output file/directory as artifact
+log_models: false                                                                   # whether to log the output model
+lazy: true                                                                          # skip a stage whose code state + parameters + input checksums match a
+                                                                                    # previously recorded successful run whose outputs are still present and
+                                                                                    # byte-identical on disk. Overridable per stage with a `lazy:` key.
+                                                                                    # NOTE: the cache keys on the whole-repo dirty diff, so COMMIT before
+                                                                                    # running -- any uncommitted edit busts every entry.
+ensure_determinism: false
+banner: true
+description: 'Deterministic U-net, HOURLY OCCURRENCE task: 0/1 lightning per cell per hour'
+
+# =====================================================================================================================
+# Pipeline: DETERMINISTIC U-NET, HOURLY OCCURRENCE.
+#
+# The sibling of config/deterministic_unet/deterministic_unet_daily.yaml. Same family, same stages, same evaluation — the
+# ONE key that differs is `prepare_modeling`'s `mode`, and everything below follows from it. Read the daily file for
+# what the pipeline does; read this header for what the hourly task changes.
+#
+# ---------------------------------------------------------------------------------------------------------------------
+# THE TASK. `mode: hourly` prepares one item per (day, hour) and a 0/1 target: this cell had an hour of lightning
+# reaching `hourly-threshold` strokes, or it did not. The model's single head emits a LOGIT and the prediction is
+# `sigmoid(logit)` — a probability in [0, 1]. Nothing else in the repo is switched by hand: the module reads `mode`
+# from the prepared `target_stats.json`, the loss builder is picked by the loss NAME, the calibration phase is picked
+# by the mode, and `run_metric_suite` detects a probability field from the arrays it is handed.
+#
+# The daily target is exactly the per-cell SUM of this one over the 24 hours of the day, because both are prepared
+# under the same `hourly-threshold`. The two tasks are therefore consistent rather than merely similar.
+#
+# ---------------------------------------------------------------------------------------------------------------------
+# WHY THIS PIPELINE EXISTS. It is what makes the classification half of the library runnable rather than merely
+# tested. Without it these have no consumer: `build_binary_loss` (focal BCE / soft Dice / Brier), `PlattScaling`,
+# `kind: probability` thresholds, `climatology_brier`, `explained_deviance`, `dice_occurrence`, the threshold-free
+# FSS form, and the `valid_classification_score` selection composite.
+#
+# It also reports FOUR keys that are structurally NaN or absent in every daily run — `brier_skill_score`,
+# `explained_deviance`, `dice_p50` and the reliability diagram — because all four need a calibrated probability and
+# the one-head design gives a daily model none.
+#
+# ---------------------------------------------------------------------------------------------------------------------
+# THE THREE FILES THIS PIPELINE SWAPS, and there are only three:
+#
+#   split-config     config/split/split.yaml                             UNCHANGED — the same year split
+#   metrics-config   config/eval/metrics_hourly.yaml                     the hourly suite (h3/h6/h12 gone, the
+#                                                                        categorical cut is `kind: probability`)
+#   model-config     config/deterministic_unet/search_space_hourly.yaml  binary/proper losses, Platt calibration,
+#                                                                        `valid_classification_score`
+#
+# ⚠️ All three MUST move together. Each carries its own note on what breaks if it does not: a daily metrics config
+# would put the categorical cut at `> 0` on a probability field (POD ~ 1, a contingency table of nonsense, no error
+# raised), and a daily search space would name `valid_regression_score`, which `selection_metric_for_mode` REJECTS
+# outright rather than overriding — because its component weights would be wrong too.
+#
+# ---------------------------------------------------------------------------------------------------------------------
+# ⚠️ IT DOES NOT SHARE A PREPARED DIRECTORY WITH ANYTHING, and cannot. The prepared targets are `[T, H, W]` uint8 0/1
+# rather than `[H, W]` float32 0-24, and the features are laid out time-major. `prepare_modeling` RAISES when the
+# requested `mode` disagrees with the targets on disk, so pointing this at the daily directory fails loudly — which is
+# the intended behaviour, not a limitation to work around.
+#
+# ⚠️ THIS IS THE DETERMINISTIC FAMILY ONLY, by decision. The point is to prove the classification path runs, not to
+# sweep it across families. An hourly mc_dropout or diffusion pipeline needs no new metrics config (metrics_hourly.yaml
+# keeps its ensemble group in full) but does need its own hourly search space, and diffusion additionally needs an
+# hourly upstream to condition on.
+#
+# ---------------------------------------------------------------------------------------------------------------------
+# ⚠️ 24x THE ITEMS. This is the cost that shapes every number in the `tune` block below.
+#
+#   train  3652 days -> 87 648 items          valid  1096 days -> 26 304 items
+#   test   1095 days -> 26 280 items
+#
+# Total input VOLUME is unchanged (a daily item stacks the same 24 hours onto its channel axis), but the U-net BODY
+# runs 24x as often per epoch, because a daily item pushes 5*24 = 120 channels through the first conv and then one
+# spatial pass, while 24 hourly items push 5 channels each through twenty-four. So an hourly epoch costs roughly an
+# order of magnitude more than a daily one, and `n-trials` / `max-epochs` are reduced accordingly (see the block).
+# `tune` also accepts `limit-train-batches: <fraction>` if you would rather cap the steps per epoch and keep the
+# epoch count — deliberately NOT set here, so that "an epoch" means the same thing it does in the daily pipeline.
+#
+# ⚠️ `materialize-features: false`, unlike every other shipped pipeline — and this is the deliberate one:
+#   1. it would cost a SECOND ~20 GiB. The daily prepared directory already holds every hour of every day, laid out
+#      variable-major; an hourly directory holds the same bytes laid out time-major.
+#   2. it turns on `DayGroupedShuffleSampler`. The sampler exists exactly for this configuration — hourly items read
+#      off the `.pt` fallback path, where a shuffled loader would reload one full multi-variable day per item — and it
+#      has never run, because every other config materializes. `tuning.py` builds it when
+#      `mode == hourly and not uses_materialized_features`, both stages (sweep and retrain).
+# Set `materialize-features: true` (and a `feature-dtype`) if the ~20 GiB is cheaper for you than the repeated day
+# reads; nothing else in the pipeline changes, and the sampler goes dormant again.
+#
+# ⚠️ `evaluate` HOLDS THE TEST SPLIT IN MEMORY. 26 280 items x 101 x 149 float32 is ~1.6 GiB per stack, and the stage
+# concatenates prediction, observation and two baseline stacks — call it ~6.5 GiB, plus ~0.7 GiB for the hourly
+# climatology table (12 months x 24 hours x grid, twice). Budget ~10 GiB of RAM. Nothing here is a per-item cost, so
+# a smaller `batch-size` does not help; a shorter `split` does.
+#
+# Environment: export DATA_ROOT and OUTPUT_ROOT before running.
+# =====================================================================================================================
+
+stages:
+    - setup:
+        outputs: '{{$OUTPUT_ROOT}}'
+        prepared: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly/prepared'
+        tuning: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly/tuning'
+        best: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly/best'
+        evaluation: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly/evaluation'
+        reports: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly/reports'
+
+    # ------------------------------------------------------------------------------------------------------------
+    # 1) Data preparation — the ONE block where this pipeline differs in kind from the daily one.
+    #
+    # Writes targets/<date>.npy as [T, H, W] uint8 0/1 (the daily pipeline writes [H, W] float32 0-24) and the split
+    # index with one row per DAY still — the dataset expands each day into `hours_per_day` items.
+    #
+    # `feature-aggregation` is ABSENT, not defaulted: it is DAILY-MODE ONLY (an hourly item is already one hour, so
+    # there is nothing to stack) and `prepare_modeling` does not read it in this mode. `feature-dtype` is absent for
+    # the same reason — it is the storage dtype of the materialized files, and nothing is materialized here.
+    # ------------------------------------------------------------------------------------------------------------
+    - prepare_modeling:
+        data-path: '{{$DATA_ROOT}}'         # dataset root; NEVER hardcode a path
+        split-config: config/split/split.yaml     # THE SAME year split as every other pipeline
+        output-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly/prepared/hourly'
+        mode: hourly                        # ⭐ THE key. daily | hourly -- the only selector between the two tasks
+        features: MU_LI,MU_MIXR,RH_500850,cp,lsm
+        hourly-threshold: 2                 # an hour counts as a lightning-hour only with >= 2 strokes. In DAILY
+                                            # mode this filters the hours before they are counted; here it IS the
+                                            # label. Same value, so the two tasks' targets stay consistent --
+                                            # changing it means re-preparing AND re-training.
+        overwrite: false
+        materialize-features: false         # ⚠️ the only shipped pipeline that does not materialize -- see the two
+                                            # reasons in the header (a second ~20 GiB, and the day-grouped sampler)
+
+    # ------------------------------------------------------------------------------------------------------------
+    # 2) Hyperparameter tuning. Same unified stage, same `model-family` — the family is unchanged, the TASK is not.
+    #
+    # ⚠️ n-trials 20 / max-epochs 20 against the daily 40 / 50: an hourly epoch runs the U-net body 24x as often
+    # (see the header's arithmetic). Halving both keeps the sweep in the same wall-clock envelope.
+    #
+    # The optuna study is named `tune_deterministic_unet`, the same as the daily pipeline's — but its journal lives in
+    # this stage's `output-path`, which is a different directory, so the two sweeps cannot see each other.
+    # ------------------------------------------------------------------------------------------------------------
+    - tune:
+        model-family: deterministic_unet
+        model-type: deterministic_unet_hourly     # free-form MLflow label; distinguishes the two tasks' runs
+        input-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly/prepared/hourly'
+        model-config: config/deterministic_unet/search_space_hourly.yaml     # ⭐ hourly: binary losses, Platt,
+                                                                            # valid_classification_score
+        metrics-config: config/eval/metrics_hourly.yaml                      # ⭐ hourly: supplies BOTH selection
+                                                                            # denominators — the climatology
+                                                                            # conditional MAE and the climatology
+                                                                            # Brier score, the latter live only here
+        output-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly/tuning'
+        metrics-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly/tuning/best_trial_metrics.json'
+        n-trials: 20                        # halved vs daily -- see above
+        sampler: tpe                        # random | tpe (tpe requires optuna)
+        max-epochs: 20                      # halved vs daily -- see above
+        early-stopping-patience: 5
+        pruning: true                       # optuna MedianPruner aborts hopeless trials early (needs sampler: tpe)
+        accelerator: auto
+        devices: 1
+        num-workers: 8                      # ⚠️ matters more here than in the daily pipeline: without materialized
+                                            # features every item is a day read, and the day-grouped sampler keeps
+                                            # each worker's day cache effective
+        progress-bar: true                  # set false for batch jobs with redirected logs
+        feature-stats-days: 256             # DAYS, not items -- the statistics stream over the split index, whose
+                                            # rows are days in both modes
+
+    # ------------------------------------------------------------------------------------------------------------
+    # 3) Retrain the winning configuration. The selection metric/mode are read back from source-path/best_trial.json
+    # (here `valid_classification_score` / `max`), so they cannot disagree with the sweep that chose it.
+    # ------------------------------------------------------------------------------------------------------------
+    - retrain_best:
+        model-family: deterministic_unet
+        model-type: deterministic_unet_hourly
+        source-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly/tuning'
+        input-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly/prepared/hourly'
+        metrics-config: config/eval/metrics_hourly.yaml
+        output-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly/best'
+        metrics-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly/best/best_trial_metrics.json'
+        max-epochs: 30
+        early-stopping-patience: 5
+        accelerator: auto
+        devices: 1
+        num-workers: 8
+        progress-bar: true
+
+    # ------------------------------------------------------------------------------------------------------------
+    # 4) Evaluation and reporting — THE SAME common evaluation, with no hourly branch of its own. `evaluate` reads
+    # the prepared mode, and the family module returns its prediction as `probability` because the prediction IS a
+    # probability here; that one line is what makes the reliability diagram, `explained_deviance` and `dice_p50`
+    # appear. There is no family-specific and no task-specific evaluation path.
+    #
+    # ⚠️ Budget ~10 GiB of RAM: 26 280 test items are concatenated in memory (see the header).
+    # ------------------------------------------------------------------------------------------------------------
+    - evaluate:
+        input-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly/prepared/hourly'
+        model-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly/best/best_model.ckpt'
+        output-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly/evaluation'
+        metrics-config: config/eval/metrics_hourly.yaml
+        metrics-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly/evaluation/test_metrics.json'
+        report-path: '{{$OUTPUT_ROOT}}/deterministic_unet_hourly/reports'
+        split: test                         # valid | test
+        baselines: zero,climatology         # no persistence: a diagnostic parameterization has no past observation
+        ensemble-size: 2                    # this family is deterministic, so predict_step emits no
+                                            # ensemble_members and the ensemble scores are skipped. Still never
+                                            # set 1: spread_skill_sums uses ddof=1, so M=1 yields a silent NaN.
+        accelerator: auto
+        devices: 1
+        num-workers: 8
+        batch-size: 16
+        progress-bar: true
+
+tags:                                                                               # tags to be applied to the run
+    version: 1.0
+    experiment: deterministic_unet_hourly

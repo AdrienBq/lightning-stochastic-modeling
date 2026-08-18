@@ -42,7 +42,7 @@ Usage (standalone)::
         --input_path $OUTPUT_ROOT/diffusion/prepared/daily \\
         --model_path $OUTPUT_ROOT/diffusion/best/best_model.ckpt \\
         --output_path $OUTPUT_ROOT/diffusion/evaluation \\
-        --metrics_config config/eval/metrics.yaml \\
+        --metrics_config config/eval/metrics_daily.yaml \\
         --split test --ensemble_size 32
 """
 import json
@@ -126,7 +126,7 @@ def evaluate(
         input_path: str,
         model_path: str,
         output_path: str,
-        metrics_config: str = 'config/eval/metrics.yaml',
+        metrics_config: str = 'config/eval/metrics_daily.yaml',
         metrics_path: Optional[str] = None,
         report_path: Optional[str] = None,
         split: str = 'test',
@@ -214,7 +214,7 @@ def evaluate(
     # the module, where it conditions the tail CRPS and the rank histogram on the occurrence cells
     occurrence_event = resolve_occurrence_event(metrics_spec, target_stats)
 
-    # The probabilistic suite runs only for a family exposing the ensemble interface, when metrics.yaml asks for it
+    # The probabilistic suite runs only for a family exposing the ensemble interface, when metrics_daily.yaml asks for it
     # AND ensemble_size > 1. Off, the stage is the single-sample path, which is what the deterministic family gets.
     # The section is a metric GROUP so it normally sits under `metrics:`; a top-level placement is accepted too,
     # rather than silently disabling the whole suite.

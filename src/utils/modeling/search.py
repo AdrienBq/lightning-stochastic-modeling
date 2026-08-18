@@ -1,6 +1,6 @@
 """Hyperparameter search-space handling for the tuning stage, shared by all three families.
 
-The search space YAML (config/<family>/search_space.yaml) mixes plain values with parameter nodes:
+The search space YAML (config/<family>/search_space_<task>.yaml) mixes plain values with parameter nodes:
 - ``{type: categorical, choices: [...]}``
 - ``{type: int, low: ..., high: ...}``
 - ``{type: float, low: ..., high: ..., log: true|false}``

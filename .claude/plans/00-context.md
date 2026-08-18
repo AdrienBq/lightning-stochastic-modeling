@@ -108,7 +108,7 @@ One repo, one orchestrator, one evaluation. Code splits into **shared** (family-
 - **Shared pipeline surface:** `io/data.py`; a merged `dataset.py`; `unet.py` (backbone + `enable_mc_dropout`);
   a unified `losses.py`; `search.py`; a two-phase-capable `tuning.py`; `validation.py` (single selection score);
   `registry.py`; the `metrics/` package (`scores`, `evaluation`, `reporting`, `diagnostics`);
-  `config/split/split.yaml`, `config/eval/metrics.yaml`; the stages `prepare_regression.py`,
+  `config/split/split.yaml`, `config/eval/metrics_daily.yaml`; the stages `prepare_regression.py`,
   **`evaluate_regression.py` (the common eval)**, `tabulate_metrics.py`, `combine_curves.py`.
   *(`transforms.py` is **dropped** — see the scope change.)*
 - **Model-specific:** flow-matching (`diffusion.py`, `diffusion_module.py`);

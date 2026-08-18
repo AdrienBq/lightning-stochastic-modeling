@@ -7,8 +7,8 @@ banner: true
 description: 'Flow-matching diffusion -- CPU smoke tier'
 
 # =====================================================================================================================
-# CPU SMOKE TIER of config/diffusion/diffusion.yaml. Read that file for what the pipeline does and why, and
-# config/deterministic_unet/deterministic_unet_smoke_cpu.yaml for the full list of smoke overrides and their rationale.
+# CPU SMOKE TIER of config/diffusion/diffusion_daily.yaml. Read that file for what the pipeline does and why, and
+# config/deterministic_unet/deterministic_unet_daily_smoke_cpu.yaml for the full list of smoke overrides and their rationale.
 #
 # RESIDUAL MODE in the smoke tier: leave UPSTREAM_MODEL unset for the plain full-target smoke run. To smoke-test the
 # residual path as well, point it at the CPU smoke tier's own upstream checkpoint -- NOT at a real one, whose feature
@@ -16,7 +16,7 @@ description: 'Flow-matching diffusion -- CPU smoke tier'
 #
 #     export UPSTREAM_MODEL=$OUTPUT_ROOT/deterministic_unet_smoke_cpu/best/best_model.ckpt
 #
-# and run config/deterministic_unet/deterministic_unet_smoke_cpu.yaml first. Changing UPSTREAM_MODEL changes the input channel count, so
+# and run config/deterministic_unet/deterministic_unet_daily_smoke_cpu.yaml first. Changing UPSTREAM_MODEL changes the input channel count, so
 # delete $OUTPUT_ROOT/diffusion_smoke_cpu/prepared (or set overwrite: true) when toggling it.
 #
 # `sampling-steps` is cut to 8: ODE integration is the dominant cost of a CPU diffusion evaluation, and the smoke run
@@ -55,8 +55,8 @@ stages:
         model-family: diffusion
         model-type: diffusion
         input-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/prepared/daily'
-        model-config: config/diffusion/search_space.yaml
-        metrics-config: config/eval/metrics.yaml
+        model-config: config/diffusion/search_space_daily.yaml
+        metrics-config: config/eval/metrics_daily.yaml
         output-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/tuning'
         metrics-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/tuning/best_trial_metrics.json'
         n-trials: 1
@@ -79,7 +79,7 @@ stages:
         model-type: diffusion
         source-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/tuning'
         input-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/prepared/daily'
-        metrics-config: config/eval/metrics.yaml
+        metrics-config: config/eval/metrics_daily.yaml
         output-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/best'
         metrics-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/best/best_trial_metrics.json'
         max-epochs: 1
@@ -93,7 +93,7 @@ stages:
         input-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/prepared/daily'
         model-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/best/best_model.ckpt'
         output-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/evaluation'
-        metrics-config: config/eval/metrics.yaml
+        metrics-config: config/eval/metrics_daily.yaml
         metrics-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/evaluation/test_metrics.json'
         report-path: '{{$OUTPUT_ROOT}}/diffusion_smoke_cpu/reports'
         split: test

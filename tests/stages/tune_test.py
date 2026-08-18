@@ -120,7 +120,7 @@ def test_only_MC_DROPOUT_declares_an_upstream_in_the_shipped_tune_blocks(repo_ro
 
     declaring = set()
     for family in ('deterministic_unet', 'mc_dropout', 'diffusion'):
-        config = parse_config(os.path.join(repo_root, f'config/{family}/{family}.yaml'))
+        config = parse_config(os.path.join(repo_root, f'config/{family}/{family}_daily.yaml'))
         block = next(parameters for stage in config['stages']
                      for name, parameters in stage.items() if name == 'tune')
         if 'upstream-model-path' in block:
@@ -173,7 +173,7 @@ def test_every_parameter_the_shipped_configs_pass_is_accepted(repo_root):
     accepted = set(inspect.signature(tune.tune).parameters)
     for family in ('deterministic_unet', 'mc_dropout', 'diffusion'):
         for tier in ('', '_smoke_cpu', '_smoke_gpu'):
-            config = parse_config(os.path.join(repo_root, f'config/{family}/{family}{tier}.yaml'))
+            config = parse_config(os.path.join(repo_root, f'config/{family}/{family}_daily{tier}.yaml'))
             block = next(parameters for stage in config['stages']
                          for name, parameters in stage.items() if name == 'tune')
             passed = {key.replace('-', '_') for key in block}

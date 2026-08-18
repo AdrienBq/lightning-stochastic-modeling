@@ -7,15 +7,15 @@ banner: true
 description: 'MC-dropout -- CPU smoke tier'
 
 # =====================================================================================================================
-# CPU SMOKE TIER of config/mc_dropout/mc_dropout.yaml. Read that file for what the pipeline does and why, and
-# config/deterministic_unet/deterministic_unet_smoke_cpu.yaml for the full list of smoke overrides and their rationale.
+# CPU SMOKE TIER of config/mc_dropout/mc_dropout_daily.yaml. Read that file for what the pipeline does and why, and
+# config/deterministic_unet/deterministic_unet_daily_smoke_cpu.yaml for the full list of smoke overrides and their rationale.
 #
 # The one thing this tier must exercise that the deterministic tier cannot: the TWO-PHASE fit and the ensemble path.
 # `finetuning.max_epochs` in the search space stays as-is (10) -- it is the phase-2 ceiling, and with 4 train days an
 # epoch is a handful of steps, so it costs little and actually exercises the phase-2 code.
 #
 # WARM-START MODE in the smoke tier: leave UPSTREAM_MODEL unset to smoke the from-scratch two-phase fit. To smoke the
-# warm-start path instead, run config/deterministic_unet/deterministic_unet_smoke_cpu.yaml first and point
+# warm-start path instead, run config/deterministic_unet/deterministic_unet_daily_smoke_cpu.yaml first and point
 # UPSTREAM_MODEL at ITS checkpoint -- NOT at a real one, whose feature normalization was fitted on different days:
 #
 #     export UPSTREAM_MODEL=$OUTPUT_ROOT/deterministic_unet_smoke_cpu/best/best_model.ckpt
@@ -48,15 +48,15 @@ stages:
         model-family: mc_dropout
         model-type: mc_dropout
         input-path: '{{$OUTPUT_ROOT}}/deterministic_and_mc_dropout_smoke_cpu/prepared/daily'
-        model-config: config/mc_dropout/search_space.yaml
-        metrics-config: config/eval/metrics.yaml
+        model-config: config/mc_dropout/search_space_daily.yaml
+        metrics-config: config/eval/metrics_daily.yaml
         output-path: '{{$OUTPUT_ROOT}}/mc_dropout_smoke_cpu/tuning'
         metrics-path: '{{$OUTPUT_ROOT}}/mc_dropout_smoke_cpu/tuning/best_trial_metrics.json'
         upstream-model-path: '{{$UPSTREAM_MODEL}}'  # unset/empty -> from-scratch two-phase smoke fit
         n-trials: 1
         sampler: random
         max-epochs: 1                       # phase 1 only (ignored in warm-start mode); phase 2 always uses
-                                            # search_space.yaml -> finetuning.max_epochs
+                                            # search_space_daily.yaml -> finetuning.max_epochs
         early-stopping-patience: 1
         pruning: false
         restart: true                       # ALWAYS sweep from trial 0. run_sweep resumes from the optuna store
@@ -74,7 +74,7 @@ stages:
         model-type: mc_dropout
         source-path: '{{$OUTPUT_ROOT}}/mc_dropout_smoke_cpu/tuning'
         input-path: '{{$OUTPUT_ROOT}}/deterministic_and_mc_dropout_smoke_cpu/prepared/daily'
-        metrics-config: config/eval/metrics.yaml
+        metrics-config: config/eval/metrics_daily.yaml
         output-path: '{{$OUTPUT_ROOT}}/mc_dropout_smoke_cpu/best'
         metrics-path: '{{$OUTPUT_ROOT}}/mc_dropout_smoke_cpu/best/best_trial_metrics.json'
         max-epochs: 1
@@ -88,7 +88,7 @@ stages:
         input-path: '{{$OUTPUT_ROOT}}/deterministic_and_mc_dropout_smoke_cpu/prepared/daily'
         model-path: '{{$OUTPUT_ROOT}}/mc_dropout_smoke_cpu/best/best_model.ckpt'
         output-path: '{{$OUTPUT_ROOT}}/mc_dropout_smoke_cpu/evaluation'
-        metrics-config: config/eval/metrics.yaml
+        metrics-config: config/eval/metrics_daily.yaml
         metrics-path: '{{$OUTPUT_ROOT}}/mc_dropout_smoke_cpu/evaluation/test_metrics.json'
         report-path: '{{$OUTPUT_ROOT}}/mc_dropout_smoke_cpu/reports'
         split: test

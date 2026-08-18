@@ -85,7 +85,7 @@ machinery specific to **unbounded, heavy-tailed stroke counts** and to the trans
 
 | Loss | A | V | D | Status | What it does | Decision |
 |---|---|---|---|---|---|---|
-| `psd_penalty` | — | — | 105 | `D-ONLY` | Penalises mismatch between predicted and observed radially-averaged power spectra — a **differentiable anti-over-smoothing term**. Directly attacks challenge (B) in `metrics.yaml` | keep |
+| `psd_penalty` | — | — | 105 | `D-ONLY` | Penalises mismatch between predicted and observed radially-averaged power spectra — a **differentiable anti-over-smoothing term**. Directly attacks challenge (B) in `metrics_daily.yaml` | keep |
 | `wmae_psd` | — | — | 163 | `D-ONLY` | Composite: `alpha * weighted_mae + (1 - alpha) * psd_penalty` | keep |
 | `wmse_psd` | — | — | — | **NEW (Step 2)** | Composite: `alpha * weighted_mse + (1 - alpha) * psd_penalty` — the exact `weighted_mse` sibling of `wmae_psd`. Added so the *squared-error* branch of the pointwise family can also carry the anti-over-smoothing term, instead of forcing a choice between MSE-shaped gradients and spectral fidelity | keep — **new code in Step 3**, a few lines reusing `psd_penalty` and `weighted_mse` |
 | `afcrps_psd` | — | — | 270 | `D-ONLY` | Composite: almost-fair CRPS + `psd_penalty`, `beta=0.7` | keep |

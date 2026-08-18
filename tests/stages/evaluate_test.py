@@ -318,7 +318,7 @@ def test_every_parameter_the_shipped_configs_pass_is_accepted(repo_root):
     from src.utils.io.parse_config import parse_config
 
     accepted = set(inspect.signature(evaluate_stage.evaluate).parameters)
-    paths = [f'config/{family}/{family}{tier}.yaml'
+    paths = [f'config/{family}/{family}_daily{tier}.yaml'
              for family in ('deterministic_unet', 'mc_dropout', 'diffusion')
              for tier in ('', '_smoke_cpu', '_smoke_gpu')]
     paths += ['config/eval/probabilistic_eval.yaml', 'config/eval/probabilistic_eval_smoke_cpu.yaml']
@@ -430,7 +430,7 @@ def _run_stage(repo_root, prepared_dir, model_path, model_family, out_dir, repor
         '--model_path', model_path,
         '--output_path', out_dir,
         '--report_path', report_dir,
-        '--metrics_config', _env('PROB_EVAL_METRICS', 'config/eval/metrics.yaml'),
+        '--metrics_config', _env('PROB_EVAL_METRICS', 'config/eval/metrics_daily.yaml'),
         '--metrics_path', metrics_path,
         '--split', _env('PROB_EVAL_SPLIT', 'valid'),
         '--accelerator', 'auto',

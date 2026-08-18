@@ -11,7 +11,7 @@ command in a plan file. Here the artifacts, the metric keys, the figure set and 
 **asserted in code**, on data any checkout can build.
 
 **The config is DERIVED from the shipped smoke YAML, not copied.** Exactly ONE parameter differs from
-``config/deterministic_unet/deterministic_unet_smoke_cpu.yaml`` — the ``split-config`` path, which has to name a split
+``config/deterministic_unet/deterministic_unet_daily_smoke_cpu.yaml`` — the ``split-config`` path, which has to name a split
 over the synthetic sample ids instead of the real dataset's ids 194-927. Every other stage parameter is the shipped
 pipeline's, and ``test_the_derived_config_changes_exactly_ONE_PARAMETER_of_the_shipped_one`` pins that. A fixture copy
 of the config could pass forever while the real pipeline was broken.
@@ -38,7 +38,7 @@ from tests.conftest import build_dataset_root, write_split_config
 from tests.utils.metrics.evaluation_test import EXPECTED_DAILY_KEYS
 
 FAMILY = 'deterministic_unet'
-SHIPPED_CONFIG = f'config/{FAMILY}/{FAMILY}_smoke_cpu.yaml'
+SHIPPED_CONFIG = f'config/{FAMILY}/{FAMILY}_daily_smoke_cpu.yaml'
 SHIPPED_SPLIT = 'config/split/split_smoke_cpu.yaml'
 COMPARISON_CONFIG = 'config/eval/probabilistic_eval_smoke_cpu.yaml'
 
@@ -64,7 +64,7 @@ ABSENT_ON_A_TINY_SPLIT = {
     'mae_bin_occurrence_h3': 'the occurrence-to-h3 intensity bin is empty; the fixture target lands in the h3-h6 band',
 }
 
-# The figures config/eval/metrics.yaml lists that a deterministic DAILY run cannot draw, and self-skips instead.
+# The figures config/eval/metrics_daily.yaml lists that a deterministic DAILY run cannot draw, and self-skips instead.
 SELF_SKIPPED_FIGURES = {
     'reliability': 'no probability field, so no calibration curve (daily mode)',
     'rank_histogram': 'no ensemble members: the deterministic family emits none',
@@ -307,13 +307,13 @@ def test_the_evaluation_emitted_a_LOT_more_than_the_pinned_minimum(evaluation_me
 # 4. The report
 # =====================================================================================================================
 def test_the_report_holds_every_CONFIGURED_figure_that_a_daily_deterministic_run_CAN_draw(pipeline_run, repo_root):
-    """Driven off ``config/eval/metrics.yaml``'s own figure list, so adding a figure there without implementing it fails
+    """Driven off ``config/eval/metrics_daily.yaml``'s own figure list, so adding a figure there without implementing it fails
     here. The self-skips are asserted in the OTHER direction below — together they pin the whole list."""
     import yaml
 
     report_path = dict(pipeline_run['stages'])['evaluate']['report-path']
     produced = set(os.listdir(report_path))
-    with open(os.path.join(repo_root, 'config/eval/metrics.yaml')) as handle:
+    with open(os.path.join(repo_root, 'config/eval/metrics_daily.yaml')) as handle:
         configured = yaml.safe_load(handle)['reporting']['figures']
 
     missing = []
@@ -329,7 +329,7 @@ def test_the_report_holds_every_CONFIGURED_figure_that_a_daily_deterministic_run
 
 
 def test_the_figures_a_daily_deterministic_run_CANNOT_draw_SELF_SKIP(pipeline_run):
-    """The mechanism that lets one metrics.yaml serve every family: each line-or-table figure fetches its entry from
+    """The mechanism that lets one metrics_daily.yaml serve every family: each line-or-table figure fetches its entry from
     `curves` and returns when it is absent. A `reliability.png` appearing here would mean a probability field arrived in
     daily mode; a `rank_histogram.png` would mean the deterministic family emitted ensemble members."""
     report_path = dict(pipeline_run['stages'])['evaluate']['report-path']

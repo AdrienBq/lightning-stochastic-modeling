@@ -1,6 +1,6 @@
 """Configurable U-net backbone and the single-head prediction network, shared by all three families.
 
-The architecture hyperparameters mirror the ``unet`` section of each family's config/<family>/search_space.yaml:
+The architecture hyperparameters mirror the ``unet`` section of each family's config/<family>/search_space_<task>.yaml:
 depth, base channels, kernel size, blocks per level, normalization, activation, dropout, upsampling mode,
 skip connections and an optional multi-head self-attention block at the bottleneck (cheap at this grid size,
 ~7x10 tokens at depth 4 on the 0.25-degree European domain).

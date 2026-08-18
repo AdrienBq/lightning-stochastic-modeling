@@ -182,7 +182,7 @@ metrics:
                                                                                 # of. HOURLY ONLY.
         # ⚠️ BOTH OF THE ABOVE ARE NaN IN A DAILY RUN, and that is a design consequence rather than a gap to fix.
         # ⚠️ Each needs a CALIBRATED PROBABILITY, and the one-head design gives a daily model no probabilistic
-        # ⚠️ output: there is no occurrence head (see any config/<family>/search_space.yaml for that decision).
+        # ⚠️ output: there is no occurrence head (see any config/<family>/search_space_daily.yaml for that decision).
         # ⚠️ `mae_conditional_skill_score` is therefore the only skill term a daily run actually reports, which is
         # ⚠️ why the regression selection composite leans on it. What is NOT lost daily: `average_precision` and
         # ⚠️ `roc_auc` above, which rank on the predicted hours — exact, since both are invariant to any monotone

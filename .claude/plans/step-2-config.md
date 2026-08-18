@@ -19,10 +19,10 @@ metric/loss name referenced must exist in an annotated `keep`/`modify` row.
 ```
 config/
 ├── split/               split.yaml · split_smoke_cpu.yaml · split_smoke_gpu.yaml
-├── eval/                metrics.yaml · probabilistic_eval.yaml · probabilistic_eval_smoke_cpu.yaml
-├── deterministic_unet/  deterministic_unet.yaml · …_smoke_cpu.yaml · …_smoke_gpu.yaml · search_space.yaml
-├── mc_dropout/          mc_dropout.yaml          · …_smoke_cpu.yaml · …_smoke_gpu.yaml · search_space.yaml
-└── diffusion/           diffusion.yaml           · …_smoke_cpu.yaml · …_smoke_gpu.yaml · search_space.yaml
+├── eval/                metrics_daily.yaml · probabilistic_eval.yaml · probabilistic_eval_smoke_cpu.yaml
+├── deterministic_unet/  deterministic_unet_daily.yaml · …_smoke_cpu.yaml · …_smoke_gpu.yaml · search_space_daily.yaml
+├── mc_dropout/          mc_dropout_daily.yaml          · …_smoke_cpu.yaml · …_smoke_gpu.yaml · search_space_daily.yaml
+└── diffusion/           diffusion_daily.yaml           · …_smoke_cpu.yaml · …_smoke_gpu.yaml · search_space_daily.yaml
 ```
 
 All gates pass: 19/19 files parse; `{{$DATA_ROOT}}` and `{{$UPSTREAM_MODEL}}` interpolate to `''` when unset;
@@ -83,24 +83,24 @@ Change everywhere that applies (also the README and other steps plans for exampl
 ```
 config/
 ├── split.yaml                        # shared: year-based train/valid/test   -> config/split/split.yaml
-├── metrics.yaml                      # shared: the one metric suite          -> config/eval/metrics.yaml
-├── distr_regression.yaml             # -> config/deterministic_unet/deterministic_unet.yaml
+├── metrics_daily.yaml                      # shared: the one metric suite          -> config/eval/metrics_daily.yaml
+├── distr_regression.yaml             # -> config/deterministic_unet/deterministic_unet_daily.yaml
 ├── distr_regression/
-│   └── search_space.yaml             # -> config/deterministic_unet/search_space.yaml
-├── mc_dropout.yaml                   # -> config/mc_dropout/mc_dropout.yaml
+│   └── search_space_daily.yaml             # -> config/deterministic_unet/search_space_daily.yaml
+├── mc_dropout_daily.yaml                   # -> config/mc_dropout/mc_dropout_daily.yaml
 ├── mc_dropout/
-│   └── search_space.yaml
-├── diffusion.yaml                    # -> config/diffusion/diffusion.yaml
+│   └── search_space_daily.yaml
+├── diffusion_daily.yaml                    # -> config/diffusion/diffusion_daily.yaml
 ├── diffusion/
-│   └── search_space.yaml
+│   └── search_space_daily.yaml
 ├── probabilistic_eval.yaml           # -> config/eval/probabilistic_eval.yaml
 └── *_local.yaml                      # -> *_smoke_cpu.yaml, plus a *_smoke_gpu.yaml tier
 ```
 
 **Renames from the source branches:** aru's `config/distr_regression/split.yaml` → `config/split/split.yaml`
 (it is shared, not family-specific); aru's `config/diffusion_model*.yaml` → `diffusion*` for consistency; adrien's
-`config/{distr_regression,mc_dropout}/metrics.yaml` and `metrics_old*.yaml` collapse into the single shared
-`config/eval/metrics.yaml`. Aru's `*_fast_retrain.yaml` variants are **dropped** — `retrain_best` is a stage in the
+`config/{distr_regression,mc_dropout}/metrics_daily.yaml` and `metrics_old*.yaml` collapse into the single shared
+`config/eval/metrics_daily.yaml`. Aru's `*_fast_retrain.yaml` variants are **dropped** — `retrain_best` is a stage in the
 main pipeline, not a separate config.
 
 ---
@@ -121,7 +121,7 @@ by_year:
 
 ---
 
-## 3. `config/metrics.yaml` — the shared suite
+## 3. `config/metrics_daily.yaml` — the shared suite
 
 Structure carried from aru (`baselines`, `thresholds`, `metrics.{continuous,categorical,skill,calibration,spatial,ensemble}`,
 `reporting`), pruned to the annotated inventory. Per the scores open-question #4 answer, this file is **restated as
@@ -285,7 +285,7 @@ max_epochs: 50
 
 Add the wmae-psd and wmse-psd variants in the possible losses. These are necessary for the mc-dropout pipeline (see the afcrps_psd with loss_weight below).
 
-### 4.2 `mc_dropout/search_space.yaml` — adds
+### 4.2 `mc_dropout/search_space_daily.yaml` — adds
 
 ```yaml
 dropout_p: {type: float, low: 0.05, high: 0.3}
@@ -299,7 +299,7 @@ output_activation: {type: categorical, choices: [softplus, clamped_sigmoid]}
 max_hours: 24                                  # bounded target ceiling
 ```
 
-### 4.3 `diffusion/search_space.yaml` — adds
+### 4.3 `diffusion/search_space_daily.yaml` — adds
 
 ```yaml
 residual_target: {type: categorical, choices: [true, false]}   # residual mode needs an upstream checkpoint
@@ -310,7 +310,7 @@ flow:
     patch_size: {type: categorical, choices: [1, 2]}
 ```
 
-### 4.4 `distr_regression/search_space.yaml`
+### 4.4 `distr_regression/search_space_daily.yaml`
 
 The shared skeleton only — it is the deterministic baseline and the residual upstream, so no ensemble or
 diffusion knobs.
@@ -323,7 +323,7 @@ Template boilerplate (`project_uri`, `log_artifacts`, `log_models`, `lazy`, `ens
 `description`, `tags.version`) plus a `stages:` list. Data paths come from **`DATA_ROOT`** (see
 [Step 5](step-5-portability.md)), never hardcoded.
 
-### 5.1 Per-family shape (e.g. `config/mc_dropout.yaml`)
+### 5.1 Per-family shape (e.g. `config/mc_dropout_daily.yaml`)
 
 ```yaml
 project_uri: 'src/stages'
@@ -347,7 +347,7 @@ stages:
     - tune:                                # UNIFIED tuning stage (was tune_mc_dropout)
         model-family: mc_dropout
         prepared-path: outputs/mc_dropout/prepared/daily_lightning_hours
-        search-space: config/mc_dropout/search_space.yaml
+        search-space: config/mc_dropout/search_space_daily.yaml
         output-path: outputs/mc_dropout/tuning
         n-trials: 30
         sampler: tpe
@@ -359,7 +359,7 @@ stages:
     - evaluate_regression:
         checkpoint-path: outputs/mc_dropout/best
         prepared-path: outputs/mc_dropout/prepared/daily_lightning_hours
-        metrics-config: config/metrics.yaml
+        metrics-config: config/metrics_daily.yaml
         metrics-path: outputs/mc_dropout/metrics
         report-path: outputs/mc_dropout/reports
         ensemble-size: 32
@@ -422,7 +422,7 @@ That is expected at this size and is not a failed run.
 ## 6. Step 2 verification — ✅ all gates pass
 
 1. ✅ `parse_config` on every YAML under `config/` — 19/19 (18 + the template's `hello_world`).
-2. ✅ Every loss name in every `search_space.yaml`, every metric key in `metrics.yaml`, and every
+2. ✅ Every loss name in every `search_space_daily.yaml`, every metric key in `metrics_daily.yaml`, and every
    `reporting.figures` entry resolves to a `keep`/`modify` row in
    [`inventory-losses.md`](inventory-losses.md) / [`inventory-scores.md`](inventory-scores.md) /
    [`inventory-figures.md`](inventory-figures.md) — the five new names got rows written for them.
