@@ -23,7 +23,9 @@
 #   1. thresholds        h3/h6/h12 REMOVED — hour bands are defined on a 0-24 daily count and do not exist on a 0/1
 #                        target. `p50` ADDED as `kind: probability`: the decision cut, on the PREDICTION side only.
 #   2. categorical       thresholds -> [p50]. ⚠️ THE LOAD-BEARING EDIT OF THIS FILE — see the block below.
-#   3. continuous        `r2.thresholds` -> [occurrence] (the only non-empty observed subgroup).
+#   3. continuous        `r2.thresholds` REMOVED (the observed-positive subgroup has a CONSTANT observation, so its
+#                        R^2 is 0/0); the unconditioned `r2` is kept and is the Brier skill score against a constant
+#                        base rate.
 #                        `mae_stratified` REMOVED — its bins partition OBSERVED intensity, and a 0/1 target has one
 #                        non-empty band, so the profile is a single point.
 #                        `estimation_tendency` REMOVED — conditioned on obs > 0, `pred - obs = p - 1 <= 0` always, so
@@ -116,9 +118,17 @@ metrics:
         rmse_conditional_positive: {condition: obs_positive}    # error on the observed-positive cells
         mae_conditional_positive: {condition: obs_positive}     # `mae_cond_pos`; the base of the
                                                                 # mae_cond_ss_climatology skill term
-        r2:                                             # overall (`r2` = the Brier skill score against a constant
-            thresholds: [occurrence]                    # base rate) and within the observed-positive subgroup.
-                                                        # Only ONE subgroup exists on a 0/1 target.
+        r2: {}                                          # ⚠️ UNCONDITIONED ONLY, and that is `thresholds:` REMOVED
+                                                        # rather than omitted. `r2` overall IS the Brier skill score
+                                                        # against a constant base-rate reference, and is meaningful.
+                                                        # But a `thresholds:` entry computes R^2 *within* each
+                                                        # observed-exceedance subgroup, and on a 0/1 target that
+                                                        # subgroup is the cells where obs == 1 — where the
+                                                        # observation is CONSTANT, so its total sum of squares is 0
+                                                        # and R^2 is 0/0. `r2_occurrence` came back absent from the
+                                                        # first hourly gate for exactly that reason (non-finite keys
+                                                        # are dropped from the JSON). Same argument that removed
+                                                        # `rank_correlation` in delta 4; it applies here too.
         # `mae_stratified` and `estimation_tendency` are REMOVED — see delta 3 in the header.
 
     # -----------------------------------------------------------------------------------------------------------
@@ -128,10 +138,12 @@ metrics:
     # ⚠️ `thresholds: [p50]`, NEVER `[occurrence]`. `kind: occurrence` cuts BOTH sides at `> 0`, which on a
     # ⚠️ probability field marks every cell carrying any non-zero probability as a predicted event: POD ~ 1,
     # ⚠️ FAR ~ 1 - base_rate, an entire contingency table of nonsense — and NO error is raised, because every value
-    # ⚠️ involved is individually legal. `run_metric_suite` warns when it detects the combination (a probability
-    # ⚠️ prediction under a shared cut) and names `kind: probability` in the message, but the config is what has to
-    # ⚠️ be right. This is the exact class of bug that made the DAILY occurrence table read "lightning everywhere"
-    # ⚠️ until `pred_value: 1` was added there.
+    # ⚠️ involved is individually legal. THE CONFIG IS THE ONLY REAL GUARD. `run_metric_suite` does log a warning
+    # ⚠️ naming `kind: probability` when it detects the combination — but do not rely on seeing it: only
+    # ⚠️ `src/utils/modeling/tuning.py` attaches the console handler, so no other `src/utils` warning reaches a
+    # ⚠️ pipeline log at all (found by the block 4f gate; recorded in .claude/plans/step-5-portability.md).
+    # ⚠️ This is the exact class of bug that made the DAILY occurrence table read "lightning everywhere" until
+    # ⚠️ `pred_value: 1` was added there — and that one was caught by a human reading a confusion matrix.
     #
     # Two of the ten scores are THRESHOLD-FREE and unaffected by where p50 sits — they rank or integrate the whole
     # probability field:
@@ -226,14 +238,24 @@ metrics:
 # .claude/plans/inventory-figures.md section 1: cartopy EuroPP axes with a PlateCarree data transform,
 # origin='upper' (array row 0 is the NORTH edge), ONE warm palette per figure under a single colorbar.
 #
-# ⚠️ `maps_most_extreme_days` is honest but coarse on this task. The colour axis is observation-driven
-# (`ceil(nanmax(obs))`) and an hourly observation is 0/1, so `max_val` is 1 and the palette collapses to its first
-# two bins — white below 0.5, grey above — for every hourly figure, with a `h / day` colorbar label that names the
-# daily unit. The panels are correct (an obs cell is white or grey; a predicted probability shades by which side of
-# 0.5 it falls on) and the file names carry the hour (`maps_<date>_h<HH>_*`), but this is a probability field drawn
-# on a scale built for integer hour counts. Left as-is deliberately: the hourly task's headline diagnostics are the
-# reliability diagram and the ROC/PR curves, and a probability-aware colour axis is a plotting change, not a
-# metrics one.
+# ⭐ `maps_most_extreme_days` PLOTS THE DAILY TOTALS on this task: the hourly stack is summed over each date's hours
+# before anything is drawn, so one figure per DATE (`maps_<date>_<category>`, no hour segment) and the panels carry
+# lightning-hours per day — the daily target's own units. That is a change of UNITS rather than a plotting
+# convenience, and it is exact in both panels:
+#   * the 0/1 observation summed over a date IS the 0-24 lightning-hours field `mode: daily` prepares, because both
+#     are built from the same `hourly-threshold`;
+#   * the predicted PROBABILITIES summed over a date are `sum_h P(lightning at hour h)` = the EXPECTED number of
+#     lightning-hours that day, which is what a daily model predicts directly.
+# So an hourly figure and a daily figure of the same date are comparable panel for panel, on one palette.
+#
+# ⚠️ What the sum hides, accepted deliberately: errors that cancel across a day's hours cancel here too, so a model
+# that puts the day's lightning at the wrong HOUR but the right cell looks perfect on these maps. Every NUMBER in
+# this suite stays hourly — the reliability diagram, the ROC/PR curves and the p50 confusion matrix are computed on
+# the un-aggregated arrays and are where an hour-level failure shows.
+#
+# (Before the sum these maps were technically correct and practically useless: the colour axis is
+# observation-driven, `ceil(nanmax(obs))`, so a 0/1 observation pinned `max_val` at 1 and the warm palette collapsed
+# to white-below-0.5 / grey-above under an `h / day` label naming a unit that was not on the axis.)
 reporting:
     figures:
         - maps_most_extreme_days      # observed vs predicted maps for the most extreme (day, hour) of the split and

@@ -88,23 +88,53 @@ def _save_map_figure(figure, report_path: str, name: str) -> None:
 # =====================================================================================================================
 # Per-day maps — the 02a grammar (see src/utils/plotting/maps.py)
 # =====================================================================================================================
-def _category_selection(totals: np.ndarray, errors: np.ndarray, n_samples: int) -> Dict[str, list]:
+# The day categories an HOURLY run plots. `most_active` alone, and the two omissions are reasoned rather than
+# economical — see `_select_plot_indices` for why `worst_error` and `median_activity` stop meaning anything once the
+# hours are summed. A DAILY run keeps all three.
+HOURLY_PLOT_CATEGORIES = ('most_active',)
+
+
+def _category_selection(totals: np.ndarray, errors: np.ndarray, n_samples: int,
+                        categories: Optional[Sequence[str]] = None) -> Dict[str, list]:
     """Top-``n_samples`` item indices for each category: highest activity, closest to the median activity, and
-    largest total error."""
+    largest total error.
+
+    ``categories`` restricts the result to the named subset, preserving this function's order. ``None`` returns all
+    three. An HOURLY run asks for ``('most_active',)`` — see :func:`_select_plot_indices`.
+    """
     by_activity = np.argsort(totals)                                        # ascending
     midpoint = len(by_activity) // 2
     lo = max(0, midpoint - n_samples // 2)
-    return {
+    selection = {
         'most_active': list(by_activity[::-1][:n_samples]),
         'median_activity': list(by_activity[lo:lo + n_samples]),
         'worst_error': list(np.argsort(errors)[::-1][:n_samples]),
     }
+    if categories is None:
+        return selection
+    unknown = [name for name in categories if name not in selection]
+    if unknown:
+        raise ValueError(f'Unknown plot categories {unknown}; expected a subset of {sorted(selection)}.')
+    return {name: selection[name] for name in selection if name in categories}
 
 
-def _select_plot_indices(observation, prediction, items, plot_dates) -> List[Tuple[int, str]]:
+def _select_plot_indices(observation, prediction, items, plot_dates,
+                        categories: Optional[Sequence[str]] = None) -> List[Tuple[int, str]]:
     """Item indices to render, in order, deduplicated: any requested ``plot_dates`` first, then the auto-selected
-    most-active / median-activity / worst-error days. Each is tagged with why it was chosen (the tag goes into the
-    file name, not the title). Extremeness is defined by the total observed activity over the domain."""
+    days. Each is tagged with why it was chosen (the tag goes into the file name, not the title). Extremeness is
+    defined by the total observed activity over the domain.
+
+    ``categories`` narrows the auto-selection; ``None`` uses all three. An HOURLY run passes
+    :data:`HOURLY_PLOT_CATEGORIES` — ``most_active`` alone — and the reason is not brevity:
+
+    * ``worst_error`` ranks on ``sum |pred - obs|``, and after :func:`_sum_hours_into_days` that is the error in the
+      DAILY TOTAL. Hour-level errors that cancel within a day cancel in the ranking too, so the category would select
+      on a quantity the figure it produces cannot show. Its hour-level counterpart is the reliability diagram and the
+      ``p50`` confusion matrix, which read the un-aggregated arrays.
+    * ``median_activity`` exists to show a typical day beside an extreme one. On the daily task that contrast is the
+      product; on the hourly task these maps are a sanity view of an aggregate, and the extra four figures per run
+      were noise.
+    """
     totals = observation.sum(axis=(-2, -1))
     errors = np.abs(prediction - observation).sum(axis=(-2, -1))        # vs the point estimate (ensemble mean)
     n_samples = min(3, len(totals))
@@ -128,7 +158,7 @@ def _select_plot_indices(observation, prediction, items, plot_dates) -> List[Tup
             for index in matches:
                 add(index, 'requested')
 
-    for tag, indices in _category_selection(totals, errors, n_samples).items():
+    for tag, indices in _category_selection(totals, errors, n_samples, categories).items():
         for index in indices:
             add(index, tag)
     return selected
@@ -138,7 +168,10 @@ def _deterministic_day_figure(observation, prediction, title, projection, data_c
     """1 x 2: observations | predictions, both on the one shared palette, with a single colorbar on the right."""
     cmap, norm = make_lightning_cmap(np.nanmax(observation))
     figure = plt.figure(figsize=(11, 5.5))
-    grid = figure.add_gridspec(1, 2, left=0.05, right=0.80, top=0.88, bottom=0.10, wspace=0.05)
+    # wspace 0.14, not 0.05: at 0.05 the rightmost LONGITUDE LABEL of one panel and the leftmost of the next overlap
+    # into an unreadable run ("20°E5°W"). Cartopy draws gridline labels OUTSIDE the axes and they are not counted in
+    # the gridspec's spacing, so the gap has to be wide enough for two labels by hand.
+    grid = figure.add_gridspec(1, 2, left=0.05, right=0.80, top=0.88, bottom=0.10, wspace=0.14)
     figure.suptitle(title, fontsize=14, fontweight='bold')
     for column, (field, panel_title) in enumerate(
             ((observation, 'observations'), (prediction, 'predictions'))):
@@ -171,7 +204,8 @@ def _stochastic_day_figure(observation, mean, std, members, title, projection, d
 
     figure = plt.figure(figsize=(n_cols * 5, n_rows * 5))
     grid = figure.add_gridspec(n_rows, n_cols, left=0.05, right=0.78, top=grid_top, bottom=grid_bottom,
-                               hspace=hspace, wspace=0.05)
+                               hspace=hspace, wspace=0.14)      # 0.14 so adjacent longitude labels do not collide;
+                                                                # see _deterministic_day_figure
     figure.suptitle(title, fontsize=14, fontweight='bold')
 
     draw_map(add_map_axis(figure, grid[0, 0], projection), observation, 'observations', data_crs,
@@ -193,10 +227,64 @@ def _stochastic_day_figure(observation, mean, std, members, title, projection, d
     return figure
 
 
+def _sum_hours_into_days(prediction, observation, items, ensemble_members):
+    """Collapse an HOURLY stack ``[N=days*hours, H, W]`` into a DAILY one ``[D, H, W]`` by summing over each date's
+    hours. Returns ``(prediction, observation, items, ensemble_members)`` in the daily shape.
+
+    ⭐ **This is a change of units, and the units it lands in are the daily target's own.** Summing the 0/1 hourly
+    occurrence observation over a date gives exactly the number of qualifying hours that day — i.e. the ``0-24``
+    lightning-hours field ``mode: daily`` prepares, since both are built from the same ``hourly-threshold``. And
+    summing the predicted PROBABILITIES gives ``sum_h P(lightning at hour h)``, which is the **expected number of
+    lightning-hours** that day: the same quantity a daily model predicts directly. So the hourly maps are not merely
+    drawn with the daily grammar, they are drawn in the daily quantity, and a daily figure and an hourly figure of the
+    same date are directly comparable panel for panel.
+
+    Without this the hourly maps were technically correct and practically useless: the colour axis is
+    observation-driven (``ceil(nanmax(obs))``) and a 0/1 observation makes ``max_val = 1``, collapsing the whole warm
+    palette to its first two bins — white below 0.5, grey above — under a ``h / day`` label naming a unit that was not
+    on the axis.
+
+    ⚠️ **What the sum hides, deliberately.** Errors that cancel across the hours of a day cancel here too: a model
+    that puts the day's lightning at the wrong HOUR but the right cell scores perfectly on this figure. That is the
+    accepted cost of a daily view, and it is why the hour-level diagnostics — the reliability diagram, the ROC/PR
+    curves and the ``p50`` confusion matrix — are computed on the un-aggregated hourly arrays in
+    ``run_metric_suite`` and are not touched by this function. Every NUMBER in the metrics JSON stays hourly; only
+    these maps aggregate.
+
+    For a stochastic family the sum is taken PER MEMBER (``[N, M, H, W] -> [D, M, H, W]``), so the ensemble mean and
+    std panels show the spread of the daily TOTAL rather than of one hour — the quantity a daily map should carry.
+    """
+    dates = pd.to_datetime(items['date']).dt.date.astype(str).to_numpy()
+    codes, unique_dates = pd.factorize(dates)                            # codes in order of first appearance
+
+    # `reduceat` sums CONTIGUOUS runs, which is what the dataset produces (each day expanded into its hours, in order)
+    # and what the evaluation stage preserves (`shuffle=False`, batches concatenated in order). A date split across two
+    # runs would be silently summed into two rows instead of one, so the run count is checked rather than assumed.
+    starts = np.flatnonzero(np.r_[True, codes[1:] != codes[:-1]])
+    if len(starts) != len(unique_dates):
+        raise ValueError(
+            f'The evaluated items are not grouped by date: {len(unique_dates)} dates over {len(starts)} contiguous '
+            f'runs. Summing hours into days needs each date\'s hours adjacent, which the prepared index and an '
+            f'unshuffled evaluation loader guarantee.'
+        )
+
+    daily_prediction = np.add.reduceat(np.asarray(prediction), starts, axis=0)
+    daily_observation = np.add.reduceat(np.asarray(observation), starts, axis=0)
+    daily_members = None if ensemble_members is None \
+        else np.add.reduceat(np.asarray(ensemble_members), starts, axis=0)
+    # one row per date and NO `hour` column, which is what routes the caller below onto its daily naming/title branch
+    return daily_prediction, daily_observation, pd.DataFrame({'date': unique_dates}), daily_members
+
+
 def maps_most_extreme_days(prediction, observation, items, report_path, ensemble_members=None, plot_dates=None,
                            model_family=None):
     """One map figure PER DAY (``maps_<date>.png`` + ``.pdf``) for the most extreme and median observed days, plus
     any requested ``plot_dates``.
+
+    ⭐ **An HOURLY run is summed into days first** (:func:`_sum_hours_into_days`) — read that function for why the sum
+    is the daily target's own quantity rather than a plotting convenience. Detected from ``items``: an hourly item
+    table carries a populated ``hour`` column, a daily one carries ``NaN``. Everything after the sum is the daily path
+    verbatim, including the file names (``maps_<date>_<category>``, no ``_hHH``) and the titles.
 
     DETERMINISTIC models (``ensemble_members`` None) get the 1 x 2 Observed | Predicted layout. STOCHASTIC models (an
     MC-dropout or diffusion ensemble run, ``ensemble_members`` a ``[N, M, H, W]`` stack) get the 2 x 3 observed /
@@ -204,36 +292,54 @@ def maps_most_extreme_days(prediction, observation, items, report_path, ensemble
 
     The colour scale is observation-driven and PER DATE (``ceil(nanmax(obs))``), so every panel of one figure shares
     a scale while different days may not — the accepted trade-off of the 02a grammar, which keeps each day's own
-    dynamic range legible.
+    dynamic range legible. Summing the hours first is what lets an hourly run use it: the observation becomes an
+    integer hour count, so ``max_val`` spans the day's real dynamic range instead of being pinned at 1.
 
-    Each figure's title is ``<date>[ hHH] event, <family> model``; the selection category (most active / median /
+    Each figure's title is ``<date> event, <family> model``; the selection category (most active / median /
     worst error) is encoded in the FILE NAME instead, so the title says what was plotted rather than why it was
     picked. ``model_family`` is the family the CHECKPOINT resolved to, so a figure cannot be mislabelled by a stale
     CLI argument; it is omitted from the title when unknown rather than guessed at.
     """
     projection, data_crs = geographic_context()
+    hourly = 'hour' in items and items['hour'].notna().any()             # hourly run -> plot the daily totals
+    if hourly:
+        n_hourly = len(items)
+        prediction, observation, items, ensemble_members = _sum_hours_into_days(
+            prediction, observation, items, ensemble_members
+        )
+        logger.info(
+            f'Hourly run: summed {n_hourly} hourly items into {len(items)} days for the map figures, so the panels '
+            f'carry expected lightning-hours per day (the daily target\'s own units). Every metric stays hourly.'
+        )
     stochastic = ensemble_members is not None
     rng = np.random.default_rng(0)                                       # reproducible member sampling
-    used_names = set()                                                   # guard against a same-(date,hour) overwrite
+    used_names = set()                                                   # guard against a same-date overwrite
 
-    selected = _select_plot_indices(observation, prediction, items, plot_dates)
+    selected = _select_plot_indices(observation, prediction, items, plot_dates,
+                                   categories=HOURLY_PLOT_CATEGORIES if hourly else None)
     tag_totals = {}                                                      # how many figures each category contributes
     for _, tag in selected:
         tag_totals[tag] = tag_totals.get(tag, 0) + 1
     tag_seen = {}
 
     for index, tag in selected:
+        # ⚠️ There is no per-HOUR name or title any more. Both used to exist for the hourly branch
+        # (`maps_<date>_hHH_*`, `<date> hHH event`) and became unreachable when the hourly stack started being summed
+        # into days above: after that, every item IS a day in both modes.
         date = pd.Timestamp(items.iloc[index]['date']).date()
-        hour = items.iloc[index].get('hour')
-        suffix = f'_h{int(hour):02d}' if pd.notna(hour) else ''
-        stamp = f'{date}' + (f' h{int(hour):02d}' if pd.notna(hour) else '')
-        title = f'{stamp} event' + (f', {model_family} model' if model_family else '')
-        # FILE NAME: maps_<date>[_hHH]_<category>[_<n>]. The per-category ordinal is added only when that category
-        # contributes more than one day; a leftover collision falls back to the item index rather than overwriting.
-        ordinal = tag_seen.get(tag, 0)
-        tag_seen[tag] = ordinal + 1
-        tag_suffix = f'_{tag}' + (f'_{ordinal}' if tag_totals[tag] > 1 else '')
-        name = f'maps_{date}{suffix}{tag_suffix}'
+        title = f'{date} event' + (f', {model_family} model' if model_family else '')
+        # FILE NAME: maps_<date>[_<category>[_<n>]]. The category (and, when it contributes more than one day, its
+        # ordinal) names WHY the day was picked. An HOURLY run drops it: with `most_active` the only category, the tag
+        # would be the same word on every file and the date already identifies it. Names stay unique either way
+        # because every plotted item is a distinct date; a leftover collision falls back to the item index rather
+        # than overwriting.
+        if hourly:
+            name = f'maps_{date}'
+        else:
+            ordinal = tag_seen.get(tag, 0)
+            tag_seen[tag] = ordinal + 1
+            tag_suffix = f'_{tag}' + (f'_{ordinal}' if tag_totals[tag] > 1 else '')
+            name = f'maps_{date}{tag_suffix}'
         if name in used_names:
             name = f'{name}_{index}'
         used_names.add(name)

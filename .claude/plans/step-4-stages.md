@@ -288,10 +288,34 @@ is **four config files, twenty-three tests, and a gate** — which is what block
   directory already holds every hour, laid out variable-major) and it is the only way the sampler ever runs. Both
   tiers, so the smoke tier smokes the loader path the real run uses.
 - ⚠️ **`ensemble-size` ≥ 2** as always: `spread_skill_sums` uses `ddof=1`, and a single member yields a silent `NaN`.
-- ⚠️ **The hourly maps are honest but coarse.** The colour axis is observation-driven (`ceil(nanmax(obs))`) and an
-  hourly observation is 0/1, so `max_val = 1` and the warm palette collapses to white-below-0.5 / grey-above for every
-  hourly figure, under a `h / day` colorbar label naming the daily unit. Correct, not broken; recorded in the config
-  and left as a plotting matter rather than a metrics one.
+- ⭐ **The hourly maps plot the DAILY TOTALS** (`reporting._sum_hours_into_days`, added in 4f-r after the gate showed
+  the problem). The hourly stack is summed over each date's hours before anything is drawn, so there is one figure per
+  DATE and one plotting grammar for both tasks. It is a change of **units**, not a plotting convenience, and it is
+  exact in both panels: a 0/1 observation summed over a date *is* the `0-24` lightning-hours field `mode: daily`
+  prepares (same `hourly-threshold`), and the predicted probabilities summed over a date are
+  `sum_h P(lightning at hour h)` — the **expected** lightning-hours that day, which is what a daily model predicts
+  directly. So an hourly and a daily figure of the same date are comparable panel for panel.
+  * ⚠️ **What it hides, accepted:** errors that cancel across a day's hours cancel here too, so a model that puts the
+    day's lightning at the wrong *hour* but the right cell looks perfect on these maps. Every metric stays hourly —
+    the reliability diagram, the ROC/PR curves and the `p50` confusion matrix read the un-aggregated arrays.
+  * The per-hour file name and title (`maps_<date>_hHH_*`, `<date> hHH event`) became **unreachable** and were
+    removed: after the sum, every plotted item is a day in both modes.
+  * **`HOURLY_PLOT_CATEGORIES = ('most_active',)`** — an hourly run plots the most-active days only, named
+    `maps_<date>.png` with no category tag. Both omissions are reasoned: `worst_error` ranks on the error in the DAILY
+    TOTAL once the hours are summed, so it would select on the very quantity the sum hides, and `median_activity`
+    exists for a typical-vs-extreme contrast that is the daily task's product rather than this one's. A DAILY run
+    keeps all three — the narrowing is hourly-only, checked in both directions.
+  * What it replaced: the colour axis is observation-driven (`ceil(nanmax(obs))`), so a 0/1 observation pinned
+    `max_val` at 1 and the warm palette collapsed to white-below-0.5 / grey-above under an `h / day` label naming a
+    unit that was not on the axis.
+  * ⚠️ **`evaluate` never cleans its `report-path`.** Three successive runs of the hourly tier left nine superseded
+    map figures beside the two current ones, indistinguishable in a listing except by mtime — which read as "the
+    change did not work". Not fixed here (deleting a declared output on write is its own decision), but it is the
+    second time a stale report file has cost a debugging round: worth either clearing the directory in `write_report`
+    or logging the files a run did NOT write.
+  * Fixed while looking at the result: gridspec `wspace` 0.05 → **0.14** in both map layouts. Cartopy draws gridline
+    labels OUTSIDE the axes and gridspec does not count them, so adjacent panels ran their longitude labels together
+    into `20°E5°W`. This was one of the two cosmetics flagged-and-unassigned at the end of 4e.
 
 ### ⚠️ Why there is no hourly `mc_dropout` or `diffusion`, and what each would cost
 

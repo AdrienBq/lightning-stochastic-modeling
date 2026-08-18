@@ -175,9 +175,13 @@ def test_function_census_is_stable(repo_root):
     Then the 4e plot rework took it DOWN to 329, the first net removal of the rebuild: `maps.draw_diff_map`,
     `make_lightning_scales` and `LightningScales.*` went with the warm/cool over/under diff encoding (-3), against
     `add_lightning_colorbar` arriving in their place (+1).
+
+    Block 4f added NO function — the hourly task was four config files, which is the point of it. Its follow-up 4f-r
+    added `reporting._sum_hours_into_days` (330), which sums an hourly stack into daily totals so the map figures use
+    one grammar for both tasks.
     """
     total = sum(1 for _ in _all_functions(repo_root))
-    assert total == 329, f'the testable surface moved from 329 to {total}; re-scope the coverage work-list'
+    assert total == 330, f'the testable surface moved from 330 to {total}; re-scope the coverage work-list'
 
 
 def test_exemption_list_has_not_grown(repo_root):

@@ -101,19 +101,57 @@ writing `prepare_modeling` (block 4a). Every other path in a prepared directory 
 `load_prepared_artifacts` joins at read time — which is what makes a prepared directory movable — but `file` points
 back at the source `samples/*.pt`, so it survives a move of the *outputs* and breaks on a move of the *dataset*.
 
-The consequence is narrow and currently dormant, which is why it needs writing down rather than fixing now:
+⛔ **NO LONGER DORMANT — block 4f woke it up.** The paragraph below used to say "every shipped config sets
+`materialize-features: true`, so `file` is never opened". That stopped being true when the two **hourly** tiers
+shipped with `materialize-features: false` (deliberately: materialising would cost a second ~20 GiB, and it is what
+turns on `DayGroupedShuffleSampler`). So the fallback reader is now on the shipped path, and with it the absolute
+`file` column:
 
-* it is read only by `LightningMapsDataset._item_features_checkpoint`, the **fallback** feature reader;
-* every shipped config sets `materialize-features: true`, so the materialised reader is used and `file` is never
-  opened. A stale `file` column therefore costs nothing today;
-* the moment someone prepares with `materialize-features: false` on one machine and trains on another, it fails —
-  with a `FileNotFoundError` naming a path that exists on neither, which reads as a data problem rather than a
-  portability one.
+* it is read by `LightningMapsDataset._item_features_checkpoint`, the **fallback** feature reader — which the hourly
+  pipeline uses for every item of every epoch;
+* the nine daily tiers still materialise, so `file` is never opened there;
+* **the hourly pipeline is therefore not machine-portable in the way the daily ones are.** It works today only
+  because preparation and training happen on the same host with the same `$DATA_ROOT`. Prepare on one machine and
+  train on another and it fails with a `FileNotFoundError` naming a path that exists on neither, which reads as a data
+  problem rather than a portability one.
+
+This raises the priority: it is a live defect on a shipped pipeline rather than a hazard waiting for a configuration
+nobody uses.
 
 Options for this step: store it relative to `data_path` and rejoin in `load_prepared_artifacts` (symmetric with the
-other three columns, and the obvious fix), or drop the column entirely and require materialised features. The second
-is tempting — the fallback path is dormant and `DayGroupedShuffleSampler` exists for it — but it removes the only way
-to prepare without doubling the on-disk footprint, so decide it here rather than by accident.
+other three columns, and the obvious fix), or drop the column entirely and require materialised features. ⛔ **The
+second option is now closed**: the hourly tiers depend on the fallback path, so removing it would either double their
+on-disk footprint or delete the pipeline. Take the relative-path fix.
+
+---
+
+## 🐛 Only ONE module under `src/utils/` can be heard (found by the block 4f gate)
+
+`src/__init__.py` builds `console_handler`, and **every stage attaches it to its own logger only** — plus
+`lazy.logger` explicitly in `run.py` and, uniquely in the library, `src/utils/modeling/tuning.py` at module level.
+Nothing attaches a handler to the `src` package logger and nothing configures the root logger, so **every
+`logger.info` / `logger.warning` in every other `src/utils` module is discarded during a pipeline run.**
+
+Found by chasing a log line that never appeared (`reporting`'s "summed N hourly items into D days"). What else is
+silently lost, in rough order of how much it matters:
+
+* ⚠️ `evaluation.run_metric_suite`'s **degenerate-configuration warning** — the one naming `kind: probability` when a
+  shared occurrence cut meets a probability field. Three config files, a docstring and this plan all describe it as
+  the runtime guard behind a bug that produces an entire contingency table of nonsense without raising. It has never
+  been audible. The DAILY instance of that same bug was caught by a human reading a confusion matrix, which is
+  precisely what the guard was supposed to prevent.
+* `search.apply_constraints`' two decision logs — "forcing `loss.intensity_weight_gamma` to 0" and "the sampled
+  `unet` block is ignored for this trial". Both record a **change to the trial** that the trials table does not show.
+* `reporting`'s "Requested plot date is not in the evaluated split; skipped" — a figure the user asked for, absent.
+* everything in `data.py`, `dataset.py`, `registry.py`, `validation.py`, `scores.py`, `diagnostics.py`, `maps.py`.
+
+**The fix is small but not local:** attach `console_handler` once to `logging.getLogger('src')` in `src/__init__.py`,
+then REMOVE the eight per-stage `addHandler` calls plus `tuning.py`'s and `run.py`'s `lazy.logger` one — otherwise
+every stage record is emitted twice, once by its own handler and once by the ancestor's. Ten files for a two-line
+idea, which is why it belongs to this step rather than to a block doing something else.
+
+⚠️ Until it lands, treat *"the code warns about X"* as false wherever X lives in `src/utils`: the record is emitted
+and then dropped. Every such claim in a config or docstring is aspirational, and the configs that make it now say so.
 
 ## Open question carried from the architecture inventory
 

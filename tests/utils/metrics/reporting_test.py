@@ -205,6 +205,201 @@ def test_a_category_contributing_several_days_gets_an_ordinal(deterministic_repo
 
 
 # =====================================================================================================================
+# An HOURLY run's maps are the DAILY TOTALS  (Step 4 block 4f-r)
+#
+# Summing the hours is a change of UNITS, not a plotting convenience, and that is the whole reason it is right: the 0/1
+# hourly observation summed over a date IS the 0-24 lightning-hours field `mode: daily` prepares (both come from one
+# `hourly-threshold`), and the predicted PROBABILITIES summed over a date are the EXPECTED number of lightning-hours —
+# the quantity a daily model predicts directly. So the two tasks' figures are comparable panel for panel.
+#
+# What it replaced: a 0/1 observation pins `max_val = ceil(nanmax(obs))` at 1, so the warm palette collapsed to
+# white-below-0.5 / grey-above for every hourly figure, under an `h / day` label naming a unit that was not on the axis.
+# =====================================================================================================================
+def _hourly_arrays(n_days=3, hours=24, seed=0):
+    """An hourly stack in the shape the evaluation stage hands over: ``[n_days * hours, H, W]`` of 0/1 observations and
+    probabilities, with the item table ordered by (date, hour) and its ``hour`` column POPULATED."""
+    rng = np.random.default_rng(seed)
+    n_items = n_days * hours
+    observation = (rng.random((n_items, H, W)) < 0.04).astype(np.float32)
+    observation[:, 4:8, 4:8] = (rng.random((n_items, 4, 4)) < 0.5).astype(np.float32)   # an active blob
+    prediction = np.clip(0.5 * observation + 0.05 * rng.random(observation.shape), 0, 1).astype(np.float32)
+    members = np.clip(
+        prediction[:, None, :, :] + rng.normal(0, 0.02, (n_items, MEMBERS, H, W)), 0, 1
+    ).astype(np.float32)
+    dates = pd.date_range('2015-07-20', periods=n_days, freq='D').strftime('%Y-%m-%d').tolist()
+    items = pd.DataFrame({'date': np.repeat(dates, hours), 'hour': list(range(hours)) * n_days})
+    return prediction, observation, members, items, dates
+
+
+def test_the_hourly_stack_is_summed_into_days():
+    """⭐ The core of it, asserted on the arrays rather than on a rendered figure: D rows out of D*24, and each row the
+    exact sum of its date's hours. Checked against an independent per-date mask, not against another reduction."""
+    prediction, observation, members, items, dates = _hourly_arrays(n_days=3, hours=24)
+
+    daily_prediction, daily_observation, daily_items, daily_members = reporting._sum_hours_into_days(
+        prediction, observation, items, members
+    )
+
+    assert daily_observation.shape == (3, H, W) and daily_prediction.shape == (3, H, W)
+    assert daily_members.shape == (3, MEMBERS, H, W)
+    assert list(daily_items['date']) == dates
+    for position, date in enumerate(dates):
+        mask = (items['date'] == date).to_numpy()
+        assert np.allclose(daily_observation[position], observation[mask].sum(axis=0))
+        assert np.allclose(daily_prediction[position], prediction[mask].sum(axis=0))
+        assert np.allclose(daily_members[position], members[mask].sum(axis=0))
+
+
+def test_the_summed_observation_IS_a_count_of_lightning_hours():
+    """The claim that makes this the daily target rather than an arbitrary aggregate: summing a 0/1 field over 24 hours
+    gives whole numbers in 0-24 — exactly what ``_daily_aggregation`` writes in daily mode."""
+    _, observation, _, items, _ = _hourly_arrays(n_days=2, hours=24)
+    _, daily_observation, _, _ = reporting._sum_hours_into_days(observation, observation, items, None)
+
+    assert np.all(daily_observation == np.round(daily_observation)), 'not integral -> not a count of hours'
+    assert daily_observation.min() >= 0 and daily_observation.max() <= 24
+    assert daily_observation.max() > 1, 'the whole point: a 0/1 field would pin the colour axis at max_val = 1'
+
+
+def test_the_summed_prediction_is_the_EXPECTED_lightning_hours():
+    """``sum_h P(lightning at hour h)`` — bounded by the same 0-24, and continuous rather than integral, which is what
+    a daily regression's prediction also is."""
+    prediction, observation, _, items, _ = _hourly_arrays(n_days=2, hours=24)
+    daily_prediction, _, _, _ = reporting._sum_hours_into_days(prediction, observation, items, None)
+
+    assert daily_prediction.min() >= 0 and daily_prediction.max() <= 24
+    assert not np.all(daily_prediction == np.round(daily_prediction)), 'an expectation need not be integral'
+
+
+def test_the_summed_items_carry_NO_hour_column():
+    """It is the absence of ``hour`` that routes the caller onto its daily naming and title branch, so this is not
+    tidiness — it is the mechanism."""
+    prediction, observation, _, items, _ = _hourly_arrays(n_days=2, hours=6)
+    _, _, daily_items, _ = reporting._sum_hours_into_days(prediction, observation, items, None)
+    assert 'hour' not in daily_items.columns
+
+
+def test_a_DAILY_run_is_not_aggregated(report_arrays):
+    """The other direction. A daily item table carries an all-``NaN`` ``hour`` column, which must NOT trip the sum —
+    doing so would collapse a multi-day split into one figure per unique date with the values doubled."""
+    prediction, observation, _, items, _ = report_arrays(n_items=4)
+    assert items['hour'].isna().all()
+    assert not ('hour' in items and items['hour'].notna().any()), 'the detector must read False on a daily table'
+
+
+def test_hours_split_across_NON_CONTIGUOUS_runs_RAISE():
+    """``np.add.reduceat`` sums contiguous runs. If a date's items were not adjacent it would silently produce one row
+    per RUN instead of one per date — every figure then drawn from a partial day, with nothing to say so. The prepared
+    index and an unshuffled loader guarantee adjacency; this pins that the guarantee is checked."""
+    prediction, observation, _, items, _ = _hourly_arrays(n_days=2, hours=4)
+    shuffled = items.iloc[[0, 4, 1, 5, 2, 6, 3, 7]].reset_index(drop=True)      # interleave the two days
+    with pytest.raises(ValueError, match='not grouped by date'):
+        reporting._sum_hours_into_days(prediction, observation, shuffled, None)
+
+
+def test_an_hourly_report_writes_ONE_figure_PER_DAY_named_by_the_DATE_ALONE(tmp_path):
+    """End to end through the public function: 2 days x 6 hours in, and exactly ``maps_<date>.png`` out — no ``_hHH``
+    segment (the hours are summed) and no ``_most_active_0`` segment (one category, so the tag would be the same word
+    on every file). Six hours rather than 24 to keep the cartopy renders down."""
+    prediction, observation, _, items, dates = _hourly_arrays(n_days=2, hours=6)
+    reporting.maps_most_extreme_days(prediction, observation, items, str(tmp_path))
+
+    pngs = sorted(name for name in os.listdir(str(tmp_path)) if name.endswith('.png'))
+    assert pngs, 'no per-day maps written'
+    assert pngs == [f'maps_{date}.png' for date in dates if f'maps_{date}.png' in pngs], pngs
+    assert not [name for name in pngs if any(tag in name for tag in CATEGORY_TAGS)], pngs
+    assert len(pngs) <= 3, f'at most the 3 most-active days: {pngs}'
+
+
+def test_an_hourly_report_plots_the_MOST_ACTIVE_days_ONLY(tmp_path):
+    """⭐ The category narrowing, asserted where it is decided rather than by counting files. ``worst_error`` ranks on
+    the error in the DAILY TOTAL once the hours are summed, so it selects on a quantity these maps cannot show;
+    ``median_activity`` exists for a contrast that is the daily task's product, not this one's."""
+    prediction, observation, _, items, _ = _hourly_arrays(n_days=5, hours=4)
+
+    captured = []
+    original = reporting._select_plot_indices
+
+    def spy(observation_arg, prediction_arg, items_arg, plot_dates_arg, categories=None):
+        captured.append(categories)
+        return original(observation_arg, prediction_arg, items_arg, plot_dates_arg, categories=categories)
+
+    reporting._select_plot_indices = spy
+    try:
+        reporting.maps_most_extreme_days(prediction, observation, items, str(tmp_path))
+    finally:
+        reporting._select_plot_indices = original
+
+    assert captured == [reporting.HOURLY_PLOT_CATEGORIES]
+    assert reporting.HOURLY_PLOT_CATEGORIES == ('most_active',)
+
+
+def test_a_DAILY_report_still_gets_ALL_THREE_categories(report_arrays, tmp_path):
+    """The narrowing is HOURLY-ONLY. The daily maps are the primary product and the worst-error day is a real
+    diagnostic there — nothing cancels it, because a daily item is already the whole day."""
+    prediction, observation, _, items, _ = report_arrays(n_items=5)
+
+    captured = []
+    original = reporting._select_plot_indices
+
+    def spy(*args, categories=None, **kwargs):
+        captured.append(categories)
+        return original(*args, categories=categories, **kwargs)
+
+    reporting._select_plot_indices = spy
+    try:
+        reporting.maps_most_extreme_days(prediction, observation, items, str(tmp_path))
+    finally:
+        reporting._select_plot_indices = original
+
+    assert captured == [None], 'a daily run must not be narrowed'
+    produced = [name for name in os.listdir(str(tmp_path)) if name.endswith('.png')]
+    assert {tag for tag in CATEGORY_TAGS if any(f'_{tag}' in name for name in produced)} >= \
+        {'most_active', 'median_activity', 'worst_error'}, produced
+
+
+def test_category_selection_REJECTS_an_unknown_category():
+    """A typo would otherwise silently narrow the selection to nothing and write no maps at all — a report that
+    quietly lost a figure set, which is the failure mode this repo keeps closing."""
+    totals, errors = np.arange(6.0), np.arange(6.0)[::-1].copy()
+    with pytest.raises(ValueError, match='Unknown plot categories'):
+        reporting._category_selection(totals, errors, n_samples=2, categories=('most_actve',))
+
+
+def test_category_selection_narrows_to_the_requested_subset():
+    totals, errors = np.array([1.0, 5.0, 3.0, 2.0]), np.array([4.0, 1.0, 2.0, 3.0])
+    full = reporting._category_selection(totals, errors, n_samples=2)
+    narrowed = reporting._category_selection(totals, errors, n_samples=2, categories=('most_active',))
+    assert set(narrowed) == {'most_active'}
+    assert narrowed['most_active'] == full['most_active'], 'narrowing must not change the ranking'
+
+
+def test_the_hourly_maps_reach_a_MULTI_BIN_colour_axis(tmp_path, monkeypatch):
+    """⭐ The user-visible symptom this change fixes, pinned at the point the palette is built: ``make_lightning_cmap``
+    must be called with a ``max_val`` above 1, or the figure is two colours whatever else is right.
+
+    Asserted on the ARGUMENT rather than on the rendered pixels deliberately — block 4e's lesson was the opposite
+    (assertions on the figure object passed while the output was wrong), and this is the one place the two coincide:
+    ``max_val`` IS the colour axis, and a wrong one cannot be compensated downstream.
+    """
+    from src.utils.plotting import maps as maps_module
+
+    seen = []
+    original = maps_module.make_lightning_cmap
+
+    def spy(max_val, *args, **kwargs):
+        seen.append(float(max_val))
+        return original(max_val, *args, **kwargs)
+
+    monkeypatch.setattr(reporting, 'make_lightning_cmap', spy)
+    prediction, observation, _, items, _ = _hourly_arrays(n_days=1, hours=6)
+    reporting.maps_most_extreme_days(prediction, observation, items, str(tmp_path))
+
+    assert seen, 'the palette was never built'
+    assert min(seen) > 1.0, f'colour axis still collapsed to the 0/1 range: max_val values {seen}'
+
+
+# =====================================================================================================================
 # The curve and table figures
 # =====================================================================================================================
 def test_psd_curves_writes_the_figure_and_both_wavelength_axes(tmp_path):
