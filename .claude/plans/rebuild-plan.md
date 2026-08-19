@@ -12,8 +12,8 @@ to no single step.
 | [`step-1-design.md`](step-1-design.md) | Design decisions via the inventories; global `CLAUDE.md` + `README.md` | ✅ **done** (2026-07-28) |
 | [`step-2-config.md`](step-2-config.md) | Every config file and its contents | ✅ **done** (2026-07-29) |
 | [`step-3-utils.md`](step-3-utils.md) | Shared `src/utils` | ✅ **done** (2026-08-14) |
-| [`step-4-stages.md`](step-4-stages.md) | Stages + common evaluation — **expanded 2026-08-14**, blocks `4a`–`4g` | 🔵 **in progress** — `4a`–`4f` done; every stage exists, all three families ran on real data and reported one 129-metric comparison table, and the **hourly** task is now runnable. Next: `4g`, the fresh-eyes review of `tests/` |
-| [`step-5-portability.md`](step-5-portability.md) | User- and machine-agnostic | ⚪ provisional |
+| [`step-4-stages.md`](step-4-stages.md) | Stages + common evaluation — blocks `4a`–`4g` | ✅ **done** (2026-08-19) |
+| [`step-5-portability.md`](step-5-portability.md) | User- and machine-agnostic | 🔵 **next** |
 
 ### Design decision record (the Step 1 deliverable — all annotated)
 
@@ -27,28 +27,56 @@ to no single step.
 
 **Block order** a → b → c → d → e. Each step ends with the verification gate below and a plan update.
 
-> **▶ To resume work:** Step 4 is at block **`4g`**, the last one. Done: all seven stages (`4a`–`4d`), every written
-> path behind `{{$OUTPUT_ROOT}}` (`4c-r`), the synthetic-root e2e test and the three by-hand real-data gates (`4e`), and
-> the hourly pipeline (`4f`). `tests/` is the verification of record — 1378 passing, 329/329 functions tested,
-> ~88 % line coverage.
+> **▶ To resume work: STEP 4 IS DONE. Start [`step-5-portability.md`](step-5-portability.md).**
 >
-> What `4e` and `4f` settled, so it is not re-litigated:
+> Step 4 delivered all seven stages, and the repo now runs end to end for both tasks. State of record: **1417 passing,
+> 4 skipped, 330/330 functions tested, 87.7 % measured line coverage** (93.8 % with subprocess tracing — see below).
+>
+> What Step 4 settled, so it is not re-litigated:
 >
 > * **The merge works.** All three families ran their `*_smoke_cpu` pipeline on the real dataset and
 >   `probabilistic_eval_smoke_cpu.yaml` produced **one CSV, 3 families × 129 metrics**. Every point / categorical /
->   skill / spatial metric is present for every family; the only gaps are capability-explained (6 ensemble scalars
->   absent for the deterministic family, 33 `resid_*` present only for the residual diffusion run) plus one
->   data-dependent `fss_useful_scale_h3`.
-> * **Six bugs came out of `4e`, five of them visible only in real output** — three found by a human reading a figure.
->   Cartopy's non-finite gridliner extents were behind two of them (cropped saves, invisible titles).
-> * **`4f` needed no `src/` change**: every layer was already mode-aware, so the hourly task was four configs and 23
->   tests. It did need an unplanned `search_space_hourly.yaml` (`selection_metric_for_mode` raises otherwise) and
->   brought the daily/hourly **config naming rename** with it — every task-specific file now names its task.
+>   skill / spatial metric present for every family; every gap capability-explained (6 ensemble scalars absent for the
+>   deterministic family, 33 `resid_*` only for the residual diffusion run) plus one data-dependent
+>   `fss_useful_scale_h3`.
+> * **Both tasks run in `pytest`** (`4e` daily, `4g` hourly) and both have passed a by-hand real-data gate (`4e`, `4f`).
+> * **Six bugs came out of `4e`**, five visible only in real output, three found by a human reading a figure. Cartopy's
+>   non-finite gridliner extents were behind two (cropped saves, invisible titles).
+> * **`4f` needed no `src/` change** — every layer was already mode-aware, so the hourly task was four configs. It did
+>   need an unplanned `search_space_hourly.yaml` (`selection_metric_for_mode` raises otherwise) and brought the
+>   daily/hourly **config naming rename** with it: every task-specific file now names its task.
+> * **`4g` reviewed the suite and fixed what it found**, including one test that asserted something the design
+>   deliberately violates. Read its §"THE ASSESSMENT" before adding tests — three of its findings are about how to
+>   review, not what to fix.
+> * **The target's sparsity was wrong in ~40 places.** Now measured by [`scripts/sparsity.py`](../../scripts/sparsity.py)
+>   and tabulated in `README.md`: hourly positive **0.43 %**, daily positive **4.70 %**, raw zeros 99.35 %. The old
+>   "~99.93 % zero" understated the hourly class 6× and the daily one 67×. **Quote the right one of the six.**
 >
-> ⚠️ Standing rules for `4g` and beyond: **a new function's test lands in the same commit as the function**, and
-> **commit before running a pipeline** — the lazy cache keys on the whole-repo dirty diff. Read
-> [`step-4-stages.md`](step-4-stages.md) §Verification for all eight checks and §"Closing review of `tests/`" for what
-> `4g` actually asks for (an assessment with evidence, not a pass/fail).
+> ### Decisions taken at the Step 4 → 5 boundary (2026-08-19), so Step 5 does not reopen them
+>
+> 1. **The hourly decision ladder is `p10, p20, p30, p40, p50`.** One cut at 0.5 gave an all-zero contingency table,
+>    because a calibrated model rarely reaches 50 % at a 0.43 % base rate. Accepted cost: the three threshold-free
+>    scores (`roc_auc`, `average_precision`, `dice`) are identical at every rung — 15 keys where 3 would do, and five
+>    coincident ROC/PR curves. Not fixable from config; `metrics.categorical.scores` applies one list to all
+>    thresholds. Pinned by `test_the_HOURLY_threshold_free_scores_are_IDENTICAL_across_the_ladder`.
+> 2. **No hourly `mc_dropout` or `diffusion`.** Left as is. `mc_dropout` is config-only reachable if wanted;
+>    `diffusion` is a code-level gap (no probabilistic head). See `step-4-stages.md`'s table.
+> 3. **The by-hand real-data gates stay by hand**, and the four real-artifact tests in `evaluate_test.py` stay
+>    opt-in — they cost 1 h 53 m. `4g-2` made their skip name the real cause, so they no longer look like a missing
+>    checkpoint when `OUTPUT_ROOT` is simply unset.
+>
+> ### What Step 5 inherits (all three verified, none theoretical)
+>
+> * **`src/utils` diagnostics are misrouted, not lost** — they land in `output.log` at the repo root, never on the
+>   console or in the job log. Includes the `kind: probability` guard that three configs cite as a safety net.
+> * **`split_index.csv`'s `file` column is an absolute `$DATA_ROOT` path** baked in at prepare time, and is **no longer
+>   dormant**: the hourly tiers ship `materialize-features: false`, so the fallback reader that opens it is on a
+>   shipped path. The hourly pipeline is therefore not machine-portable the way the daily ones are.
+> * **`mlflow.projects` runs each stage via `bash -c "python src/stages/<stage>.py …"`** — a literal `python`,
+>   resolved from `$PATH`, not `sys.executable`. Works only because the launch scripts put the venv first.
+>
+> ⚠️ Standing rules: **a new function's test lands in the same commit as the function**, and **commit before running a
+> pipeline** — the lazy cache keys on the whole-repo dirty diff.
 
 ---
 

@@ -125,21 +125,40 @@ on-disk footprint or delete the pipeline. Take the relative-path fix.
 
 ---
 
-## 🐛 Only ONE module under `src/utils/` can be heard (found by the block 4f gate)
+## 🐛 Every `src/utils/` diagnostic goes to `output.log` and nowhere a user looks
 
-`src/__init__.py` builds `console_handler`, and **every stage attaches it to its own logger only** — plus
-`lazy.logger` explicitly in `run.py` and, uniquely in the library, `src/utils/modeling/tuning.py` at module level.
-Nothing attaches a handler to the `src` package logger and nothing configures the root logger, so **every
-`logger.info` / `logger.warning` in every other `src/utils` module is discarded during a pipeline run.**
+⚠️ **CORRECTED 2026-08-19.** This section first said those records were "discarded". They are not — they are written
+to a file, and the difference matters because it changes the fix. Measured, not inferred:
 
-Found by chasing a log line that never appeared (`reporting`'s "summed N hourly items into D days"). What else is
-silently lost, in rough order of how much it matters:
+```python
+src/__init__.py:8   logging.basicConfig(filename=os.path.join(root_path, 'output.log'), level=logging.INFO)
+```
+
+So the **root** logger owns a `FileHandler` at INFO. Then:
+
+| logger | handlers | where its records go |
+|---|---|---|
+| `src.stages.<stage>` | `console_handler` (a `StreamHandler` → stderr), attached in each stage | **the console** *and*, by propagation to root, `output.log` |
+| `src.utils.modeling.tuning` | `console_handler`, attached at module level — the only library module that does | the console *and* `output.log` |
+| every other `src.utils.*` | none | **`output.log` ONLY** |
+
+Verified by emitting a probe from `src.utils.metrics.evaluation` with the stage preamble loaded: nothing on stderr,
+both records present in `output.log`. `reporting`'s "summed N hourly items into D days" — the line whose absence started
+this — appears there **7 times**.
+
+`output.log` sits at the repo root, is gitignored (`/output.log`), is currently **427 KB**, is appended to by every
+process including concurrent stage subprocesses with no run separation or rotation, and **nothing in `CLAUDE.md`,
+`README.md` or `job_scripts/README.md` mentions it exists**. A diagnostic you must already know to look for, in an
+undocumented shared file, is not far from having none — but the record is there, which makes this an ergonomics defect
+rather than a data-loss one.
+
+What is affected, in rough order of how much it matters:
 
 * ⚠️ `evaluation.run_metric_suite`'s **degenerate-configuration warning** — the one naming `kind: probability` when a
-  shared occurrence cut meets a probability field. Three config files, a docstring and this plan all describe it as
-  the runtime guard behind a bug that produces an entire contingency table of nonsense without raising. It has never
-  been audible. The DAILY instance of that same bug was caught by a human reading a confusion matrix, which is
-  precisely what the guard was supposed to prevent.
+  shared occurrence cut meets a probability field. Three config files and a docstring describe it as the runtime guard
+  behind a bug that produces an entire contingency table of nonsense without raising. It fires, into `output.log`. The
+  DAILY instance of that same bug was caught by a human reading a confusion matrix, which is precisely what the guard
+  was supposed to prevent — and it would not have been prevented, because nobody was reading that file.
 * `search.apply_constraints`' two decision logs — "forcing `loss.intensity_weight_gamma` to 0" and "the sampled
   `unet` block is ignored for this trial". Both record a **change to the trial** that the trials table does not show.
 * `reporting`'s "Requested plot date is not in the evaluated split; skipped" — a figure the user asked for, absent.
@@ -149,6 +168,15 @@ silently lost, in rough order of how much it matters:
 then REMOVE the eight per-stage `addHandler` calls plus `tuning.py`'s and `run.py`'s `lazy.logger` one — otherwise
 every stage record is emitted twice, once by its own handler and once by the ancestor's. Ten files for a two-line
 idea, which is why it belongs to this step rather than to a block doing something else.
+
+While there, decide `output.log` itself: one unrotated file at the repo root, shared by every concurrent process, is
+the wrong destination for a pipeline whose outputs otherwise live under `$OUTPUT_ROOT`. Either move it there per run or
+drop the `basicConfig` call and let the console handler be the only sink.
+
+⚠️ **Caveat on the "it fires" claim**: `src.utils.*` loggers are at `NOTSET`, so their effective level is inherited
+from root — which `basicConfig(level=INFO)` sets to INFO. Remove or change that call and every library `logger.info`
+becomes invisible everywhere, since with no handler found Python's `lastResort` only emits WARNING and above. The two
+halves of this defect are therefore coupled: fix the handler, and check the level.
 
 ⚠️ Until it lands, treat *"the code warns about X"* as false wherever X lives in `src/utils`: the record is emitted
 and then dropped. Every such claim in a config or docstring is aspirational, and the configs that make it now say so.

@@ -590,12 +590,49 @@ def test_the_HOURLY_run_uses_the_THRESHOLD_FREE_fss_form(hourly_metrics):
     assert not [key for key in hourly_metrics if key.startswith('fss_occurrence')], sorted(hourly_metrics)
 
 
-def test_the_HOURLY_categorical_cut_is_on_the_PROBABILITY(hourly_metrics):
-    """`kind: probability` cuts the PREDICTION at 0.5 and leaves the labels alone. Under a shared `occurrence` cut the
-    prediction side becomes `p > 0`, which fires wherever any probability is non-zero — POD ~ 1 and a contingency table
-    of nonsense, with nothing raised. The keys carry the `p50` name, which is what proves which entry resolved."""
-    assert 'pod_p50' in hourly_metrics, sorted(hourly_metrics)
-    assert hourly_metrics['pod_p50'] <= 1.0
+def test_the_HOURLY_categorical_cuts_form_a_MONOTONE_ladder(hourly_metrics):
+    """⭐ `kind: probability` cuts the PREDICTION and leaves the labels alone. Under a shared `occurrence` cut the
+    prediction side would become `p > 0`, firing wherever any probability is non-zero — POD ~ 1 and a contingency table
+    of nonsense, with nothing raised.
+
+    The ladder p10..p50 lets that be asserted as a PROPERTY rather than as a presence check: raising the decision
+    threshold can only turn a hit into a miss, so **POD is non-increasing along the ladder**, and likewise the frequency
+    bias. That fails if the cuts were resolved in the wrong order, if a `pNN` entry silently fell back to the
+    occurrence event (every rung would then be equal AND ~1), or if the observation side were being cut too.
+
+    ⚠️ Only rungs the run actually emitted are compared: a cut above the model's maximum probability yields an empty
+    table, so `pod` there is 0/0 and is dropped as non-finite rather than written. That is expected at a 0.43 % base
+    rate — see `metrics_hourly.yaml`'s note on why the ladder exists at all.
+    """
+    ladder = ('p10', 'p20', 'p30', 'p40', 'p50')
+    pods = [(name, hourly_metrics[f'pod_{name}']) for name in ladder if f'pod_{name}' in hourly_metrics]
+    assert pods, f'no pod_p<NN> key at all: {sorted(hourly_metrics)}'
+    assert all(0.0 <= value <= 1.0 for _, value in pods), pods
+
+    values = [value for _, value in pods]
+    assert values == sorted(values, reverse=True), \
+        f'POD must not RISE as the decision threshold rises: {pods}'
+
+    biases = [hourly_metrics[f'frequency_bias_{name}'] for name in ladder
+              if f'frequency_bias_{name}' in hourly_metrics]
+    assert biases == sorted(biases, reverse=True), f'frequency bias must not rise with the cut: {biases}'
+
+
+def test_the_HOURLY_threshold_free_scores_are_IDENTICAL_across_the_ladder(hourly_metrics):
+    """The documented cost of the ladder, pinned so it stays a known redundancy rather than becoming a puzzle.
+
+    `roc_auc`, `average_precision` and `dice` take no decision cut — their observation side is the same occurrence
+    event for every `kind: probability` entry — so the five rungs report five identical copies. 15 keys where 3 would
+    do, and `roc_pr_curves` draws five coincident lines. Not fixable from the config: `metrics.categorical.scores`
+    applies one score list to every threshold, so separating them is a change to `run_metric_suite`.
+
+    If this ever FAILS, the redundancy has become real information and the note in `metrics_hourly.yaml` is stale.
+    """
+    for score in ('roc_auc', 'average_precision', 'dice'):
+        values = {name: hourly_metrics[f'{score}_{name}']
+                  for name in ('p10', 'p20', 'p30', 'p40', 'p50') if f'{score}_{name}' in hourly_metrics}
+        assert values, f'{score} emitted at no rung: {sorted(hourly_metrics)}'
+        assert len(set(values.values())) == 1, f'{score} DIFFERS across cuts, so it is not threshold-free: {values}'
 
 
 def test_the_HOURLY_report_draws_the_RELIABILITY_diagram(hourly_pipeline_run):

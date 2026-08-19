@@ -728,11 +728,12 @@ write by accident:
    either side.
    Also newly documented and previously absent anywhere: seasonality is a **6.9× swing** in the hourly positive rate
    (DJF 0.1233 % → JJA 0.8469 %), which is the real justification for the smoke tiers slicing mid-July.
-5. **A guard the suite cannot see is broken.** `test_a_shared_occurrence_cut_on_a_probability_field_WARNS` passes
-   because `caplog` installs its own handler. In a real run the record is emitted and dropped — only
-   `tuning.py` attaches `console_handler` (see the `src/utils` logging item in
-   [step-5-portability.md](step-5-portability.md)). The test proves the record is *emitted*, never that a user *sees*
-   it, and no test in this design could.
+5. **A guard the suite cannot see is unreachable in practice.** `test_a_shared_occurrence_cut_on_a_probability_field_WARNS`
+   passes because `caplog` installs its own handler. In a real run the record IS emitted — and goes to `output.log` at
+   the repo root, never to the console or the job log anyone is watching, because only `tuning.py` attaches
+   `console_handler` among library modules (measured; see the `src/utils` logging item in
+   [step-5-portability.md](step-5-portability.md), which this corrects — the records are misrouted, not discarded).
+   The test proves the record is *emitted*, never that a user *sees* it, and no test in this design could.
 
 #### 5. Recommended order
 

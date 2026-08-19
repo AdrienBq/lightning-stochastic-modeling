@@ -21,8 +21,10 @@
 # the specification; this is that note applied.)
 #
 #   1. thresholds        h3/h6/h12 REMOVED — hour bands are defined on a 0-24 daily count and do not exist on a 0/1
-#                        target. `p50` ADDED as `kind: probability`: the decision cut, on the PREDICTION side only.
-#   2. categorical       thresholds -> [p50]. ⚠️ THE LOAD-BEARING EDIT OF THIS FILE — see the block below.
+#                        target. `p10`..`p50` ADDED as `kind: probability`: the decision cuts, on the PREDICTION
+#                        side only.
+#   2. categorical       thresholds -> [p10, p20, p30, p40, p50]. ⚠️ THE LOAD-BEARING EDIT OF THIS FILE — the KIND
+#                        matters more than the levels; see the block below.
 #   3. continuous        `r2.thresholds` REMOVED (the observed-positive subgroup has a CONSTANT observation, so its
 #                        R^2 is 0/0); the unconditioned `r2` is kept and is the Brier skill score against a constant
 #                        base rate.
@@ -50,7 +52,7 @@
 # ---------------------------------------------------------------------------------------------------------------------
 # WHAT THE HOURLY TASK GAINS — the four keys that are structurally NaN or absent in a daily run:
 #
-#     brier_skill_score  ·  explained_deviance  ·  dice_occurrence (here `dice_p50`)  ·  the reliability diagram
+#     brier_skill_score  ·  explained_deviance  ·  dice_occurrence (here `dice_p<NN>`)  ·  the reliability diagram
 #
 # All four need a CALIBRATED PROBABILITY, and the one-head design gives a daily model none (there is no occurrence
 # head — see config/deterministic_unet/search_space_daily.yaml for that decision). Here the prediction IS the probability,
@@ -90,21 +92,39 @@ baselines:
                                                         # it. Kept so the two files' baseline blocks stay identical.
 
 # =====================================================================================================================
-# Named events. TWO entries, and they are not two levels of one quantity — they cut DIFFERENT SIDES.
+# Named events. Two KINDS, and they cut DIFFERENT SIDES — that is the distinction, not the level.
 #
-#   occurrence  the OBSERVED event. On a 0/1 target `target > 0` is the label itself, read as it is.
-#   p50         the DECISION THRESHOLD, on the PREDICTION only. `kind: probability` keeps the observation side at the
-#               occurrence event and cuts the prediction at `p >= 0.5`.
+#   occurrence      the OBSERVED event. On a 0/1 target `target > 0` is the label itself, read as it is.
+#   p10 .. p50      DECISION THRESHOLDS, on the PREDICTION only. `kind: probability` keeps the observation side at the
+#                   occurrence event and cuts the prediction at `p >= value`.
+#
+# ⚠️ FIVE decision cuts, not one, and the reason is the base rate. The measured hourly positive class is 0.43 %
+# (README.md), so a CALIBRATED model rarely exceeds p = 0.5 anywhere — the block 4f gate came back with
+# `pod_p50 = csi_p50 = ets_p50 = frequency_bias_p50 = 0` and `far_p50` dropped as 0/0, which is a true statement about
+# the model ("it never forecasts 50 % anywhere") and a useless contingency table. A ladder from 0.1 to 0.5 puts at
+# least one cut in the populated part of the probability distribution whatever the model's sharpness, and reading
+# pod/far across the ladder IS the operating-characteristic curve in tabular form.
+#
+# ⚠️ CONSEQUENCE, so it is not a surprise in the report: the three THRESHOLD-FREE scores in the categorical group
+# (`roc_auc`, `average_precision`, `dice`) do not depend on the cut at all — their observation side is the same
+# occurrence event for every `kind: probability` entry — so they come back as FIVE IDENTICAL COPIES
+# (`roc_auc_p10 == roc_auc_p20 == …`), 15 keys where 3 would do, and `roc_pr_curves` draws five coincident curves.
+# Harmless but untidy. It is not fixable from the config: `metrics.categorical.scores` applies one score list to every
+# threshold, so separating them would be a code change to `run_metric_suite`. Read any one of the five.
 #
 # ⚠️ `occurrence` carries NO `pred_value` here, unlike in metrics_daily.yaml where it must (`pred_value: 1`, or a softplus
 # head satisfies `hours > 0` almost everywhere and the contingency table collapses). Nothing in THIS file cuts the
 # prediction at the occurrence level: `occurrence` is used only where a score conditions on the OBSERVED event — the
 # `r2` subgroup, FSS's observed fractions, the reliability diagram, the Brier/deviance baselines and the ensemble rank
-# histogram. The prediction-side cut is `p50`'s job and `p50`'s alone.
+# histogram. The prediction-side cuts are the `pNN` entries' job and theirs alone.
 # =====================================================================================================================
 thresholds:
     occurrence: {kind: occurrence}                      # observed: target > 0 — the 0/1 label
-    p50: {kind: probability, value: 0.5}                # observed: the label; predicted: p >= 0.5
+    p10: {kind: probability, value: 0.1}                # observed: the label; predicted: p >= 0.1
+    p20: {kind: probability, value: 0.2}
+    p30: {kind: probability, value: 0.3}
+    p40: {kind: probability, value: 0.4}
+    p50: {kind: probability, value: 0.5}                # the nominal cut; often empty at a 0.43 % base rate
 
 metrics:
     # -----------------------------------------------------------------------------------------------------------
@@ -135,27 +155,29 @@ metrics:
     # Categorical scores — THE HEADLINE GROUP, and the one edit in this file that is a change of KIND rather than a
     # trim.
     #
-    # ⚠️ `thresholds: [p50]`, NEVER `[occurrence]`. `kind: occurrence` cuts BOTH sides at `> 0`, which on a
+    # ⚠️ The thresholds must be the `pNN` (`kind: probability`) entries, NEVER `[occurrence]`. `kind: occurrence`
+    # ⚠️ cuts BOTH sides at `> 0`, which on a
     # ⚠️ probability field marks every cell carrying any non-zero probability as a predicted event: POD ~ 1,
     # ⚠️ FAR ~ 1 - base_rate, an entire contingency table of nonsense — and NO error is raised, because every value
     # ⚠️ involved is individually legal. THE CONFIG IS THE ONLY REAL GUARD. `run_metric_suite` does log a warning
-    # ⚠️ naming `kind: probability` when it detects the combination — but do not rely on seeing it: only
-    # ⚠️ `src/utils/modeling/tuning.py` attaches the console handler, so no other `src/utils` warning reaches a
-    # ⚠️ pipeline log at all (found by the block 4f gate; recorded in .claude/plans/step-5-portability.md).
+    # ⚠️ naming `kind: probability` when it detects the combination — but do not expect to SEE it: only
+    # ⚠️ `src/utils/modeling/tuning.py` attaches the console handler, so every other `src/utils` record goes to
+    # ⚠️ `output.log` at the repo root and never to the console or the job log you are watching (measured in block 4g;
+    # ⚠️ recorded in .claude/plans/step-5-portability.md).
     # ⚠️ This is the exact class of bug that made the DAILY occurrence table read "lightning everywhere" until
     # ⚠️ `pred_value: 1` was added there — and that one was caught by a human reading a confusion matrix.
     #
-    # Two of the ten scores are THRESHOLD-FREE and unaffected by where p50 sits — they rank or integrate the whole
+    # THREE of the ten scores are THRESHOLD-FREE and unaffected by where the cut sits — they rank or integrate the whole
     # probability field:
     #   * roc_auc / average_precision: PR-AUC is the more informative at this base rate (ROC-AUC is optimistic when
     #     negatives dominate), which is why `average_precision` — not ROC-AUC — carries 0.50 of the classification
     #     selection composite.
     #   * dice: SOFT dice, computed on the probability with no cut, so it is the eval-time complement of the `dice`
-    #     TRAINING loss. In a daily run it is emitted nowhere (no probability); here it is emitted as `dice_p50`
-    #     and measures exactly what that loss optimized.
+    #     TRAINING loss. In a daily run it is emitted nowhere (no probability); here it is emitted once per cut
+    #     (identically, since it takes no cut) and measures exactly what that loss optimized.
     # -----------------------------------------------------------------------------------------------------------
     categorical:
-        thresholds: [p50]
+        thresholds: [p10, p20, p30, p40, p50]
         scores: [pod, far, csi, ets, hss, sedi, frequency_bias, roc_auc, average_precision, dice]
 
     # -----------------------------------------------------------------------------------------------------------
@@ -262,7 +284,7 @@ reporting:
                                       # the median one; see the caveat above
         - roc_pr_curves               # ⭐ ROC + precision-recall per threshold — THE discrimination figure of this
                                       # task, and the one backing average_precision
-        - confusion_matrix            # 2x2 contingency counts at p50, behind pod/far/csi/ets
+        - confusion_matrix            # 2x2 contingency counts, one panel PER CUT, behind pod/far/csi/ets
         - reliability                 # ⭐ the occurrence reliability diagram: self-skips on every daily run, and is
                                       # THE calibration diagnostic here
         - psd_curves                  # radially-averaged PSD, model vs obs vs baselines

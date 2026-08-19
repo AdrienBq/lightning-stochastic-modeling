@@ -583,8 +583,18 @@ def test_the_hourly_metrics_config_cuts_the_PROBABILITY_not_the_occurrence(hourl
 
 def test_the_hourly_metrics_config_HAS_NO_HOUR_BANDS(hourly_metrics):
     """h3/h6/h12 are defined on a 0-24 daily count. On a 0/1 target ``>= 3 hours`` is an empty event, so every score at
-    those bands would be NaN — reported, and indistinguishable from a model that failed to learn."""
-    assert set(hourly_metrics['thresholds']) == {'occurrence', 'p50'}, sorted(hourly_metrics['thresholds'])
+    those bands would be NaN — reported, and indistinguishable from a model that failed to learn.
+
+    ⚠️ This asserts the INTENT — no `absolute` hour band survives — rather than pinning the exact threshold set. It
+    used to require exactly ``{occurrence, p50}``, which made it fail when the decision ladder grew to p10..p50: it was
+    guarding the *number* of entries while claiming to guard their *kind*. A test that has to be edited whenever a
+    level is added is not pinning the property its name states.
+    """
+    thresholds = hourly_metrics['thresholds']
+    bands = {name: spec for name, spec in thresholds.items() if spec.get('kind') == 'absolute'}
+    assert not bands, f'hour bands survive in the hourly suite: {bands}'
+    assert set(thresholds) - {'occurrence'}, 'no decision cut at all'
+    assert all(name.startswith('p') for name in set(thresholds) - {'occurrence'}), sorted(thresholds)
 
 
 def test_the_hourly_OCCURRENCE_event_carries_NO_prediction_side_cut(hourly_metrics):
