@@ -32,12 +32,15 @@ def test_the_cache_key_is_built_from_all_three_shared_primitives():
         assert primitive in source, primitive
 
 
-def test_the_stage_seed_is_derived_and_EXPORTED_as_pipeline_seed():
-    """The other half of the automatic-seeding mechanism: this file computes the seed and puts it in the subprocess
-    environment, and ``src/stages/__init__.py`` reads it back (see ``init_test.py``)."""
-    source = inspect.getsource(run_stage)
-    assert 'stage_seed' in source
-    assert 'PIPELINE_SEED' in source
+# ⛔ `test_the_stage_seed_is_derived_and_EXPORTED_as_pipeline_seed` was here, asserting `'stage_seed' in source` and
+# `'PIPELINE_SEED' in source`. DELETED in block 4g as strictly dominated:
+# `test_the_pipeline_seed_is_exported_and_matches_the_shared_derivation` below drives `execute_stage` and asserts
+# `os.environ['PIPELINE_SEED']` equals `lazy.stage_seed(code_hash, params_hash(post_pop_params))` exactly. A substring
+# search cannot fail where that one passes, and it WOULD pass if both names appeared only in a comment.
+#
+# The three source-text tests above are KEPT deliberately: each asserts a DELEGATION contract ("this file calls the
+# shared helper rather than carrying its own copy") that no behavioural test states directly, which is a different
+# claim from "the mechanism works".
 
 
 def test_the_environment_substitution_uses_the_shared_parser():
@@ -439,10 +442,12 @@ def test_both_backends_build_their_context_through_the_same_helper():
 
 
 # =====================================================================================================================
-# Blocked until Step 4
+# ⛔ `test_a_full_pipeline_run_end_to_end` lived here as an empty body under `@pytest.mark.skip`, reserving the check
+# "the tests above stub mlflow.run, so nothing covers the subprocess dispatch or the real store round trip".
+#
+# DELETED in block 4g. Its skip reason said "covered by Step 4's end-to-end gate" and that gate now exists:
+# `tests/pipeline_e2e_test.py` runs `run_project.py` for real on a synthetic $DATA_ROOT, and asserts exactly what the
+# placeholder was reserving — one child run per stage in the tracking store, each FINISHED, the metrics JSON logged
+# back to its stage's run, and every declared artifact on disk. It was the only `skip` marker in the suite, and its
+# stated premise ("src/stages/ holds only the template's files today") stopped being true in block 4a.
 # =====================================================================================================================
-@pytest.mark.skip(reason='needs an MLflow tracking server and the Step 4 stages; covered by Step 4\'s end-to-end gate')
-def test_a_full_pipeline_run_end_to_end():
-    """The tests above stub ``mlflow.run`` and the tracking client, which covers the decision logic but not the
-    subprocess dispatch or the real store round trip. Those need a live server and at least one real stage;
-    ``src/stages/`` holds only the template's files today."""

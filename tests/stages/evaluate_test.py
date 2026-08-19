@@ -366,10 +366,24 @@ def test_the_stage_imports_root_path_BEFORE_any_src_import(repo_root):
 # =====================================================================================================================
 FAMILIES = ('deterministic_unet', 'mc_dropout', 'diffusion')
 
+# The families whose `predict_step` returns `ensemble_members`. The deterministic U-net does not, so the whole ensemble
+# group is SKIPPED for it rather than written as NaN — which is why the cross-family comparison compares COLUMNS of a
+# union table, not per-family key sets. See `test_families_are_scored_by_the_SAME_suite_MODULO_ensemble_capability`.
+STOCHASTIC_FAMILIES = ('mc_dropout', 'diffusion')
+ENSEMBLE_PREFIXES = ('crps', 'almost_fair_crps', 'spread_skill', 'rank_histogram')
+
 
 def _env(name, default=None):
     value = os.environ.get(name)
     return value if value not in (None, '') else default
+
+
+def _without_ensemble(keys):
+    return {key for key in keys if not key.startswith(ENSEMBLE_PREFIXES)}
+
+
+def _ensemble_only(keys):
+    return {key for key in keys if key.startswith(ENSEMBLE_PREFIXES)}
 
 
 def _configured_evaluations(repo_root):
@@ -411,15 +425,59 @@ def _artifacts_for(repo_root, family):
     return _available_evaluations(repo_root).get(family, (None, None))
 
 
+def _discovery_hint():
+    """The REAL reason discovery found nothing, named in the skip message.
+
+    ⚠️ Block 4g found these tests skipping while the artifacts existed, under a message that said "run its pipeline
+    first" — advice for a problem the user did not have. `OUTPUT_ROOT` was simply unset, so the discovered paths were
+    ``/deterministic_and_mc_dropout_smoke_cpu/…``: ABSOLUTE, because `{{$OUTPUT_ROOT}}` substitutes to the empty
+    string, and `os.path.join(repo_root, '/abs')` discards `repo_root` entirely. That is the footgun
+    `parse_config_test.py` documents in its own test, and this suite was quietly a victim of it.
+    """
+    if not _env('OUTPUT_ROOT'):
+        return ('⚠️ OUTPUT_ROOT is UNSET, so every discovered path resolved to the filesystem root and could never '
+                'exist — this is a missing environment variable, NOT a missing checkpoint. Export DATA_ROOT and '
+                'OUTPUT_ROOT to run these.')
+    return (f'OUTPUT_ROOT={_env("OUTPUT_ROOT")} is set, so this really is a missing artifact: run the family\'s '
+            f'pipeline (or its *_smoke_cpu tier) first.')
+
+
 def test_the_DISCOVERY_finds_all_three_families_in_the_shipped_config(repo_root):
-    """⭐ Runs ALWAYS, with no artifacts, and it is the test that keeps the two below from going quietly dormant. If the
-    eval config's ``output-path`` leaf were renamed, discovery would return nothing, both tests would skip forever, and
+    """⭐ Runs ALWAYS, with no artifacts, and it is the test that keeps the ones below from going quietly dormant. If the
+    eval config's ``output-path`` leaf were renamed, discovery would return nothing, they would skip forever, and
     the suite would still be green — the same failure mode the env-var gating had, just better hidden."""
     declared = _configured_evaluations(repo_root)
     assert set(declared) == set(FAMILIES), sorted(declared)
     for family, (prepared_dir, model_path) in declared.items():
         assert model_path.endswith('best_model.ckpt'), (family, model_path)
         assert 'prepared' in prepared_dir, (family, prepared_dir)
+
+
+def test_the_DISCOVERY_honours_OUTPUT_ROOT(repo_root, monkeypatch):
+    """⭐ The other half of the anti-dormancy guard, and the half that was missing (block 4g).
+
+    The guard above checks the config LEAF; this checks the ENVIRONMENT, which is what actually silenced these tests.
+    Every discovered path must sit under `$OUTPUT_ROOT` — because with the variable unset they become absolute at `/`,
+    `os.path.isdir` says no, and the tests skip while claiming a checkpoint is missing.
+
+    Runs always, needs no artifacts, and would have caught the real dormancy on the day it started.
+    """
+    monkeypatch.setenv('OUTPUT_ROOT', '/MARKER')
+    declared = _configured_evaluations(repo_root)
+    assert declared, 'discovery returned nothing at all'
+    for family, (prepared_dir, model_path) in declared.items():
+        assert prepared_dir.startswith('/MARKER'), (family, prepared_dir)
+        assert model_path.startswith('/MARKER'), (family, model_path)
+
+
+def test_an_UNSET_output_root_is_reported_as_the_ENVIRONMENT_not_a_missing_checkpoint(monkeypatch):
+    """The skip message has to name the cause the user can act on. "Run the pipeline first" sent block 4g looking for
+    artifacts that were already there."""
+    monkeypatch.delenv('OUTPUT_ROOT', raising=False)
+    assert 'OUTPUT_ROOT is UNSET' in _discovery_hint()
+
+    monkeypatch.setenv('OUTPUT_ROOT', '/somewhere')
+    assert 'missing artifact' in _discovery_hint()
 
 
 def _run_stage(repo_root, prepared_dir, model_path, model_family, out_dir, report_dir, metrics_path):
@@ -466,8 +524,8 @@ def test_the_stage_scores_each_family_on_REAL_artifacts(family, repo_root, tmp_p
     ``PROB_EVAL_PREPARED`` + ``PROB_EVAL_<FAMILY>`` to point at something the configs do not name."""
     prepared_dir, checkpoint = _artifacts_for(repo_root, family)
     if not (prepared_dir and checkpoint):
-        pytest.skip(f'no {family} checkpoint yet — run its pipeline (or its *_smoke_cpu tier) first, '
-                    f'or set PROB_EVAL_PREPARED and PROB_EVAL_{family.upper()}')
+        pytest.skip(f'no {family} artifacts found. {_discovery_hint()} '
+                    f'(or set PROB_EVAL_PREPARED and PROB_EVAL_{family.upper()} to override)')
 
     out_dir = str(tmp_path / family / 'eval')
     report_dir = str(tmp_path / family / 'report')
@@ -478,15 +536,32 @@ def test_the_stage_scores_each_family_on_REAL_artifacts(family, repo_root, tmp_p
     _check_outputs(family, metrics_path, report_dir)
 
 
-def test_all_available_families_are_scored_by_the_SAME_metric_suite(repo_root, tmp_path):
-    """⭐ The invariant the shared evaluation exists for. Two families reporting different metric keys means
-    ``evaluate`` grew a family-specific path, and the cross-family comparison table would come out with holes in it.
+def test_families_are_scored_by_the_SAME_suite_MODULO_ensemble_capability(repo_root, tmp_path):
+    """⭐ The invariant the shared evaluation exists for — stated correctly.
 
-    Note each family is scored on ITS OWN prepared directory, which is what the pipelines actually produce — the
-    diffusion one differs in residual mode. The claim is that the SUITE is shared, not the data."""
+    ⚠️ This test used to assert STRICT equality of metric keys across families (``keys == reference``) and it was
+    WRONG: the design deliberately violates it. The deterministic family's ``predict_step`` emits no
+    ``ensemble_members``, so the whole ensemble group is SKIPPED rather than written as NaN, and that is exactly what
+    makes the cross-family comparison compare the COLUMNS of a union table. Two tests in this file contradicted each
+    other — ``test_the_deterministic_family_reports_NO_ensemble_scalars`` requires those six keys to be absent — and
+    only the dormancy below kept it invisible: run with both roots exported, the strict version failed with
+    ``crps``, ``crps_occ``, ``almost_fair_crps``, ``almost_fair_crps_occ``, ``spread_skill_ratio`` and
+    ``rank_histogram_reliability`` extra in the stochastic family's set. Found in block 4g.
+
+    So the claim is split into the two things that are actually true, and together they still catch a
+    family-specific evaluation path:
+
+    1. **Outside the ensemble group, every family reports the SAME keys.** That is the shared suite.
+    2. **Inside it, the keys appear exactly for the families that emit members.** That is the capability, and asserting
+       it means a stochastic family silently losing its ensemble scores still fails here.
+
+    Each family is scored on ITS OWN prepared directory, which is what the pipelines produce — diffusion's differs in
+    residual mode. The claim is that the SUITE is shared, not the data.
+    """
     available = {family: paths for family, paths in _available_evaluations(repo_root).items()}
     if len(available) < 2:
-        pytest.skip(f'needs at least two family checkpoints; found {sorted(available)}')
+        pytest.skip(f'needs at least two family checkpoints; found {sorted(available)}. '
+                    f'{_discovery_hint()}')
 
     key_sets = {}
     for family, (prepared_dir, checkpoint) in available.items():
@@ -497,9 +572,21 @@ def test_all_available_families_are_scored_by_the_SAME_metric_suite(repo_root, t
         _run_stage(repo_root, prepared_dir, checkpoint, family, out_dir, report_dir, metrics_path)
         key_sets[family] = _check_outputs(family, metrics_path, report_dir)
 
+    # 1. the shared suite: identical keys once the capability-gated group is set aside
     reference_family, reference = next(iter(key_sets.items()))
+    shared_reference = _without_ensemble(reference)
     for family, keys in key_sets.items():
-        assert keys == reference, (
+        shared = _without_ensemble(keys)
+        assert shared == shared_reference, (
             f'{family} and {reference_family} were scored by DIFFERENT suites — '
-            f'only {family}: {sorted(keys - reference)}; only {reference_family}: {sorted(reference - keys)}'
+            f'only {family}: {sorted(shared - shared_reference)}; '
+            f'only {reference_family}: {sorted(shared_reference - shared)}'
         )
+
+    # 2. the capability: the ensemble group is present exactly for the families that emit members
+    for family, keys in key_sets.items():
+        ensemble = _ensemble_only(keys)
+        if family in STOCHASTIC_FAMILIES:
+            assert ensemble, f'{family} is stochastic but reported no ensemble scores at all'
+        else:
+            assert not ensemble, f'{family} emits no members, so these must be absent rather than NaN: {sorted(ensemble)}'

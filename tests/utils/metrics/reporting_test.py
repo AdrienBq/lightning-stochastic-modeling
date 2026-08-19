@@ -735,6 +735,7 @@ def test_all_FOURTEEN_inventory_figures_are_wired(metrics_config):
     assert len(metrics_config['reporting']['figures']) == 14, metrics_config['reporting']['figures']
 
 
+@pytest.mark.source_invariant
 def test_the_never_implemented_qq_plot_is_gone_from_BOTH_the_config_and_the_code(metrics_config):
     """It was declared in the config and never implemented, so it self-skipped on every run — a figure that looked
     configured and produced nothing. Removed from both sides in §4."""

@@ -228,6 +228,7 @@ def test_apply_constraints_repairs_IN_PLACE_as_well_as_returning():
     assert original['loss']['intensity_weight_gamma'] == 0.0, 'documented in-place behaviour'
 
 
+@pytest.mark.source_invariant
 def test_the_transform_conditioned_rule_is_gone():
     """Branch A carried an extra rule disabling monotone regression calibration under the gaussianized target
     transform. The transform is removed, so the rule is dead — branch D was taken as the base precisely because it

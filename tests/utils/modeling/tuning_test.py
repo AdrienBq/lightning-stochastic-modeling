@@ -115,6 +115,7 @@ def test_the_distribution_keys_are_the_target_statistics_worth_warning_about():
     assert set(tuning._DISTRIBUTION_KEYS) == {'hourly_threshold', 'zero_proportion', 'positive_mean'}
 
 
+@pytest.mark.source_invariant
 def test_no_transform_identifier_survives_anywhere_in_the_module():
     """The cross-cutting check for this file: the F-transform is removed, so a reference to it here would mean a code
     path expecting a space that no longer exists."""

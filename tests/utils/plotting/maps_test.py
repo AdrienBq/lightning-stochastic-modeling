@@ -331,6 +331,7 @@ def test_the_diff_map_MACHINERY_is_gone():
         assert not hasattr(maps, name), f'{name} came back without its counterparts'
 
 
+@pytest.mark.source_invariant
 def test_there_is_no_log_colour_scale():
     """``LogNorm`` / ``colorbar_scale: log`` existed for the heavy-tailed count field and is pointless on 0-24."""
     assert 'LogNorm' not in inspect.getsource(maps)

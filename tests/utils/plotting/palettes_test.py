@@ -130,6 +130,7 @@ def test_the_cycle_holds_no_duplicate_colours():
     assert len(set(cycle_colors)) == len(cycle_colors)
 
 
+@pytest.mark.source_invariant
 def test_the_lightning_ramps_are_NOT_defined_here():
     """A deliberate departure from the step-3 plan's line 40. The warm/cool/grey ramps define the lightning-hours VALUE
     AXIS and have exactly one consumer, ``make_lightning_cmap``, in the same file. Moving them here would separate that

@@ -736,13 +736,26 @@ write by accident:
 
 #### 5. Recommended order
 
-**`4g-1` fix the contradicting assertion** (gap 2b) — the only finding where a test currently states something false ·
-`4g-2` un-dormant the real-artifact tests: fail loudly when `OUTPUT_ROOT` is unset instead of skipping, and keep the
-run opt-in given the 1 h 53 m cost · `4g-3` the hourly e2e parametrisation (gap 1, highest value per unit effort) ·
-`4g-4` the `code_state_hash` property test (gap 3) · `4g-5` delete the dead placeholder (item 1) and the dominated
-source-text tests (item 3) · `4g-6` mark the merge guards (item 2) · then decide `--cov-fail-under` against the
-**93.84 %** measurement rather than the 87.62 % one — and record in `pytest.ini` that the two differ only by
-subprocess tracing, so the residue explanation stops being half wrong.
+### ✅ ALL SIX APPLIED (2026-08-19). 1398 → 1415 passing, 5 → 4 skipped
+
+| | what was done | verified by |
+|---|---|---|
+| `4g-1` ✅ | `test_all_available_families_are_scored_by_the_SAME_metric_suite` → `…_MODULO_ensemble_capability`. The false strict-equality assertion is replaced by the two true claims: **outside** the ensemble group every family reports the same keys (the shared suite), and **inside** it the keys appear exactly for the families that emit members (the capability). Still fails if a stochastic family silently loses its ensemble scores. | the contradiction with `test_the_deterministic_family_reports_NO_ensemble_scalars` is gone; both now pass together |
+| `4g-2` ✅ | Two always-on guards added. `test_the_DISCOVERY_honours_OUTPUT_ROOT` asserts every discovered path sits under `$OUTPUT_ROOT` — the check that was missing, since the old guard watched the config leaf while the environment was what silenced the tests. `_discovery_hint()` now names the real cause, so the skip reads *"⚠️ OUTPUT_ROOT is UNSET … this is a missing environment variable, NOT a missing checkpoint"* instead of sending you to look for artifacts you already have. Kept opt-in: they cost 1 h 53 m. | the 4 skips now print the cause; `test_an_UNSET_output_root_is_reported_as_the_ENVIRONMENT_not_a_missing_checkpoint` pins the message |
+| `4g-3` ✅ | **The hourly pipeline now runs in `pytest`** — a `hourly_pipeline_run` session fixture over the shipped hourly smoke config, derived the same one-line way, plus 12 assertions. A separate fixture rather than a parametrisation of `pipeline_run`, because branching eighteen exact daily assertions on the mode would trade them for eighteen conditional ones. It is also the **only** automated coverage of `materialize-features: false` — so of the `.pt` fallback reader, `DayGroupedShuffleSampler` and `split_index.csv`'s absolute `file` column. | 12 passed in 109 s: 0/1 uint8 `[T,H,W]` targets, no `features/`, the three daily-impossible keys, no hour bands, `fss_s*` threshold-free form, `p50` cut, the reliability diagram drawn, and `maps_<date>.png` per date |
+| `4g-4` ✅ | Four tests for the property `code_state_hash` is *named* for and never had: an edit to a tracked file changes the hash, a new untracked file changes it, an **ignored** file does not, and committing changes it again because `HEAD` moved. Built against a **throwaway git repo** in `tmp_path` — never `repo_root`, since the property requires making an edit and doing that in the developer's checkout would dirty their tree or strand a file on failure. The old test is kept, renamed to `…_is_a_deterministic_string`, which is what it actually asserted. | the ignored-file case is the one block 4g had to fix in the real repo (`.coverage`); the tree is verifiably clean after the run |
+| `4g-5` ✅ | Deleted `test_a_full_pipeline_run_end_to_end` (empty body, the suite's only `skip` marker, reason pointing at a gate that now exists, premise false since 4a) and `test_the_stage_seed_is_derived_and_EXPORTED_as_pipeline_seed` (dominated exactly by `test_the_pipeline_seed_is_exported_and_matches_the_shared_derivation`). Both replaced by a comment saying what was removed and where the coverage went. The three remaining source-text tests in `run_test.py` are **kept deliberately**: each asserts a DELEGATION contract no behavioural test states. | skip count 5 → 4 |
+| `4g-6` ✅ | `@pytest.mark.source_invariant` added to the six unmarked **merge guards** (`no_transform_identifier` ×2, `transform_conditioned_rule_is_gone`, `qq_plot_is_gone`, `lightning_ramps_are_NOT_defined_here`, `there_is_no_log_colour_scale`). Only merge guards were marked — delegation and permanent design contracts (the Fire wrappers, cartopy cannot degrade, imshow's kwargs) are not retired with the rebuild and stay out of the group. | `pytest -m source_invariant` collects 46 |
+| ➕ | **The gap the sparsity correction exposed**: nothing compared a fixture's parameters to the dataset, which is why 4g's own withdrawn finding was possible. `conftest.py` now records the measured rates with their provenance and `completeness_test.py` checks the fixture defaults against them, with a **per-fixture** tolerance so `hourly_field`'s deliberate 4.7× inflation (0.43 % over a 16×24 grid is 1.7 cells) is documented rather than hidden under a loose global bound. | mutating the constant back to the old wrong `0.0007` fails the test |
+
+⛔ **`--cov-fail-under` deliberately NOT raised.** It stays at 85 against a re-measured 87.72 %. `pytest.ini` now records
+the subprocess-tracing finding — that the default 87.62 % and the true 93.84 % differ only by whether
+`COVERAGE_PROCESS_START` is set, and that the floor is checked in the default mode so it can never be set against the
+higher figure. The residue explanation there is no longer half wrong.
+
+⚠️ **Still open from the assessment, by choice**: the 4 real-artifact tests remain opt-in rather than default (1 h 53 m),
+and the `src/utils` logging defect is Step 5's ([step-5-portability.md](step-5-portability.md)) — until it lands, a
+guard in `src/utils` is emitted and dropped, so `caplog` tests prove the record exists and never that a user sees it.
 
 ---
 
@@ -758,6 +771,13 @@ with evidence rather than impression:
 2. **Are they catching possible bugs?** Spot-check by **mutation**: break a source line, confirm the test that claims
    to cover it fails, revert. ⚠️ Verify the edit landed on an *executed* line — 5b's first gate-4 mutation hit a
    docstring, the code never changed, and the result read as "not caught".
+
+   ⚠️ **And verify the REVERT took, by re-running.** Block 4g mutated a constant `0.0043 → 0.0007` — six characters
+   for six, so the file SIZE never changed. pytest caches assertion-rewritten bytecode as
+   `__pycache__/<module>.cpython-311-pytest-<version>.pyc` and invalidates it on `(mtime, size)`, so the **mutated
+   bytecode outlived the restored source**: a plain `python -c 'import …'` read the correct value while `pytest` read
+   the mutated one, and the mutation nearly reached a commit. A same-length mutation is the dangerous kind. Either
+   change the length, or `find tests -name __pycache__ -type d -exec rm -rf {} +` after reverting.
 3. **Is the code well covered?** Both measurements, and the disagreement between them — they are not interchangeable
    ([Step 3](step-3-utils.md) §5c). Name what is still uncovered and why, rather than reporting a single percentage.
 

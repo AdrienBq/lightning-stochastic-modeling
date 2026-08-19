@@ -257,6 +257,17 @@ def target_stats():
 # ---------------------------------------------------------------------------------------------------------------------
 # Synthetic fields. The daily target is BOUNDED 0-24 integer lightning-hours and 95.3 % zero (README.md); fixtures that ignore
 # either property produce fields no score in this repo was designed for.
+#
+# ⭐ THE MEASURED positive rates, from `scripts/sparsity.py` over all 5843 samples (README.md carries the full table).
+# These exist so the fixture defaults below can be CHECKED against the dataset rather than chosen by feel —
+# `completeness_test.py::test_the_synthetic_field_fixtures_MATCH_the_measured_base_rates` is that check.
+#
+# ⚠️ It is not a formality. Block 4g reported "no fixture exercises the real base rate" after comparing
+# `active_fraction=0.05` against CLAUDE.md's claimed "~99.93 % zero" — a figure that was wrong by 67x. Measuring the
+# dataset showed the fixtures were right all along and the DOCUMENTATION was wrong. Nothing in the suite could catch
+# that, because nothing compared a fixture's parameters to the data. Now something does, and it fails from either side.
+MEASURED_DAILY_POSITIVE_RATE = 0.0470                # 1 - 0.952981, the daily 0-24 target
+MEASURED_HOURLY_POSITIVE_RATE = 0.0043               # 0.004294, the hourly 0/1 occurrence event at threshold 2
 # ---------------------------------------------------------------------------------------------------------------------
 @pytest.fixture
 def daily_field():

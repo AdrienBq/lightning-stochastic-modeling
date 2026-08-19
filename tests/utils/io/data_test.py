@@ -357,6 +357,7 @@ def test_the_transform_statistics_function_is_gone():
     assert not hasattr(data, 'compute_target_transform_stats')
 
 
+@pytest.mark.source_invariant
 def test_no_transform_identifier_survives_in_the_module():
     import inspect
 

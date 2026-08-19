@@ -195,3 +195,56 @@ def test_exemption_list_has_not_grown(repo_root):
         f'EXEMPT holds {len(EXEMPT)} entries but EXEMPT_COUNT is {EXEMPT_COUNT}. Exempting a function from the '
         f'every-function requirement must be a deliberate edit of BOTH, with a reason on the entry.'
     )
+
+
+# =====================================================================================================================
+# 3. The synthetic fixtures are calibrated to the REAL dataset  (block 4g)
+#
+# A suite review that checks a fixture against the documentation inherits the documentation's errors. Block 4g did
+# exactly that: it read `daily_field(active_fraction=0.05)` against CLAUDE.md's claimed "~99.93 % zero" and reported
+# that no fixture exercised the real base rate. Measuring the dataset (`scripts/sparsity.py`, all 5843 samples) showed
+# the claim was wrong by 67x and the fixture was almost exactly right.
+#
+# This is the check that was missing. It compares the fixtures' DEFAULTS with the MEASURED rates, so it fails from
+# either side — a fixture drifting away from the data, or the recorded rates drifting away from a re-measurement.
+# =====================================================================================================================
+def test_the_synthetic_field_fixtures_MATCH_the_measured_base_rates(daily_field, hourly_field):
+    """A tolerance PER FIXTURE, with its reason, rather than one loose bound over both — because the two are calibrated
+    differently on purpose and a global tolerance would hide that:
+
+    * ``daily_field`` is held to 2x. It sits at 1.1x the measured 4.70 %, so there is no reason to allow more.
+    * ``hourly_field`` is allowed 5x, and uses 4.7x of it. That is DELIBERATE INFLATION, not drift: the real 0.43 %
+      over ``SMALL_H x SMALL_W`` = 16x24 cells is **1.7 positive cells per map**, at which the ranking and categorical
+      scores are degenerate on most draws and the tests would be measuring emptiness. 2 % gives ~7.7 cells, which is
+      the smallest number that keeps them meaningful.
+
+    The point is the ORDER OF MAGNITUDE. SEDI and ETS are chosen *for* base-rate robustness, so exercising them at
+    30 % would prove nothing about this project — and 5x still catches the 67x error that motivated this test.
+    """
+    import inspect
+
+    from tests.conftest import MEASURED_DAILY_POSITIVE_RATE, MEASURED_HOURLY_POSITIVE_RATE
+
+    cases = (
+        ('daily_field', daily_field, 'active_fraction', MEASURED_DAILY_POSITIVE_RATE, 2.0),
+        ('hourly_field', hourly_field, 'base_rate', MEASURED_HOURLY_POSITIVE_RATE, 5.0),
+    )
+    for name, factory, parameter, measured, tolerance in cases:
+        default = inspect.signature(factory).parameters[parameter].default
+        ratio = default / measured
+        assert 1 / tolerance <= ratio <= tolerance, (
+            f'{name}({parameter}={default}) is {ratio:.1f}x the measured rate of {measured:.4f}, outside the '
+            f'{tolerance:g}x this fixture is allowed — either the fixture has drifted from the dataset, or '
+            f'scripts/sparsity.py should be re-run and the constant in conftest.py updated'
+        )
+
+
+def test_the_recorded_base_rates_are_PLAUSIBLE_for_this_dataset():
+    """An anti-typo guard on the constants themselves, since the test above trusts them. The daily rate must exceed the
+    hourly one — a cell needs only ONE qualifying hour in 24 to make a positive day — and both must be percent-scale.
+    A transposed digit (0.0043 -> 0.043) would silently widen the tolerance above by 10x."""
+    from tests.conftest import MEASURED_DAILY_POSITIVE_RATE, MEASURED_HOURLY_POSITIVE_RATE
+
+    assert 0 < MEASURED_HOURLY_POSITIVE_RATE < MEASURED_DAILY_POSITIVE_RATE < 0.5
+    assert MEASURED_DAILY_POSITIVE_RATE / MEASURED_HOURLY_POSITIVE_RATE > 5, \
+        'the daily rate should be an order of magnitude above the hourly one on a 24-hour aggregation'

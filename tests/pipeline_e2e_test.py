@@ -20,12 +20,30 @@ of the config could pass forever while the real pipeline was broken.
 exist: the real 101 x 149 grid, the real ``samples/*.pt`` contents, the real year split, that 8.7 MB x 5843 is
 tractable, and anything at all about GPU execution or about model quality.
 
-⚠️ **It costs ~70 s** (five python+torch subprocesses, two one-epoch fits and a report). The pipeline run is a
-SESSION-scoped fixture, so that is paid once no matter how many assertions read it.
+**BOTH TASKS run here** — the daily pipeline in sections 1-5 and the HOURLY one in section 6 (added in block 4g).
+Each has its own session-scoped fixture over its own shipped smoke config; see section 6's header for why they are two
+fixtures rather than one parametrisation.
 
-⚠️ **Coverage does not move.** Every stage runs in a subprocess, which ``pytest-cov`` does not see into without the
-``COV_CORE_*`` hook. ``tuning.py`` and ``stages/run.py`` gain confidence here without gaining measured lines — do not
-read this test as a reason to raise ``--cov-fail-under``.
+⚠️ **It costs ~70 s for the daily run and ~110 s for the hourly one** (five python+torch subprocesses each, two
+one-epoch fits and a report). Both are SESSION-scoped, so that is paid once no matter how many assertions read them.
+
+⚠️ **Coverage does not move by default, and that is a MEASUREMENT artifact rather than a fact about this test.** Every
+stage runs in a subprocess, which ``pytest-cov`` does not trace unless ``COVERAGE_PROCESS_START`` is set — and
+``coverage``'s hook (``a1_coverage.pth``) is already installed, and this fixture already inherits ``os.environ``, so it
+is one variable away. Block 4g measured both ways:
+
+===========================  ==========  ===============================
+                             default     ``COVERAGE_PROCESS_START`` set
+===========================  ==========  ===============================
+whole suite                  87.62 %     **93.84 %**
+``tuning.py``                25 %        **71 %**
+``stages/run.py``            57 %        **75 %**
+this test ALONE, ``tuning``  0 %         **67 %**
+===========================  ==========  ===============================
+
+So ``tuning.py`` and ``stages/run.py`` gain confidence here AND gain lines — the default run just does not count them.
+``--cov-fail-under`` is checked in the default mode, so it must still be set against the 87.62 % figure; do not raise it
+against 93.84 %.
 """
 import json
 import os
@@ -39,6 +57,7 @@ from tests.utils.metrics.evaluation_test import EXPECTED_DAILY_KEYS
 
 FAMILY = 'deterministic_unet'
 SHIPPED_CONFIG = f'config/{FAMILY}/{FAMILY}_daily_smoke_cpu.yaml'
+HOURLY_CONFIG = f'config/{FAMILY}/{FAMILY}_hourly_smoke_cpu.yaml'
 SHIPPED_SPLIT = 'config/split/split_smoke_cpu.yaml'
 COMPARISON_CONFIG = 'config/eval/probabilistic_eval_smoke_cpu.yaml'
 
@@ -438,3 +457,201 @@ def test_the_combined_figures_are_WRITTEN(comparison_run):
         assert f'{figure}.png' in produced and f'{figure}.pdf' in produced, \
             f'{figure} missing from {sorted(produced)}'
     assert not any('rank_histogram' in name for name in produced), 'a deterministic family has no rank histogram'
+
+
+# =====================================================================================================================
+# 6. THE HOURLY PIPELINE, end to end  (block 4g-3)
+#
+# Block 4f shipped the hourly task as four config files and proved it by hand. Nothing in `pytest` ran it, so the code
+# paths only hourly reaches were covered by a gate a human had to remember: `_derive_target`'s occurrence branch,
+# `_sum_hours_into_days` in the report, the threshold-free FSS form, Platt calibration, `DayGroupedShuffleSampler`, and
+# the `.pt` FALLBACK feature reader that `materialize-features: false` selects.
+#
+# ⚠️ A SEPARATE fixture rather than a parametrisation of `pipeline_run`. The eighteen daily assertions above are
+# precise about the daily task — `EXPECTED_DAILY_KEYS`, a populated `features/` directory, `metrics_daily.yaml`'s
+# figure list — and parametrising them would mean branching most of them on the mode, which trades eighteen exact
+# assertions for eighteen conditional ones. The hourly claims below are the ones that differ, stated directly.
+#
+# ⚠️ It is the only shipped pipeline with `materialize-features: false`, so this is also the only automated coverage of
+# the fallback reader — and of `split_index.csv`'s ABSOLUTE `file` column, which step-5-portability.md records as a
+# live portability defect. It passes here because preparation and training share a machine, exactly as the note says.
+# =====================================================================================================================
+@pytest.fixture(scope='session')
+def hourly_pipeline_run(tmp_path_factory, repo_root):
+    """Run the shipped HOURLY smoke pipeline once on a synthetic dataset. Derived from the shipped YAML the same way
+    the daily fixture is: only `split-config` is rewritten."""
+    work = tmp_path_factory.mktemp('pipeline_e2e_hourly')
+    data_root = build_dataset_root(str(work / 'data'), n_days=N_DAYS, vary_activity=True)
+    split_path = write_split_config(str(work / 'split.yaml'), n_days=N_DAYS, train_fraction=TRAIN_FRACTION)
+
+    with open(os.path.join(repo_root, HOURLY_CONFIG)) as handle:
+        shipped = handle.read()
+    derived_text = shipped.replace(SHIPPED_SPLIT, split_path)
+    config_path = str(work / 'hourly.yaml')
+    with open(config_path, 'w') as handle:
+        handle.write(derived_text)
+
+    output_root = str(work / 'outputs')
+    environment = dict(os.environ, DATA_ROOT=data_root, OUTPUT_ROOT=output_root,
+                       MLFLOW_TRACKING_URI=f'file:{work / "mlruns"}')
+    environment['PATH'] = os.path.dirname(sys.executable) + os.pathsep + environment.get('PATH', '')
+    completed = subprocess.run([sys.executable, 'run_project.py', config_path, 'pipeline_e2e_hourly'],
+                               cwd=repo_root, env=environment, capture_output=True, text=True)
+
+    from src.utils.io.parse_config import parse_config
+
+    previous = os.environ.get('OUTPUT_ROOT'), os.environ.get('DATA_ROOT')
+    os.environ['OUTPUT_ROOT'], os.environ['DATA_ROOT'] = output_root, data_root
+    try:
+        config = parse_config(config_path)
+    finally:
+        for key, value in zip(('OUTPUT_ROOT', 'DATA_ROOT'), previous):
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    return {'completed': completed, 'config': config, 'shipped_text': shipped, 'derived_text': derived_text,
+            'stages': _stage_blocks(config), 'output_root': output_root}
+
+
+@pytest.fixture(scope='session')
+def hourly_metrics(hourly_pipeline_run):
+    with open(dict(hourly_pipeline_run['stages'])['evaluate']['metrics-path']) as handle:
+        return json.load(handle)
+
+
+def test_the_HOURLY_pipeline_EXITS_ZERO(hourly_pipeline_run):
+    """First, as in the daily section: every assertion below would be misleading if the run had died halfway."""
+    completed = hourly_pipeline_run['completed']
+    if completed.returncode != 0:
+        tail = '\n'.join((completed.stdout + completed.stderr).splitlines()[-30:])
+        pytest.fail(f'the hourly pipeline exited {completed.returncode}:\n{tail}')
+
+
+def test_the_HOURLY_config_is_DERIVED_with_one_parameter_changed(hourly_pipeline_run):
+    """Same guarantee the daily fixture carries: a fixture copy of the config could pass forever while the shipped
+    hourly pipeline was broken."""
+    shipped = hourly_pipeline_run['shipped_text'].splitlines()
+    derived = hourly_pipeline_run['derived_text'].splitlines()
+    assert len(shipped) == len(derived)
+    parameters = [(before, after) for before, after in zip(shipped, derived)
+                  if before != after and not before.lstrip().startswith('#')]
+    assert len(parameters) == 1, parameters
+    assert parameters[0][0].strip().startswith('split-config:')
+
+
+def test_the_HOURLY_run_prepared_a_0_1_OCCURRENCE_target(hourly_pipeline_run):
+    """⭐ `mode: hourly` is the only key that selects the task, so this is where it is proved to have taken effect: the
+    targets are `[T, H, W]` uint8 0/1 rather than `[H, W]` float32 0-24."""
+    import numpy as np
+
+    prepared = dict(hourly_pipeline_run['stages'])['prepare_modeling']['output-path']
+    with open(os.path.join(prepared, 'prepared_config.json')) as handle:
+        assert json.load(handle)['mode'] == 'hourly'
+
+    targets = sorted(name for name in os.listdir(os.path.join(prepared, 'targets')) if name.endswith('.npy'))
+    assert targets, 'no targets written'
+    target = np.load(os.path.join(prepared, 'targets', targets[0]))
+    assert target.ndim == 3, f'expected [T, H, W], got {target.shape}'
+    assert target.dtype == np.uint8, target.dtype
+    assert set(np.unique(target)) <= {0, 1}, np.unique(target)
+
+
+def test_the_HOURLY_run_MATERIALIZES_NO_features(hourly_pipeline_run):
+    """The inverse of the daily assertion, and it is load-bearing rather than cosmetic: `materialize-features: false`
+    is what puts the `.pt` fallback reader and `DayGroupedShuffleSampler` on the executed path. A `features/` directory
+    here would mean the run took the fast path and this test covered neither."""
+    prepared = dict(hourly_pipeline_run['stages'])['prepare_modeling']['output-path']
+    features = os.path.join(prepared, 'features')
+    assert not os.path.isdir(features) or not os.listdir(features), \
+        'features/ is populated, so the fallback loader was NOT exercised'
+
+
+def test_the_HOURLY_metrics_carry_the_keys_a_DAILY_run_cannot_emit(hourly_metrics):
+    """⭐ The reason the hourly pipeline exists, and block 4f's by-hand gate turned into an assertion. All three need a
+    calibrated probability, which the one-head design denies a daily model — `evaluate` populates `probability` from
+    the prediction only in hourly mode."""
+    for key in ('brier_skill_score', 'explained_deviance', 'dice_p50'):
+        assert key in hourly_metrics, f'{key} missing: {sorted(hourly_metrics)}'
+
+
+def test_the_HOURLY_metrics_have_NO_hour_band_keys(hourly_metrics):
+    """h3/h6/h12 are defined on a 0-24 daily count. On a 0/1 target they are empty events, so `metrics_hourly.yaml`
+    drops them — and a daily metrics config reaching an hourly run would show up right here."""
+    bands = [key for key in hourly_metrics if key.endswith(('_h3', '_h6', '_h12'))]
+    assert not bands, bands
+
+
+def test_the_HOURLY_run_uses_the_THRESHOLD_FREE_fss_form(hourly_metrics):
+    """Switched on by detecting a probability field in the arrays, not by a config key — so the keys are `fss_s<scale>`
+    with no threshold segment. This is the only automated check of that switch on a real pipeline."""
+    assert [key for key in hourly_metrics if key.startswith('fss_s')], sorted(hourly_metrics)
+    assert not [key for key in hourly_metrics if key.startswith('fss_occurrence')], sorted(hourly_metrics)
+
+
+def test_the_HOURLY_categorical_cut_is_on_the_PROBABILITY(hourly_metrics):
+    """`kind: probability` cuts the PREDICTION at 0.5 and leaves the labels alone. Under a shared `occurrence` cut the
+    prediction side becomes `p > 0`, which fires wherever any probability is non-zero — POD ~ 1 and a contingency table
+    of nonsense, with nothing raised. The keys carry the `p50` name, which is what proves which entry resolved."""
+    assert 'pod_p50' in hourly_metrics, sorted(hourly_metrics)
+    assert hourly_metrics['pod_p50'] <= 1.0
+
+
+def test_the_HOURLY_report_draws_the_RELIABILITY_diagram(hourly_pipeline_run):
+    """It self-skips on every daily run for want of a probability field, so the hourly pipeline is the only place it is
+    ever drawn — and the only place the self-skip is proved to be conditional rather than permanent."""
+    report = dict(hourly_pipeline_run['stages'])['evaluate']['report-path']
+    produced = set(os.listdir(report))
+    assert 'reliability.png' in produced, sorted(produced)
+    assert 'reliability_table.csv' in produced, sorted(produced)
+
+
+def test_the_HOURLY_maps_are_ONE_per_DATE_summed_over_the_hours(hourly_pipeline_run):
+    """⭐ Block 4f-r: the hourly stack is summed into daily totals before drawing, so the panels carry expected
+    lightning-hours per day and one plotting grammar serves both tasks. The file names are the check — per DATE, with
+    no `_hHH` segment and no category tag, because `HOURLY_PLOT_CATEGORIES` is `most_active` alone."""
+    import re
+
+    report = dict(hourly_pipeline_run['stages'])['evaluate']['report-path']
+    maps = sorted(name for name in os.listdir(report) if name.startswith('maps_') and name.endswith('.png'))
+    assert maps, sorted(os.listdir(report))
+    assert not [name for name in maps if re.search(r'_h\d{2}', name)], maps
+    for name in maps:
+        assert re.fullmatch(r'maps_\d{4}-\d{2}-\d{2}\.png', name), f'expected maps_<date>.png, got {name}'
+
+
+def test_the_HOURLY_report_holds_every_figure_its_OWN_config_lists(hourly_pipeline_run, repo_root):
+    """Driven off `metrics_hourly.yaml`'s figure list, as the daily test is off `metrics_daily.yaml`'s — so adding a
+    figure to the hourly suite without implementing it fails here. `error_by_intensity_bin` is absent from that list by
+    decision (its `mae_stratified` curve is not populated), which this inherits rather than restates."""
+    import yaml
+
+    report = dict(hourly_pipeline_run['stages'])['evaluate']['report-path']
+    produced = set(os.listdir(report))
+    with open(os.path.join(repo_root, 'config/eval/metrics_hourly.yaml')) as handle:
+        configured = yaml.safe_load(handle)['reporting']['figures']
+
+    # the residual figures need a residual diffusion run and the rank histogram needs ensemble members; a deterministic
+    # hourly run has neither, so they self-skip exactly as they do daily
+    self_skipped = {name for name in configured if name.startswith('residual_')} | {'rank_histogram'}
+    missing = []
+    for figure in configured:
+        if figure in self_skipped:
+            continue
+        if figure == 'maps_most_extreme_days':
+            if not any(name.startswith('maps_') for name in produced):
+                missing.append(figure)
+        elif f'{figure}.png' not in produced:
+            missing.append(figure)
+    assert not missing, f'{missing} missing from {sorted(produced)}'
+
+
+def test_NO_metric_of_the_HOURLY_run_is_a_non_finite_NUMBER(hourly_metrics):
+    """Same JSON-validity contract as the daily run: `json.dump` writes bare `NaN`, which MLflow's `log_metric` rejects,
+    so one undefined score would take the whole file with it."""
+    import math
+
+    bad = {key: value for key, value in hourly_metrics.items()
+           if isinstance(value, float) and not math.isfinite(value)}
+    assert not bad, bad

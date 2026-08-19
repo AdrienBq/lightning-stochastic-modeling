@@ -215,11 +215,83 @@ def test_the_stage_seed_is_derived_from_the_cache_inputs():
     assert isinstance(first, int) and first >= 0
 
 
-def test_the_code_state_hash_reflects_the_whole_repo_dirty_diff(repo_root):
-    """The reason CLAUDE.md says to COMMIT before running a pipeline: the key includes the dirty diff, so any
-    uncommitted edit anywhere busts every cache entry."""
+def test_the_code_state_hash_is_a_deterministic_string(repo_root):
+    """Purity, not a tautology: ``code_state_hash`` shells out to git three times and hashes the output of
+    ``ls-files --others``, whose order git does not promise. Two calls with nothing changed in between must agree."""
     assert isinstance(lazy.code_state_hash(repo_root), str)
     assert lazy.code_state_hash(repo_root) == lazy.code_state_hash(repo_root)
+
+
+@pytest.fixture
+def throwaway_repo(tmp_path):
+    """A real git repo with one commit, built in ``tmp_path``.
+
+    ⚠️ The tests below MUST NOT use ``repo_root``. The property under test is "an edit changes the hash", which means
+    making an edit — and doing that in the developer's own checkout would either dirty their tree or, worse, leave a
+    stray file behind on failure. A throwaway repo makes the test honest and harmless at the same time.
+    """
+    def git(*args):
+        subprocess.run(['git', '-C', str(tmp_path), *args], check=True, capture_output=True)
+
+    (tmp_path / 'tracked.py').write_text('value = 1\n')
+    git('init', '-q')
+    git('config', 'user.email', 'test@example.invalid')
+    git('config', 'user.name', 'test')
+    git('add', 'tracked.py')
+    git('commit', '-q', '-m', 'initial')
+    return tmp_path
+
+
+# =====================================================================================================================
+# ⭐ THE property CLAUDE.md's "commit before running a pipeline" rests on  (block 4g)
+#
+# This test did not exist. `test_the_code_state_hash_reflects_the_whole_repo_dirty_diff` asserted only that the hash is
+# a string and is deterministic — never the property its own name claimed. It decides whether a ~20 GiB
+# `prepare_modeling` is skipped or re-run, and block 4g found it moving for a reason nobody intended: `.coverage` was a
+# tracked file that every pytest run rewrote, so having run the tests changed the cache key.
+# =====================================================================================================================
+def test_an_EDIT_to_a_tracked_file_changes_the_code_state_hash(throwaway_repo):
+    """⭐ The whole reason to commit first. Without this, a stage could be served from a cache entry recorded against
+    different code."""
+    before = lazy.code_state_hash(str(throwaway_repo))
+    (throwaway_repo / 'tracked.py').write_text('value = 2\n')
+    assert lazy.code_state_hash(str(throwaway_repo)) != before, \
+        'an uncommitted edit did NOT change the hash: every cached run would be reused against changed code'
+
+
+def test_a_NEW_UNTRACKED_file_changes_the_code_state_hash(throwaway_repo):
+    """The hash covers ``ls-files --others --exclude-standard`` too, so a brand-new module counts as a code change
+    before it is ever added — which is right: the stage subprocess can already import it."""
+    before = lazy.code_state_hash(str(throwaway_repo))
+    (throwaway_repo / 'brand_new.py').write_text('value = 3\n')
+    assert lazy.code_state_hash(str(throwaway_repo)) != before
+
+
+def test_an_IGNORED_file_does_NOT_change_the_code_state_hash(throwaway_repo):
+    """The other direction, and the one block 4g had to fix in the real repo: ``--exclude-standard`` means a gitignored
+    artifact is invisible to the hash. That is what makes it safe for a test run to write ``.coverage`` — and why that
+    file had to be untracked AND ignored, since a TRACKED file is not covered by this exemption."""
+    (throwaway_repo / '.gitignore').write_text('*.artifact\n')
+    subprocess.run(['git', '-C', str(throwaway_repo), 'add', '.gitignore'], check=True, capture_output=True)
+    subprocess.run(['git', '-C', str(throwaway_repo), 'commit', '-q', '-m', 'ignore'], check=True, capture_output=True)
+
+    before = lazy.code_state_hash(str(throwaway_repo))
+    (throwaway_repo / 'coverage.artifact').write_text('noise')
+    assert lazy.code_state_hash(str(throwaway_repo)) == before, \
+        'an ignored artifact moved the cache key — a test run would then invalidate every cached stage'
+
+
+def test_COMMITTING_an_edit_still_changes_the_hash_because_HEAD_moved(throwaway_repo):
+    """Committing does not restore the previous key, and should not: the hash is ``HEAD`` + the diff + untracked, so
+    new code gets a new key whether or not it is committed. What committing buys is a key that DESCRIBES the code,
+    which is the actual content of the "commit first" rule."""
+    before = lazy.code_state_hash(str(throwaway_repo))
+    (throwaway_repo / 'tracked.py').write_text('value = 4\n')
+    subprocess.run(['git', '-C', str(throwaway_repo), 'commit', '-qam', 'change'], check=True, capture_output=True)
+    after = lazy.code_state_hash(str(throwaway_repo))
+
+    assert after != before
+    assert lazy.code_state_hash(str(throwaway_repo)) == after, 'and the committed state is itself stable'
 
 
 def test_the_mlflow_tag_names_are_stable():
