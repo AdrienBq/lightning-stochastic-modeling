@@ -247,7 +247,7 @@ def test_the_framing_helper_applies_all_five_decorations_on_a_BARE_axis(context)
 
 def test_coastlines_are_drawn_and_borders_are_not(framed_axis):
     """The resolved decision: the coast is the geographic anchor, and political boundaries are left out because their
-    line density would compete with a field that is 99.93 % zero. Both halves pinned so neither drifts back."""
+    line density would compete with a field that is 95.3 % zero. Both halves pinned so neither drifts back."""
     figure, ax = framed_axis()
     assert any('Feature' in type(artist).__name__ for artist in ax.artists + list(ax.collections))
     plt.close(figure)
@@ -363,7 +363,7 @@ def test_every_stop_of_both_ramps_converts_to_a_valid_rgb_triple():
 
 
 def test_both_ramps_start_at_WHITE():
-    """The zero end of the axis is the 99.93 % of cells with no lightning; anything else makes the whole map a colour
+    """The zero end of the axis is the 95.3 % of cells with no lightning; anything else makes the whole map a colour
     field with the signal invisible inside it."""
     assert maps._hex_to_rgb(maps._BASE_COLORS_WARM[0]) == (1.0, 1.0, 1.0)
     assert maps._hex_to_rgb(maps._BASE_COLORS_COOL[0]) == (1.0, 1.0, 1.0)

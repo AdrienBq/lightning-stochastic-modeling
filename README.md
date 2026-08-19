@@ -42,7 +42,8 @@ stages and for different things: MC-dropout takes the upstream's **weights** (in
 **predictions** as an extra conditioning channel (in `prepare_modeling`). Leave it unset and each family trains
 standalone.
 
-Because ~99.93 % of cells (hourly) are zero, evaluation leads with base-rate-robust categorical scores (ETS, SEDI)
+Because the target is sparse — 99.57 % of cell-hours are zero hourly, 95.30 % of cells daily (see the sparsity table
+below) — evaluation leads with base-rate-robust categorical scores (ETS, SEDI)
 and threshold-free discrimination (PR-AUC, ROC-AUC), skill against trivial baselines (all-zero, climatology), and
 spectral/neighbourhood scores that detect the over-smoothing U-nets are prone to. There is deliberately **no
 persistence baseline**: a diagnostic parameterization never sees a past observation, so persistence is not an
@@ -87,7 +88,51 @@ alongside the dataset; the upstream yearly ERA5 netCDFs are not read by the pipe
 |---|---|
 | Grid | **101 × 149**, `origin='upper'` (array row 0 is the north edge) |
 | Domain | 0.25°, 35–60 °N / −12–25 °E |
-| Zero fraction | ~99.93 % of cells |
+| Zero fraction | see the sparsity table below — it depends on which target |
+
+### How sparse the target actually is
+
+Measured exactly by [`scripts/sparsity.py`](scripts/sparsity.py), which reads the `lightnings` channel of all 5843
+samples (2.1 × 10⁹ cell-hours) and counts, at `hourly-threshold: 2`, the cells below and at/above the cutoff.
+
+| group | days | cell-hours | raw == 0 | hourly == 1 | hourly ≥ 2 | hourly target 0 | daily target 0 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **all** | 5,843 | 2,110,351,368 | **99.3492 %** | 0.2214 % | **0.4294 %** | **99.5706 %** | **95.2981 %** |
+| DJF | 1,443 | 521,176,968 | 99.7646 % | 0.1120 % | 0.1233 % | 99.8767 % | 98.3834 % |
+| MAM | 1,472 | 531,651,072 | 99.4900 % | 0.1781 % | 0.3319 % | 99.6681 % | 95.9741 % |
+| JJA | 1,472 | 531,651,072 | 98.8012 % | 0.3519 % | 0.8469 % | 99.1531 % | 91.1423 % |
+| SON | 1,456 | 525,872,256 | 99.3493 % | 0.2416 % | 0.4091 % | 99.5909 % | 95.7584 % |
+| 2008 | 365 | 131,829,240 | 99.3544 % | 0.2241 % | 0.4216 % | 99.5784 % | 95.3413 % |
+| 2009 | 365 | 131,829,240 | 99.3100 % | 0.2233 % | 0.4667 % | 99.5333 % | 94.8864 % |
+| 2010 | 365 | 131,829,240 | 99.4052 % | 0.1939 % | 0.4008 % | 99.5992 % | 95.5847 % |
+| 2011 | 365 | 131,829,240 | 99.3457 % | 0.2165 % | 0.4378 % | 99.5622 % | 95.2123 % |
+| 2012 | 366 | 132,190,416 | 99.3884 % | 0.2057 % | 0.4059 % | 99.5941 % | 95.4674 % |
+| 2013 | 365 | 131,829,240 | 99.3437 % | 0.2205 % | 0.4357 % | 99.5643 % | 95.2677 % |
+| 2014 | 365 | 131,829,240 | 99.1545 % | 0.2813 % | 0.5642 % | 99.4358 % | 93.9625 % |
+| 2015 | 365 | 131,829,240 | 99.3921 % | 0.2043 % | 0.4036 % | 99.5964 % | 95.6829 % |
+| 2016 | 366 | 132,190,416 | 99.3338 % | 0.2235 % | 0.4426 % | 99.5574 % | 95.2349 % |
+| 2017 | 365 | 131,829,240 | 99.4001 % | 0.2019 % | 0.3980 % | 99.6020 % | 95.6764 % |
+| 2018 | 365 | 131,829,240 | 99.1322 % | 0.2883 % | 0.5795 % | 99.4205 % | 93.9802 % |
+| 2019 | 365 | 131,829,240 | 99.3180 % | 0.2423 % | 0.4397 % | 99.5603 % | 95.1928 % |
+| 2020 | 366 | 132,190,416 | 99.4349 % | 0.2025 % | 0.3627 % | 99.6373 % | 95.9302 % |
+| 2021 | 365 | 131,829,240 | 99.4238 % | 0.2073 % | 0.3690 % | 99.6310 % | 95.8528 % |
+| 2022 | 365 | 131,829,240 | 99.4268 % | 0.2028 % | 0.3704 % | 99.6296 % | 95.7821 % |
+| 2023 | 365 | 131,829,240 | 99.4238 % | 0.2040 % | 0.3722 % | 99.6278 % | 95.7128 % |
+
+**Read the right column.** These are six different numbers and quoting the wrong one has already caused trouble —
+the repo asserted "~99.93 % of cells are zero" in about forty places, which matches none of them and understated the
+hourly positive class by 6× and the daily one by 67×.
+
+- **`hourly ≥ 2` = 0.43 %** is the hourly task's positive class, and `hourly target 0` = 99.57 % its complement. This
+  genuinely is an extreme-imbalance problem.
+- **`daily target 0` = 95.30 %** is the daily task's, so the daily positive rate is **4.7 %** — imbalanced, but not
+  extreme. A cell needs only ONE qualifying hour in 24 to make a positive day, which is why the two tasks are
+  differently sparse and want different metric suites.
+- **`hourly == 1` = 0.22 %** is the observational noise `hourly-threshold: 2` exists to drop. It is a third of all
+  non-zero cell-hours: the cutoff is not a rounding detail.
+- Seasonality is a **6.9× swing** in the hourly positive rate (DJF 0.12 % → JJA 0.85 %). This is why the smoke tiers
+  slice mid-July: a winter subset drives the base rate towards zero and makes every categorical score, skill score and
+  climatology baseline degenerate, while the run still reports success.
 
 The train/validation/test split is **by year** — interspersed rather than a single chronological cut, so each part
 spans different climatological regimes:

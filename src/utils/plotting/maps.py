@@ -124,7 +124,7 @@ def frame_map_axis(ax, title: str, left_labels: bool, data_crs) -> None:
 
     Coastlines only — no country borders. 02a draws neither and branch A draws both; the resolved decision
     (inventory-figures.md §5) keeps the coast as the geographic anchor and leaves out political boundaries, whose
-    line density would compete with a field that is 99.93 % zero.
+    line density would compete with a field that is 95.30 % zero (the daily target; see README.md).
     """
     # 🐛 `y=` is LOAD-BEARING, not styling. Without an explicit y, matplotlib runs its automatic title placement,
     # which consults the axes' child artists to push the title clear of the tick labels — and a cartopy Gridliner with

@@ -25,7 +25,7 @@ code; this module supplies the components and the default weights, and the gate 
    the trials table — read it when comparing trials with similar composites.
 2. The CLASSIFICATION composite's ``psd_full_fidelity`` term is **biased against calibration**. A calibrated
    probability field is intrinsically smoother than the 0/1 field it is compared with (spreading probability mass
-   is what calibration MEANS at a 0.07 % base rate), so a correct model reads low here. Weighted 0.30 anyway, by
+   is what calibration MEANS at a 0.43 % base rate), so a correct model reads low here. Weighted 0.30 anyway, by
    decision; read it against the reliability diagram before concluding a model is over-smoothed.
 """
 from typing import Dict, Optional, Tuple

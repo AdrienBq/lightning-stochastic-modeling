@@ -157,7 +157,7 @@ def test_diagnostics_are_deterministic_under_a_fixed_seed(residual_run):
 #
 # Everything above goes through ``residual_diagnostics``, which computes 30-odd scalars at once: a helper returning
 # something subtly wrong shows up there as one number among thirty, and only if a test happens to assert on it. These
-# pin the helpers' own contracts — most of which are about DEGENERATE input, since that is what a sparse 99.93 %-zero
+# pin the helpers' own contracts — most of which are about DEGENERATE input, since that is what a sparse 95.3 %-zero
 # field produces constantly and what silently turns a metric into NaN.
 # =====================================================================================================================
 @pytest.mark.parametrize('event,expected', [
@@ -205,7 +205,7 @@ def test_spearman_is_invariant_under_a_MONOTONE_rescaling_where_pearson_is_not()
     (np.array([1.0, np.nan, 3.0]), np.array([np.nan, np.nan, np.nan])),
 ])
 def test_every_correlation_returns_NAN_rather_than_raising_on_degenerate_input(function, x, y):
-    """These are called on the positive-only subsets of a field that is 99.93 % zero, so an empty or constant sample is
+    """These are called on the positive-only subsets of a field that is 95.3 % zero, so an empty or constant sample is
     routine. Raising would abort the whole diagnostics block; ``numpy`` alone would emit a runtime warning and return a
     silent NaN through a divide-by-zero."""
     result = getattr(diagnostics, function)(x, y)

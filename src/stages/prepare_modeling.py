@@ -225,7 +225,7 @@ def _accumulate(acc: dict, target_map: np.ndarray, rng: np.random.Generator) -> 
 def _zero_proportion_report(target_zero_proportion: float, raw_hourly_zero_cells: int,
                             raw_hourly_total_cells: int) -> dict:
     """The sparsity diagnostic over the train split — the number every design choice in this project is downstream of
-    (~99.93 % of daily cells are zero).
+    (95.30 % of daily cells are zero; the hourly target is 99.57 % zero -- see README.md).
 
     Reports the written target's zero proportion beside the RAW hourly grid's. ``raw_hourly`` counts ``lightning == 0``
     on the untouched field, so it is unaffected by ``hourly_threshold``; the target is affected by BOTH the threshold

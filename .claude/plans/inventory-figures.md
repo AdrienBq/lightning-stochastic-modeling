@@ -159,7 +159,7 @@ pipeline concerns for Step 3/4, and A's existing machinery (`_select_plot_indice
 | `reliability_and_pit` | 540 | ✅ | Reliability diagram + PIT histogram — ⚠️ **split, see §4** | **renamed `reliability`** in Step 2's `metrics_daily.yaml` — the reliability half is kept and promoted to a headline diagnostic; the PIT half is dropped with the transform that fitted its CDF |
 | `error_by_intensity_bin` | 598 | ✅ | Stratified error across intensity bins | keep — bins become the explicit hour bands (`occurrence`/`h3`/`h6`/`h12`) |
 | `rank_histogram` | 615 | ✅ | Talagrand diagram (ensemble runs only) | keep |
-| `roc_pr_curves` | — | **NEW (Step 2)** | ROC **and** precision-recall curves, one pair per event threshold. PR is backed by the existing `average_precision`; ROC by the new `roc_auc`. Plotting them together is the point: on a 0.07 % base rate the ROC curve looks flattering while the PR curve exposes the real operating trade-off | keep — **new code in Step 3** |
+| `roc_pr_curves` | — | **NEW (Step 2)** | ROC **and** precision-recall curves, one pair per event threshold. PR is backed by the existing `average_precision`; ROC by the new `roc_auc`. Plotting them together is the point: at the hourly 0.43 % base rate the ROC curve looks flattering while the PR curve exposes the real operating trade-off | keep — **new code in Step 3** |
 | `confusion_matrix` | — | **NEW (Step 2)** | 2×2 contingency counts per threshold — the raw hits/misses/false-alarms/correct-negatives *behind* `pod`/`far`/`csi`/`ets`, which are otherwise only visible as ratios | keep — **new code in Step 3** |
 | `residual_bias_map` | 694 | ✅ | Mean predicted discrepancy (diverging) | |
 | `residual_surprise` | 710 | ✅ | Magnitude + direction surprise vs true discrepancy | |
@@ -195,7 +195,7 @@ Not a design input — kept only to justify the replacement. Its committed outpu
 (`main_outs/trial_7_regress_psd_full/reports/maps_worst_best_days.png`, extracted to
 `outputs/ref_adrien_maps_worst_best_days.png`) shows: **no projection or coastlines** (raw pixel indices,
 confirming the grid is **101 × 149**, `origin='upper'`), a `magma`-style map rendering **zero as black** so a
-99.9 %-zero field reads as a black rectangle, **one colorbar per panel** so observed and predicted sit on
+95.3 %-zero field reads as a black rectangle, **one colorbar per panel** so observed and predicted sit on
 different scales, and `most_active` / `worst_error` resolving to the same day so a third of the figure repeats.
 
 It is, however, a good illustration of challenge (B): the prediction is visibly over-smoothed against the
@@ -280,7 +280,7 @@ Question 1 offered two options, "add borders to the 02a style" or "keep coastlin
 neither, so on re-reading in Step 3 Block 4 it parsed as *remove the basemap entirely*. Confirmed with the user:
 
 > **Coastlines stay** (`ax.coastlines(linewidth=0.8)`, the geographic anchor). **Country borders are not added** —
-> A draws them, 02a does not, and their line density would compete with a field that is 99.93 % zero.
+> A draws them, 02a does not, and their line density would compete with a field that is 95.3 % zero.
 
 `gate_block4.py` pins both halves — `coastlines` present, `BORDERS` / `add_feature` absent — in both `maps.py` and
 `reporting.py`, so neither side of the decision can drift back silently.

@@ -703,11 +703,31 @@ write by accident:
    `hash == hash`. The named property — an uncommitted edit changes the hash — is what CLAUDE.md's "commit before
    running a pipeline" rests on and what decides whether a ~20 GiB stage is skipped. It is testable in three lines,
    demonstrated by hand in this block when `.coverage` was found to move it.
-4. **Nothing tests at the real base rate.** `conftest.py`'s header says the fixtures honour "~99.9 % zero", but
-   `daily_field` defaults to `active_fraction=0.05` (95 % zero) and `hourly_field` to `base_rate=0.02`. The repo's
-   central design fact — 99.93 % zero, "every design choice is downstream of this" — is never exercised at its real
-   value, and SEDI/ETS were chosen *for* base-rate robustness. A 0.07 % fixture needs a bigger grid than
-   `SMALL_H × SMALL_W`, which is presumably why it does not exist; worth one deliberate test rather than none.
+4. ⛔ ~~**Nothing tests at the real base rate.**~~ **WITHDRAWN — this finding was wrong, and finding it wrong was
+   worth more than the finding.** It read `conftest.py`'s `daily_field(active_fraction=0.05)` against CLAUDE.md's
+   claimed "~99.93 % zero" and concluded the fixtures were 70× too dense. Measuring the dataset
+   ([`scripts/sparsity.py`](../../scripts/sparsity.py), all 5843 samples, 2.1 × 10⁹ cell-hours) showed the opposite:
+
+   | | claimed | measured |
+   |---|---|---|
+   | daily target zeros | 99.93 % | **95.2981 %** (positive **4.70 %**) |
+   | hourly target zeros | 99.93 % | **99.5706 %** (positive **0.4294 %**) |
+   | raw `lightnings == 0` | — | **99.3492 %** |
+
+   So `daily_field`'s 5 % active is almost exactly the real daily positive rate of 4.7 %, and `hourly_field`'s 2 % is
+   the right order for 0.43 %. **The fixtures are well calibrated; the repo's documented invariant was not** — it
+   understated the hourly positive class by 6× and the daily one by 67×, and had propagated to ~40 sites across
+   `CLAUDE.md`, `README.md`, four configs, eight `src/` modules, six test files and five plan documents. All corrected,
+   each site against the quantity it actually means (the daily-target sites moved to 95.3 %, the hourly base-rate ones
+   to 0.43 %), and `README.md` now carries the measured table with its seasonal and yearly breakdown.
+
+   ⚠️ **The methodological lesson is the durable part**: a test-suite review that checks fixtures against the
+   documentation will inherit the documentation's errors. Nothing in the suite could have caught this, because no test
+   compares a fixture's parameters to the dataset — and adding one is a real (small) gap: a test asserting
+   `conftest`'s defaults are within a factor of ~2 of the measured rates would have flagged the 67× discrepancy from
+   either side.
+   Also newly documented and previously absent anywhere: seasonality is a **6.9× swing** in the hourly positive rate
+   (DJF 0.1233 % → JJA 0.8469 %), which is the real justification for the smoke tiers slicing mid-July.
 5. **A guard the suite cannot see is broken.** `test_a_shared_occurrence_cut_on_a_probability_field_WARNS` passes
    because `caplog` installs its own handler. In a real run the record is emitted and dropped — only
    `tuning.py` attaches `console_handler` (see the `src/utils` logging item in

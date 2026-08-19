@@ -176,7 +176,7 @@ def mae(pred: np.ndarray, obs: np.ndarray) -> float:
 
     Task: both, but IMPROPER on the classification task — report it there, never select on it. Against a 0/1
     observation ``E|p - y| = pi*(1 - p) + (1 - pi)*p`` is linear in p, hence minimized at ``p = 0`` for any base rate
-    ``pi < 0.5``: at this project's 0.07 % base rate the all-zero forecast scores 0.0007 while an honest calibrated
+    ``pi < 0.5``: at this project's 0.43 % hourly base rate the all-zero forecast scores 0.0043 while an honest calibrated
     one scores 0.0014, twice as bad. Use ``rmse`` (= sqrt Brier) or ``brier_score`` to rank probability forecasts.
     """
     return float(np.mean(np.abs(pred - obs)))
@@ -357,7 +357,7 @@ def skill_score(model_error: float, baseline_error: float) -> float:
 #
 # ⚠️ These are BIASED on the classification task, in a direction that penalizes correctness. A calibrated probability
 # field is intrinsically smoother than the 0/1 observation it is compared against — spreading probability mass is what
-# calibration MEANS at a 0.07 % base rate — so the high-band PSD ratio, the sharpness ratio and the spatial-variance
+# calibration MEANS at a 0.43 % base rate — so the high-band PSD ratio, the sharpness ratio and the spatial-variance
 # ratio all read low for a well-calibrated model. This is not cosmetic: `psd_full_fidelity` carries 0.30 of
 # `valid_classification_score`, so the classification composite partly charges a model for being calibrated. Weigh
 # these against the reliability diagram before concluding a probability forecast is over-smoothed.
@@ -836,7 +836,7 @@ def ranking_bin_edges(n_bins: int = DEFAULT_RANKING_BINS, floor: float = 1e-6) -
 
     Task: classification (and the occurrence head of a regression run).
 
-    Uniform bins fail badly on this problem. A calibrated forecast at a ~0.07 % base rate puts nearly all of its
+    Uniform bins fail badly on this problem. A calibrated forecast at a ~0.43 % base rate puts nearly all of its
     probability mass below 0.01, which uniform bins barely resolve: measured against exact sklearn, 1000 uniform bins
     give a ROC-AUC error of 6e-3, where the same count of geometric-from-zero bins gives 8e-7. The mirror near 1
     costs nothing and covers a confident model that pushes mass to the top of the range.
@@ -988,7 +988,7 @@ def roc_auc(
     Task: classification (and the occurrence head of a regression run).
 
     Reported ALONGSIDE :func:`average_precision`, not instead of it: ROC-AUC is the familiar cross-study number but
-    is optimistic when negatives dominate, so at a ~0.07 % base rate a model with little practical skill can still
+    is optimistic when negatives dominate, so at a ~0.43 % base rate a model with little practical skill can still
     score well. A high ``roc_auc`` next to a low ``average_precision`` is the signature of imbalance-exploitation,
     which is exactly why both are emitted. NaN when only one class is present.
     """

@@ -255,7 +255,7 @@ def target_stats():
 
 
 # ---------------------------------------------------------------------------------------------------------------------
-# Synthetic fields. The daily target is BOUNDED 0-24 integer lightning-hours and ~99.9 % zero; fixtures that ignore
+# Synthetic fields. The daily target is BOUNDED 0-24 integer lightning-hours and 95.3 % zero (README.md); fixtures that ignore
 # either property produce fields no score in this repo was designed for.
 # ---------------------------------------------------------------------------------------------------------------------
 @pytest.fixture

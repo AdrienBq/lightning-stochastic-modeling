@@ -672,7 +672,7 @@ def test_the_upstream_statistics_are_NaN_AWARE(upstream_index):
 
 def test_the_standard_deviation_is_FLOORED_so_standardizing_cannot_divide_by_zero(tmp_path):
     """A constant upstream map — what an upstream model that predicts all-zero produces, which is not far-fetched on a
-    99.93 %-zero target."""
+    95.3 %-zero target."""
     from src.utils.io.data import compute_upstream_stats
 
     path = str(tmp_path / 'flat.npy')

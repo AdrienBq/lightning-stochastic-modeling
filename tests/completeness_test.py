@@ -23,6 +23,12 @@ import pytest
 SRC = 'src'
 TESTS = 'tests'
 
+# ⚠️ `scripts/` is deliberately OUTSIDE both checks. It holds one-off analysis tooling that no pipeline imports —
+# currently `scripts/sparsity.py`, which measured the target's real sparsity for the README table — so it owes no
+# mirrored test file and its functions are not in the census below. The boundary is "does a stage or the library import
+# it": `src/` yes, `scripts/` no. Note the cost, since it is not zero: `sparsity.py` is the provenance of a documented
+# table, so an error there is an error in the README with nothing to catch it.
+
 # Functions that cannot be unit-tested without a live MLflow tracking server or a real DATA_ROOT. Each entry carries
 # its reason, and `test_exemption_list_has_not_grown` PINS THE LENGTH — adding an exemption must be a deliberate,
 # visible edit rather than the path of least resistance when a test turns out to be awkward to write.

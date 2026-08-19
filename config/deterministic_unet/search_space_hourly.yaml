@@ -34,7 +34,7 @@
 # ⛔ WHAT IS EXCLUDED, and why each exclusion is load-bearing rather than a matter of taste:
 #
 #   * `weighted_mae` and `wmae_psd` — MAE IS IMPROPER AGAINST A 0/1 OBSERVATION. It is minimized by a sharp forecast,
-#     so at this base rate the all-zero prediction beats a calibrated one (0.0007 vs 0.0014). A sweep given these
+#     so at this base rate the all-zero prediction beats a calibrated one (~0.0043 vs ~0.0086). A sweep given these
 #     would be rewarded for the degenerate solution, and `valid_classification_score` — which does NOT contain mae —
 #     would then disagree with the training objective about which trial is best. config/eval/metrics_hourly.yaml
 #     reports `mae` for comparability with the daily suite and says the same thing about selecting on it.
@@ -50,7 +50,7 @@
 # construction as the daily space's `gamma = 0` recovering plain mae/rmse:
 #
 #   focal_bce   BCE with the focusing term (1-p_t)^gamma and an explicit positive_class_weight: the imbalance-aware
-#               option, and the one designed for a 0.07 % base rate.
+#               option, and the one designed for a base rate this low (0.43 %; see README.md).
 #   dice        soft Dice on the probability. Optimizes overlap rather than a per-cell score, which is the other
 #               classical answer to extreme imbalance. `dice_occurrence` in the metric suite is its eval-time
 #               complement, so the reported number measures what this loss optimized.
@@ -76,7 +76,7 @@ loss:
     # logits and reduce their own way).
     #
     # ⚠️ The upper bound is 5.0 as in the daily space, but it means something much stronger here: 2^5 = 32x on the
-    # positive class, against a base rate near 0.0007.
+    # positive class, against a base rate of 0.0043 (0.43 %).
     intensity_weight_gamma: {type: float, low: 0.0, high: 5.0}
 
     # focal_bce only. positive_class_weight multiplies the positive term; focal_gamma is the focusing exponent
@@ -85,7 +85,7 @@ loss:
     positive_class_weight: {type: float, low: 1.0, high: 200.0, log: true}
     focal_gamma: {type: float, low: 0.0, high: 4.0}
 
-    # dice only: the smoothing constant of 2*sum(p*o) / (sum(p) + sum(o) + smooth). At a 0.07 % base rate a whole
+    # dice only: the smoothing constant of 2*sum(p*o) / (sum(p) + sum(o) + smooth). At a 0.43 % base rate a whole
     # batch can be nearly empty, where the ratio is 0/0 — `smooth` is what keeps the gradient finite there, so the
     # useful range is "small but not negligible relative to the positive mass".
     dice_smooth: {type: float, low: 0.1, high: 10.0, log: true}
@@ -169,7 +169,7 @@ max_epochs: 50
 #
 # ⚠️ THE STRUCTURE TERM IS BIASED AGAINST CALIBRATION, and it is weighted 0.30 anyway, by decision. A calibrated
 # probability field is intrinsically smoother than the 0/1 field it is compared with — spreading probability mass is
-# what calibration MEANS at a 0.07 % base rate — so a correct model reads LOW on `psd_full_fidelity` and a sharp
+# what calibration MEANS at a 0.43 % base rate — so a correct model reads LOW on `psd_full_fidelity` and a sharp
 # over-confident one reads high. `brier_skill_score` at 0.20 is the counterweight. Read both against the reliability
 # diagram before concluding anything about a trial's texture.
 #

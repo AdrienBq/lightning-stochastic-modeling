@@ -310,7 +310,7 @@ def test_ranking_partials_are_additive_and_batch_invariant():
 
 def test_ranking_bin_edges_are_dense_at_both_ends():
     """Mirrored-geometric spacing. Uniform bins fail exactly where this project lives: a calibrated forecast on a
-    0.07 % base rate puts nearly all its probabilities below 0.01, which uniform bins barely resolve."""
+    0.43 % base rate puts nearly all its probabilities below 0.01, which uniform bins barely resolve."""
     edges = scores.ranking_bin_edges(n_bins=1000)
     assert edges[0] == 0.0 and np.isclose(edges[-1], 1.0)
     assert np.all(np.diff(edges) > 0)
@@ -857,7 +857,7 @@ def test_a_perfectly_calibrated_forecast_puts_the_reliability_curve_ON_the_diago
 
 
 def test_an_UNPOPULATED_reliability_bin_is_NaN_rather_than_zero():
-    """At a 0.07 % base rate nearly every high-probability bin is empty. A zero there would draw a curve plunging to the
+    """At a 0.43 % base rate nearly every high-probability bin is empty. A zero there would draw a curve plunging to the
     floor and read as catastrophic over-forecasting."""
     probabilities = np.array([0.01, 0.02, 0.03])
     occurrences = np.array([0.0, 0.0, 1.0])

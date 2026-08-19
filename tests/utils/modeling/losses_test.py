@@ -285,7 +285,7 @@ def test_the_psd_penalty_is_ZERO_for_an_identical_field():
 
 def test_the_psd_penalty_PUNISHES_blur():
     """The failure mode it exists for. A blurred prediction can score well on any pointwise distance while destroying
-    the small-scale structure — which on a 99.93 %-zero field is most of the signal."""
+    the small-scale structure — which on a 95.3 %-zero field is most of the signal."""
     torch.manual_seed(1)
     target = torch.rand(4, 12, 12) * 24
     blurred = torch.nn.functional.avg_pool2d(target.unsqueeze(1), 3, stride=1, padding=1).squeeze(1)
@@ -393,7 +393,7 @@ def test_the_mask_excludes_cells_entirely(name):
 
 
 def test_asymmetric_huber_penalises_the_two_error_signs_differently():
-    """``asymmetry_tau > 0.5`` makes under-prediction cost more, which is the point on a field that is 99.93 % zero:
+    """``asymmetry_tau > 0.5`` makes under-prediction cost more, which is the point on a field that is 95.3 % zero:
     a symmetric loss is minimised by predicting nothing."""
     target = torch.tensor([[5.0]])
     mask = torch.ones_like(target, dtype=torch.bool)

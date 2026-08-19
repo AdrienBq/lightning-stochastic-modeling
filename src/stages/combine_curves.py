@@ -258,7 +258,7 @@ def _headline_threshold(table: pd.DataFrame) -> Optional[str]:
 def _combined_roc_pr(report_dirs, colors, output_dir) -> None:
     """ROC and precision-recall for every family on the headline event, drawn from the curve POINTS.
 
-    Both panels for the reason the per-family figure documents: at a ~0.07 % base rate the ROC curve is flattered by
+    Both panels for the reason the per-family figure documents: at a ~0.43 % base rate the ROC curve is flattered by
     the correct-negative mass while the PR curve exposes the real trade-off, and a family strong on the left and weak
     on the right is exploiting the imbalance. AUC and AP annotate the legend from `roc_pr_summary.csv`; that file also
     carries the base rate, which sets the PR panel's no-skill floor (drawn once — the event is the same for all).

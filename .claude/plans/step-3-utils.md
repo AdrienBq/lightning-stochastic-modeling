@@ -209,7 +209,7 @@ D's 198-line version renders raw pixel indices with no projection; A's has the f
 - 🔧 **Rename** `_maps_per_day` → `maps_most_extreme_days` and **split** `_reliability_and_pit` → `reliability`
   (PIT half deleted).
 - ❌ **Remove** `LogNorm` / `colorbar_scale: log` (🔢) and the never-implemented `qq_plot`.
-- ➕ **New: `roc_pr_curves`** (ROC + PR per threshold — plotting both is the point: at a 0.07 % base rate ROC
+- ➕ **New: `roc_pr_curves`** (ROC + PR per threshold — plotting both is the point: at the hourly 0.43 % base rate ROC
   flatters while PR exposes the real trade-off) and **`confusion_matrix`** (2×2 counts per threshold).
   Both must be registered in whatever `write_report` uses to dispatch `reporting.figures` names.
 - **How one config serves every family without branching.** `write_report` holds a dictionary mapping each figure

@@ -355,7 +355,7 @@ def test_every_normalization_kind_builds(kind):
 
 
 def test_the_search_spaces_only_offer_group_normalization(search_spaces):
-    """Group norm only, for all three families: batch statistics over a 99.93 %-zero field are dominated by the empty
+    """Group norm only, for all three families: batch statistics over a 95.3 %-zero field are dominated by the empty
     cells, and the warm start requires the upstream and the MC net to normalise identically."""
     for family, space in search_spaces.items():
         normalization = space['unet']['normalization'] if 'unet' in space else 'group'

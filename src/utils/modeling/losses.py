@@ -1,6 +1,7 @@
 """Training losses for both tasks, shared by all three model families.
 
-Every option is designed against the extreme class imbalance of the target (~99.93 % of cells are zero):
+Every option is designed against the class imbalance of the target (the daily target is 95.30 % zero, the
+hourly one 99.57 % -- see README.md; the daily positive rate is 4.7 %, the hourly 0.43 %):
 - intensity weighting ``w(y) = (1 + y)^gamma`` pulls gradients towards high-hour cells;
 - the asymmetric Huber penalizes under-prediction ``tau / (1 - tau)`` times more than over-prediction
   (``tau > 0.5`` encodes the preference for conservative models);

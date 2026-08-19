@@ -84,7 +84,7 @@ $DATA_ROOT/
 | Predictors | `MU_LI`, `MU_MIXR`, `RH_500850`, `cp`, `lsm` (+ `upstream` appended **last** in residual mode) |
 | Target | `lightnings`, aggregated by `_daily_aggregation` (`hourly_threshold: 2` drops single-stroke hours) |
 | Split | **by year** — test 2008/2015/2023 · valid 2009/2016/2022 · train 2010–2014, 2017–2021 |
-| Sparsity | ~99.93 % of cells are zero. Every design choice is downstream of this |
+| Sparsity | **hourly** target 99.57 % zero (positive class **0.43 %**) · **daily** target 95.30 % zero (positive **4.7 %**) · raw `lightnings == 0` 99.35 %, and a further 0.22 % carry exactly one stroke, which `hourly_threshold: 2` drops. Measured over all 5843 samples by [`scripts/sparsity.py`](scripts/sparsity.py); the table with the seasonal and yearly breakdown is in [README.md](README.md). Every design choice is downstream of this — ⚠️ **quote the right one of the six**: the repo previously asserted "~99.93 % of cells are zero" in ~40 places, which matches none of them and understated the hourly positive class by 6× and the daily one by 67× |
 
 ## Design invariants
 

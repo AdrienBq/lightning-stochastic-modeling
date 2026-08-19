@@ -17,7 +17,7 @@ TWO MODES, decided by the PREPARED DATA (``residual_target`` in ``target_stats``
 ⚠️ GENERATION IS IN THE RAW TARGET SPACE. No warp, no standardization, no inverse: training space == evaluation
 space. The source branch generated in a log1p-standardized space (``flow.log_warp``), which was the removed target
 transform under another name. The honest consequence to know: the flow transports a standard-normal prior onto a
-field that is ~99.93 % exactly zero, which is a hard transport problem — a plain affine standardization would NOT
+field that is 95.30 % exactly zero (daily; 99.57 % hourly), which is a hard transport problem — a plain affine standardization would NOT
 have helped, since it rescales that spike rather than spreading it; only the log warp did, and it is out of scope.
 
 ⚠️ THE ``loss:`` BLOCK OF THE SEARCH SPACE IS NOT READ HERE. This family trains on the flow-matching velocity MSE

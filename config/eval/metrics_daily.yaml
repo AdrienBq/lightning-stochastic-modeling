@@ -23,7 +23,8 @@
 #
 # ---------------------------------------------------------------------------------------------------------------------
 # The suite is organized around the two evaluation challenges of this project:
-#   (A) EXTREME IMBALANCE (~99.93% of cells are zero) — metrics must separate a trivially-zero or climatological
+#   (A) CLASS IMBALANCE (the daily target is 95.30% zero, i.e. a 4.7% positive rate; the hourly target is
+#       99.57% zero, a 0.43% positive rate -- measured in README.md) — metrics must separate a trivially-zero or climatological
 #       predictor from a model with genuine skill on rare events: conditional errors on observed-positive cells,
 #       base-rate-robust categorical scores (ETS, SEDI) and threshold-free discrimination (ROC-AUC, PR-AUC),
 #       explicit skill scores against trivial baselines, a frequency-bias check encoding the preference for
@@ -48,7 +49,7 @@
 # skill score against a constant base-rate reference (compare it with `brier_skill_score`, whose reference is the
 # stronger per-cell climatology). `bias` becomes calibration-in-the-large, `mean(p) - base_rate`. What to change:
 #   * ⚠️ `mae` is IMPROPER against a 0/1 observation — minimized by a sharp forecast, so the all-zero prediction wins
-#     (0.0007 vs 0.0014 for a calibrated one at this base rate). Keep reporting it, but the selection score must
+#     (~0.0043 vs ~0.0086 at the hourly base rate of 0.43 %). Keep reporting it, but the selection score must
 #     never use it in this mode.
 #   * drop `mae_stratified` — its bins partition OBSERVED intensity, and a 0/1 target has one non-empty band.
 #   * drop `estimation_tendency` — conditioned on `obs > 0`, `pred - obs = p - 1 <= 0` always, so `under` ~ 1 and
@@ -147,7 +148,7 @@ metrics:
     #
     #   * ETS is chance-corrected: random and constant forecasts score 0.
     #   * SEDI stays non-degenerate as the base rate -> 0, which is what makes thresholds and families comparable
-    #     on a target that is 99.93% zero.
+    #     on a target that is 95.30% zero daily / 99.57% hourly (README.md).
     #   * frequency_bias > 1 flags conservative over-forecasting (preferred here), < 1 flags misses.
     #   * roc_auc and average_precision (PR-AUC) are THRESHOLD-FREE: they score the ranking of the predicted field
     #     rather than one decision cut, so they cannot be gamed by a lucky operating point. PR-AUC is the more

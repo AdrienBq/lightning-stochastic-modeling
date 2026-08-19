@@ -470,7 +470,7 @@ def _reliability(curves, report_path, formats):
 def _roc_pr_curves(curves, report_path, formats):
     """ROC and precision-recall curves side by side, one line per event threshold.
 
-    Drawing BOTH is the point. At a ~0.07 % base rate the ROC curve is flattered by the enormous correct-negative
+    Drawing BOTH is the point. At a ~0.43 % base rate the ROC curve is flattered by the enormous correct-negative
     mass, while the PR curve exposes the real precision/recall trade-off. A model that looks strong on the left
     panel and weak on the right is exploiting the imbalance, and the two panels together make that visible where
     either alone would not.
@@ -586,7 +586,7 @@ def _confusion_matrix(curves, report_path, formats):
         # row 0 = [hits, misses] is "observed yes" and column 0 = [hits, false_alarms] is "predicted yes": rows are the
         # OBSERVATION, columns the PREDICTION. Labelled the other way, the "obs yes" column showed
         # hits + false_alarms — every cell in the domain for a model that over-forecasts — so the figure read as
-        # "lightning was observed at every pixel", which is impossible on a 99.93 %-zero target. The CSV was never
+        # "lightning was observed at every pixel", which is impossible on a 95.30 %-zero target. The CSV was never
         # affected: it is written from the named keys. Found by reading the block 4e gate's report.
         axis.set_xticks([0, 1], ['pred yes', 'pred no'])
         axis.set_yticks([0, 1], ['obs yes', 'obs no'])

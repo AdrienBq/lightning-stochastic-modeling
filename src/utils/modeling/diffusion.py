@@ -9,7 +9,7 @@ upstream prediction. There is no warp and no standardization of the generation t
 downstream: training space == evaluation space, as everywhere else in this project. (The source branch generated in
 a log1p-standardized space and inverted it; that was the removed target transform under another name. A plain
 affine standardization was considered and rejected as buying nothing the stem's first convolution cannot absorb —
-it does not touch the real difficulty, which is that ~99.93 % of cells are exactly zero.)
+it does not touch the real difficulty, which is that 95.30 % of daily cells are exactly zero -- 99.57 % hourly.)
 
 Backbone (the "hybrid conv + transformer" choice): a small convolutional stem fuses the many conditioning channels
 (up to ~120 in daily hourly-stack mode) together with the single noisy-target channel and patch-embeds them onto a

@@ -758,7 +758,7 @@ def test_the_confusion_matrix_AXES_match_the_way_its_CELLS_are_laid_out(tmp_path
     ``misses`` is ``~pred & obs``, so ``[[hits, misses], [false_alarms, correct_negatives]]`` puts the OBSERVATION on
     the rows and the PREDICTION on the columns. The labels used to say the opposite, which made the "obs yes" column
     contain ``hits + false_alarms`` — for an over-forecasting model, every cell in the domain. The figure then read as
-    "lightning was observed at every pixel", which is impossible on a target that is 99.93 % zero, and it is the sort of
+    "lightning was observed at every pixel", which is impossible on a target that is 95.3 % zero, and it is the sort of
     error that discredits a whole report rather than one panel.
 
     The four counts are deliberately DISTINCT so any transposition or rotation moves a value into a cell this test
@@ -806,7 +806,7 @@ def test_the_confusion_CSV_is_written_from_the_NAMED_keys(tmp_path):
 
 @pytest.mark.source_invariant
 def test_LogNorm_survives_ONLY_for_the_confusion_matrix():
-    """``colorbar_scale: log`` was removed from the map path with the 02a grammar: on a field that is 99.93 % zero a log
+    """``colorbar_scale: log`` was removed from the map path with the 02a grammar: on a field that is 95.3 % zero a log
     colour axis makes an almost-empty map look populated. ``LogNorm`` is still imported, for the confusion matrix, whose
     counts genuinely span four orders of magnitude — so the import must remain while no map function uses it."""
     import ast
@@ -1062,7 +1062,7 @@ def test_the_fss_axis_is_pinned_to_zero_ONE_with_the_half_reference(tmp_path):
 
 
 def test_the_reliability_figure_carries_the_perfect_diagonal_and_a_LOG_count_panel(tmp_path):
-    """Two panels, and the second is the one that makes the first readable: at a 0.07 % base rate almost every cell
+    """Two panels, and the second is the one that makes the first readable: at a 0.43 % base rate almost every cell
     lands in the lowest probability bin, so a linear count axis shows one bar and nothing else. The diagonal is the
     reference a reliability curve is read against."""
     captured = {}
