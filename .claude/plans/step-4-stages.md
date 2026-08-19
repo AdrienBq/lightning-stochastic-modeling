@@ -576,7 +576,157 @@ Worth generalising in `4g`: **any tracked file a test run rewrites is a lazy-cac
 the whole-repo diff rather than `src/`. `.coverage` was the only one (`git ls-files` finds no `htmlcov/` or
 `.pytest_cache/`), but the class is what matters.
 
-### The review proper
+### ✅ THE ASSESSMENT (block 4g, 2026-08-19)
+
+Read the suite — 39 files, 16 221 lines, 1 141 test functions (1 398 collected after parametrisation), 1 849 asserts
+and 85 `pytest.raises` — and measured coverage two ways. **Verdict: the suite is strong, better than its own headline
+number says, and thin in exactly one place. One test is actively wrong and was hidden by being dormant.** Evidence
+below, then the concrete work-list.
+
+⚠️ **Two automated anti-pattern sweeps were run and DISCARDED as false-positive-dominated**, which is itself a result:
+a "does this test reference `src`?" AST walk flagged 222 tests (this suite reaches `src` overwhelmingly through
+FIXTURES, invisible in a function body), and a "weak assertion" classifier flagged 132 (`assert np.isclose(...)` is an
+`ast.Call`, indistinguishable from `assert x` to a classifier). Neither number is reported as a finding. The suite has
+no `assert True`, no bare-literal asserts, and nothing else a heuristic catches — the 5b anti-patterns are absent.
+
+#### 1. Coverage — the headline number is WRONG BY 6 POINTS, and it understates
+
+`pytest.ini` reports **87.62 %** (4 676 statements, 579 missed) and explains the residue as `tuning.py` (25 %) and
+`stages/run.py` (57 %) needing "a live MLflow tracking server and a real fit … not something a unit test can reach".
+That explanation is now half wrong: **the e2e test reaches them, in subprocesses that `pytest-cov` does not trace.**
+`coverage`'s subprocess hook (`a1_coverage.pth`) is already installed and the e2e fixture already inherits
+`os.environ`, so one variable turns it on. Measured:
+
+| | default | `COVERAGE_PROCESS_START` set |
+|---|---|---|
+| **TOTAL** | 87.62 % | **93.84 %** |
+| `tuning.py` | 25 % | **71 %** |
+| `stages/run.py` | 57 % | **75 %** |
+| `stages/__init__.py` (seed application) | 47 % | **100 %** |
+| `tune` / `setup` / `tabulate_metrics` / `combine_curves` | 93–99 % | **100 %** |
+| missed lines | 579 | **288** |
+
+The e2e test **alone** takes `tuning.py` from 0 % to 67 % and `run.py` from 0 % to 61 %. So 291 of the 579 "missed"
+lines are executed on every suite run and simply not counted. The genuine residue is 288 lines, still concentrated:
+`tuning.py` 133 + `run.py` 42 = 175 of them (61 %).
+
+#### 2. Relevance — high, with named evidence
+
+The suite does not test the library it calls. Each of these pins a decision *this* project made, and would be hard to
+write by accident:
+
+* `scores_test.py` checks the three ensemble estimators against **O(M²) brute-force definitions** and ROC-AUC/PR-AUC
+  against **sklearn**, and pins the `ddof=1` NaN with `pytest.warns(match='Degrees of freedom')` — so the NaN's
+  *cause* is asserted, not just its presence. Its spread/skill test carries a comment explaining why FIXED zero-mean
+  perturbations are required (with iid noise the monotonicity it claims is unobservable at all).
+* `maps_test.py` proves `origin='upper'` by **rasterising the figure and comparing pixel rows**, then pins that the
+  drawn artifact reports `origin='lower'` "so nobody 'fixes' the source to match what they see". That is the block-4e
+  lesson — object-model assertions passing while output was wrong — applied preemptively.
+* `pipeline_e2e_test.py` derives its config from the shipped YAML and **asserts exactly one parameter differs**; its
+  two exclusion tables are asserted as **set equality on the difference**, so it fails when a key disappears AND when
+  an excluded key becomes emittable (a stale exclusion). It carries its own anti-vacuity test.
+* `tuning_test.py` proves `_fit_trial` asks the module for its phases using an **AST subscript analysis, explicitly
+  because the comments name the old keys** and a substring search would lie.
+* `run_test.py`'s `execute_stage` half stubs `mlflow.run` and observes "the stage was skipped" as an **empty dispatch
+  list** rather than inferring it from a log line.
+* `lazy_test.py` and `parse_config_test.py` exist because CLAUDE.md names two silent-failure modes; both are now
+  executable, including `lazy: ture` silently resolving to `False`.
+
+#### 3. What is decorative, dominated, or stale — the work-list
+
+1. 🐛 **`run_test.py:444` is a dead placeholder.** An empty body under
+   `@pytest.mark.skip(reason='… covered by Step 4's end-to-end gate')`, and that gate now EXISTS
+   (`pipeline_e2e_test.py`, block 4e). It is the only `skip` marker in the suite. **Delete it**, pointing at the e2e
+   test.
+2. **38 of 58 source-text tests carry no `source_invariant` marker.** `pytest.ini` says the marker exists so they can
+   be retired as a group and that "`grep -rn source_invariant tests/` finds every one" — it finds 20 of 58, so the
+   documented retirement would leave 38 behind. They split into two kinds and only the first should be marked:
+   merge guards asserting a removed identifier stayed removed (`data_test.py:360`, `tuning_test.py:118`,
+   `search_test.py:231`, `reporting_test.py:738`, `palettes_test.py:133`, …) versus permanent structural contracts
+   (`test_the_stage_is_wrapped_with_fire` ×4, `completeness_test.py`'s meta-tests).
+3. **Four source-text tests in `run_test.py` (L22–46) are DOMINATED by behavioural tests later in the same file.**
+   `test_the_stage_seed_is_derived_and_EXPORTED_as_pipeline_seed` asserts `'PIPELINE_SEED' in source`; L225 asserts the
+   exported value equals `lazy.stage_seed(...)` exactly. Keep L225, delete L35; same for the cache-primitive and
+   parse-config pair.
+4. **`lazy_test.py:107** is a trivially-true line (`key_for(stale) == key_for(stale)`) inside an otherwise excellent
+   test — the real work is done by L100-104. Four other `f(x) == f(x)` asserts flagged by the sweep are NOT
+   tautologies: they pin **purity / seeded reproducibility** of functions that consume RNG or hash unordered git
+   output, and `code_state_hash` genuinely could be nondeterministic. Keep those four.
+5. **Proportionality.** Test density is *inversely* related to module size and risk: `maps.py` (52 stmts) has 75
+   tests/100 statements, `tuning.py` (451 stmts — the sweep loop, warm start, phase fitting, optuna, staleness) has
+   **9.5**, the lowest in the repo, and also the lowest coverage. `banner.py` carries 169 statements and 24 tests for
+   a decorative ASCII banner. The gradient is defensible per-module and wrong in aggregate.
+
+#### 4. Gaps — the half that matters
+
+1. ⭐ **No end-to-end test of the HOURLY pipeline.** `pipeline_e2e_test.py` pins `SHIPPED_CONFIG` to the daily smoke
+   tier, so block 4f's four configs and their distinct code paths (`_derive_target` hourly branch,
+   `_sum_hours_into_days`, threshold-free FSS, Platt calibration, the day-grouped sampler, the `.pt` fallback reader)
+   are covered by a **by-hand gate only**. Parametrising the fixture over both shipped smoke configs is the single
+   highest-value addition available; cost ~100 s.
+2. 🐛🐛 **The four real-artifact tests in `evaluate_test.py` are DORMANT — and one of them FAILS when woken up.**
+   This is the headline finding of 4g, and it has two layers.
+
+   **(a) They never run.** The file's header states that A's version "was gated on `PROB_EVAL_*` variables that
+   NOTHING sets … it now DISCOVERS its artifacts from the shipped config and runs the moment they exist", and
+   `test_the_stage_scores_each_family_on_REAL_artifacts` promises "no environment setup needed". The artifacts DO
+   exist, and all four skipped in every full-suite run of this session. Cause: `_available_evaluations` does
+   `os.path.join(repo_root, prepared_dir)` where `prepared_dir` came from a config whose `{{$OUTPUT_ROOT}}` was
+   unset, so it is `/deterministic_and_mc_dropout_smoke_cpu/…` — ABSOLUTE, and `os.path.join` discards `repo_root`.
+   **That is the exact footgun `parse_config_test.py` documents in its own test**
+   (`test_an_UNSET_output_root_leaves_a_path_at_the_FILESYSTEM_ROOT`). The file even carries an anti-dormancy guard,
+   `test_the_DISCOVERY_finds_all_three_families…` — the right idea, aimed at the config leaf rather than at the
+   environment.
+
+   **(b) Run with both roots exported, 3 pass and 1 FAILS.**
+   `test_all_available_families_are_scored_by_the_SAME_metric_suite` — whose docstring calls it *"⭐ The invariant the
+   shared evaluation exists for"* — fails with six extra keys in the stochastic family's set against the
+   deterministic reference: `crps`, `crps_occ`, `almost_fair_crps`, `almost_fair_crps_occ`, `spread_skill_ratio`,
+   `rank_histogram_reliability`.
+
+   ⚠️ **The test is wrong, not the code.** It asserts `keys == reference` — strict equality of metric keys across
+   families — which the design deliberately violates: the deterministic family emits no `ensemble_members`, so the
+   ensemble group is *skipped rather than NaN*, and that is what makes the comparison table's COLUMNS the thing to
+   compare. The same file asserts the opposite 400 lines earlier:
+   `test_the_deterministic_family_reports_NO_ensemble_scalars` (L94) requires those six keys to be absent. **The two
+   tests contradict each other**, and only dormancy kept the contradiction invisible — the by-hand 4e gate read the
+   same asymmetry as correct (`ENSEMBLE 0 / 6 / 6`).
+   The invariant worth asserting is the one `tabulate_metrics` implements: identical columns in the UNION table, with
+   every gap explained by family capability. Fix the assertion to compare key sets after excluding the ensemble group
+   for families that emit no members — then it states something true and still catches a family-specific eval path.
+
+   ⚠️ **They also cost 1 h 53 m for four tests** (each re-runs the real stage; diffusion sampling on CPU dominates),
+   so they cannot join the default suite. The fix is to make the requirement LOUD — fail or error when `OUTPUT_ROOT`
+   is unset rather than skipping silently — and to keep the run opt-in.
+3. ⭐ **`code_state_hash` has no test of the property it is named for.**
+   `test_the_code_state_hash_reflects_the_whole_repo_dirty_diff` asserts only `isinstance(..., str)` and
+   `hash == hash`. The named property — an uncommitted edit changes the hash — is what CLAUDE.md's "commit before
+   running a pipeline" rests on and what decides whether a ~20 GiB stage is skipped. It is testable in three lines,
+   demonstrated by hand in this block when `.coverage` was found to move it.
+4. **Nothing tests at the real base rate.** `conftest.py`'s header says the fixtures honour "~99.9 % zero", but
+   `daily_field` defaults to `active_fraction=0.05` (95 % zero) and `hourly_field` to `base_rate=0.02`. The repo's
+   central design fact — 99.93 % zero, "every design choice is downstream of this" — is never exercised at its real
+   value, and SEDI/ETS were chosen *for* base-rate robustness. A 0.07 % fixture needs a bigger grid than
+   `SMALL_H × SMALL_W`, which is presumably why it does not exist; worth one deliberate test rather than none.
+5. **A guard the suite cannot see is broken.** `test_a_shared_occurrence_cut_on_a_probability_field_WARNS` passes
+   because `caplog` installs its own handler. In a real run the record is emitted and dropped — only
+   `tuning.py` attaches `console_handler` (see the `src/utils` logging item in
+   [step-5-portability.md](step-5-portability.md)). The test proves the record is *emitted*, never that a user *sees*
+   it, and no test in this design could.
+
+#### 5. Recommended order
+
+**`4g-1` fix the contradicting assertion** (gap 2b) — the only finding where a test currently states something false ·
+`4g-2` un-dormant the real-artifact tests: fail loudly when `OUTPUT_ROOT` is unset instead of skipping, and keep the
+run opt-in given the 1 h 53 m cost · `4g-3` the hourly e2e parametrisation (gap 1, highest value per unit effort) ·
+`4g-4` the `code_state_hash` property test (gap 3) · `4g-5` delete the dead placeholder (item 1) and the dominated
+source-text tests (item 3) · `4g-6` mark the merge guards (item 2) · then decide `--cov-fail-under` against the
+**93.84 %** measurement rather than the 87.62 % one — and record in `pytest.ini` that the two differ only by
+subprocess tracing, so the residue explanation stops being half wrong.
+
+---
+
+### The review brief (as written when the step was planned)
 
 After the gates pass, review the whole suite **as if new to the repo** — deliberately not from inside the history that
 built it, because the author of a test is the worst judge of whether it asserts anything. Three questions, answered
