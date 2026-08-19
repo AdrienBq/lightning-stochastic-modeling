@@ -9,3 +9,11 @@
 /outputs/
 **/*.db
 /job_scripts/
+
+# Coverage / pytest artifacts. `.coverage` is a SQLite database rewritten by every pytest run, and the lazy cache
+# keys on `git diff HEAD` over the WHOLE repo -- so while it was tracked, having run the tests since the last commit
+# changed the cache key and could redo (or skip) a ~20 GiB prepare. Untracked in the block 4g opening commit; see
+# .claude/plans/step-4-stages.md.
+.coverage
+htmlcov/
+.pytest_cache/

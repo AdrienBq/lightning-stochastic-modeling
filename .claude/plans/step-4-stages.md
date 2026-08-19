@@ -547,6 +547,37 @@ Per [`rebuild-plan.md`](rebuild-plan.md) §"Verification", in order:
 
 ## Closing review of `tests/` — the last thing Step 4 does
 
+### 🐛 First finding, fixed on the way in: `.coverage` was TRACKED, and it moved the lazy-cache key
+
+`.coverage` is a ~52 KiB SQLite database that `pytest-cov` rewrites on every run, and it was a tracked file with no
+`.gitignore` entry — ten commits carried it. `lazy.code_state_hash` hashes `git diff HEAD` over the **whole repo**, so:
+
+```
+code_state_hash, .coverage dirty  ->  149c0fcca3dce3f6...
+code_state_hash, .coverage clean  ->  eaf8e7781c7ce719...
+```
+
+**Having run the test suite since the last commit changed the cache key**, which decides whether a ~20 GiB
+`prepare_modeling` is skipped or redone. Note the mechanism: the file's *contents* never reached the hash — git emits
+the fixed string `Binary files a/.coverage and b/.coverage differ` for a binary — it is dirty-vs-clean flipping the
+diff between empty and that 113-byte block. So the standing rule *"commit before running a pipeline"* was not enough:
+the commit left the file dirty, and committing it instead would have added binary churn to every commit while keeping
+the same flip-flop. Neither option being good is the tell that it should not have been tracked.
+
+⚠️ **`.gitignore` alone fixes nothing** — it applies to untracked files only, so a tracked `.coverage` keeps appearing
+in `git status` and `git diff HEAD` whatever the ignore file says. Both halves are needed:
+
+```shell
+printf '.coverage\nhtmlcov/\n.pytest_cache/\n' >> .gitignore
+git rm --cached .coverage      # untrack; the file stays on disk
+```
+
+Worth generalising in `4g`: **any tracked file a test run rewrites is a lazy-cache hazard**, because the cache reads
+the whole-repo diff rather than `src/`. `.coverage` was the only one (`git ls-files` finds no `htmlcov/` or
+`.pytest_cache/`), but the class is what matters.
+
+### The review proper
+
 After the gates pass, review the whole suite **as if new to the repo** — deliberately not from inside the history that
 built it, because the author of a test is the worst judge of whether it asserts anything. Three questions, answered
 with evidence rather than impression:
