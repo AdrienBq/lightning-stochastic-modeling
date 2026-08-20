@@ -132,9 +132,25 @@ comments and the requirements header. The `{{$VAR}}` mechanism held; this step f
    `--partition=zen16` (×7), the `--mem` 8G–128G / `--time` 15 min–3 days grid, and the `/homedata/aburq/...`
    fallbacks become documented placeholders. Cost accepted: a second copy that can drift from the gitignored one
    actually run.
-5. **Bundle the coastline via git-lfs**, as `.gitattributes` already dictates (`*.shp filter=lfs`). ⚠️ Overrides the
-   recommendation, which was a plain 1.1 MB binary with a `data/cartopy/**` filter exception. The trade taken: git-lfs
-   becomes a hard prerequisite of plotting, in exchange for keeping binaries out of git history proper.
+5. **Bundle the coastline as PLAIN blobs**, with a `data/cartopy/shapefiles/** -filter -diff -merge` exemption in
+   `.gitattributes`. ⚠️ **Decided three times**, and the reversals are worth recording because the third decision was
+   forced by a measurement rather than a preference:
+   1. recommended plain; the user chose **git-lfs**, as `.gitattributes` already dictates (`*.shp filter=lfs`);
+   2. the `pip install git-lfs` question surfaced that the PyPI package is fetch-only and that pip runs after clone —
+      raised, and the user **reaffirmed LFS**;
+   3. building it broke the repo. `git lfs install` (which committing an LFS object requires) sets
+      `filter.lfs.required = true`, after which **every git command exits 128 without the binary** —
+      `git status --porcelain` measured at 128 in a plain shell — *including* the `git diff HEAD` that
+      `lazy.code_state_hash` runs. That one is caught (`check=True` inside a `try`), so the pipeline does not crash: it
+      **silently degrades** to hashing `src/` alone, dropping `config/` and the working-tree state from the cache key.
+      A hard runtime dependency on every machine plus a quietly weakened cache is not worth 1.1 MB, and on that
+      evidence the user chose plain.
+
+   ⚠️ **The exemption is load-bearing**, not tidiness: `*.shp filter=lfs` still applies everywhere else, so deleting
+   those two lines lets the next commit made with git-lfs installed convert the shapefile into a ~130-byte pointer —
+   after which cartopy dies with `KeyError: 828781878` inside `shapefile.py` (the first bytes of "version" read as a
+   shape type), which reads as corrupt data rather than a configuration mistake. Two tests guard it: one asserts
+   `git check-attr` reports no filter for the path, the other that the file on disk is not a pointer.
 6. **DEFERRED: the `split_index.csv` relative-path fix.** It does not block a fresh clone — if `prepare_modeling` runs
    on the remote, the absolute path it writes is correct and nothing breaks. Known limitation to record instead: **a
    prepared directory is not movable**, so copying ~20 GiB between machines (rather than re-preparing, which costs a
@@ -149,7 +165,7 @@ comments and the requirements header. The `{{$VAR}}` mechanism held; this step f
 | Block | Contents | Verified by |
 |---|---|---|
 | `5a` ✅ | **The bootstrap**: `.env` + the interpreter fix + the `CARTOPY_DATA_DIR` default + the logging sink | 29 loader unit tests; `.env.example` ↔ `config/` guards; three pipeline runs with the venv **removed** from `PATH`; the mutation check below |
-| `5b` | Bundle `ne_50m_coastline` (1.1 MB) via git-lfs + `scripts/prewarm_cartopy.py` as the fallback for a changed extent | a plotting test with `CARTOPY_DATA_DIR` at the bundle and the network unreachable |
+| `5b` ✅ | Bundle `ne_50m_coastline` (1.1 MB, plain blobs) + `scripts/prewarm_cartopy.py` as the fallback for a changed extent | a cold-process render with the download cache EMPTY and every downloader refusing; both mutation-checked |
 | `5c` | ~~Logging~~ — **merged into 5a**: it is three lines of the same 16-line file, and touching `src/__init__.py` twice would be worse than doing both at once | (see 5a) |
 | `5d` | Install paths (pip/uv/conda) + `scripts/preflight.py`, including the LFS-pointer check | preflight unit tests; a requirements/conda consistency guard |
 | `5e` | Docs + `job_scripts.example/`: the fresh-clone quickstart, `MLFLOW_TRACKING_URI`, the `GLIBCXX` wart | the by-hand gate — the user, on a different remote |
@@ -188,6 +204,37 @@ Two things worth keeping:
 Worth documenting as the FIRST post-install command, before the dataset is even copied:
 `pytest tests/pipeline_e2e_test.py --no-cov` already builds a synthetic `$DATA_ROOT` and drives the real pipeline end
 to end. It proves the install without the 48 GB.
+
+### ✅ 5b as built (2026-08-20)
+
+`data/cartopy/shapefiles/natural_earth/physical/ne_50m_coastline.{shp,shx,dbf,prj,cpg}` — cartopy's own layout, so
+`CARTOPY_DATA_DIR` (set by the bootstrap) is consulted as `pre_existing_data_dir` before any download is attempted.
+
+**The measurement that sized this**: instrumenting `shapereader.natural_earth` and rendering one figure through
+`frame_map_axis` at the real EuroPP extent requests exactly `[('50m', 'physical', 'coastline')]` — one dataset,
+1,128,501 bytes. A warm `~/.local/share/cartopy` may hold ~14 MB (10m coastline, admin boundary lines, land, ocean),
+none of which this repo asks for. `coastlines()` uses `resolution='auto'`, so the requirement is a property of the
+FIGURE, not the code — which is why both the script and the test discover it by rendering rather than by listing
+filenames.
+
+⚠️ **cartopy reads `CARTOPY_DATA_DIR` once, at ITS import**, into `config['pre_existing_data_dir']`. Setting it later is
+silently ineffective. Normal order is safe (`src.utils.plotting.maps` cannot load without `src/__init__.py` running
+first), and `use_bundled_cartopy_data` repairs the already-imported case through `sys.modules` rather than importing
+cartopy itself.
+
+⚠️ **cartopy MEMOISES resolved feature geometries**, so `natural_earth()` is called only on the first draw in a process.
+That made the first version of both tests order-dependent — and would have let the offline assertion pass VACUOUSLY,
+since with geometries already in memory no download is attempted whatever the bundle holds. Both now run in a
+subprocess with `XDG_DATA_HOME` pointed at an empty directory, which is the only place either question has an answer.
+
+Mutation-checked twice, both failing for the right reason:
+
+* bundle moved away → 4 tests fail with `cartopy attempted a DOWNLOAD`;
+* exemption removed from `.gitattributes` → `git check-attr` reports `filter: lfs` and the guard fires.
+
+One flaw found and fixed in the script itself: `unpulled_pointers()` originally ran AFTER `requested_datasets()`, so
+with a pointer in place the script crashed with cartopy's `KeyError: 828781878` instead of reporting the pointer —
+diagnosing after the render means never diagnosing at all.
 
 ### Detail on the open items
 

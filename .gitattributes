@@ -63,3 +63,15 @@ outputs/*.tsv   filter=lfs diff=lfs merge=lfs -text
 ## the "archive" folder: everything here gets treated as a large file
 /archive/*      filter=lfs diff=lfs merge=lfs -text
 ### add your own here...
+## the bundled cartopy coastline: EXEMPT from LFS, deliberately
+# `data/cartopy/**` holds the 1.1 MB Natural Earth coastline every map figure needs (see data/cartopy/README.md).
+# It is committed as ORDINARY blobs because making it an LFS object forces `git lfs install`, whose
+# `filter.lfs.required = true` makes EVERY git command in the repo exit 128 when the binary is absent -- measured, not
+# feared: `git status` fails, and the `git diff HEAD` that lazy.code_state_hash runs fails too, silently degrading the
+# cache key to a hash of src/ alone. A hard runtime dependency on every machine is not worth 1.1 MB.
+# ⚠️ This exemption is LOAD-BEARING. `*.shp filter=lfs` above still applies everywhere else, so removing these two
+# lines lets the next commit by anyone with git-lfs installed convert the shapefile into a pointer -- after which
+# cartopy dies with `KeyError: 828781878` inside shapefile.py, which reads as corrupt data rather than a missing tool.
+# Scoped to `shapefiles/` rather than `data/cartopy/**` on purpose: `-diff` disables TEXTUAL diff too, and the wider
+# pattern turned data/cartopy/README.md into an undiffable binary blob.
+data/cartopy/shapefiles/** -filter -diff -merge

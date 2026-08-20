@@ -14,6 +14,7 @@ import sys
 import pytest
 
 from src.utils.io.environment import (
+    is_git_lfs_pointer,
     load_env_file,
     parse_env_file,
     prepend_interpreter_to_path,
@@ -197,6 +198,107 @@ def test_an_EXPLICIT_cartopy_dir_wins(tmp_path, monkeypatch):
     (tmp_path / 'data' / 'cartopy').mkdir(parents=True)
     assert use_bundled_cartopy_data(str(tmp_path)) is None
     assert os.environ['CARTOPY_DATA_DIR'] == '/my/own/cartopy'
+
+
+def test_an_ALREADY_IMPORTED_cartopy_has_its_config_REPAIRED(tmp_path, monkeypatch):
+    """cartopy reads ``CARTOPY_DATA_DIR`` ONCE, at import, into ``config['pre_existing_data_dir']`` — so setting the
+    variable afterwards is silently ineffective. Normal import order is safe (``src.utils.plotting.maps`` cannot load
+    without this package's ``__init__`` running first), but a script that imports cartopy first would fall through to
+    the download cache with no sign of why. Stubbed through ``sys.modules`` so the assertion is about the mechanism and
+    not about cartopy being installed."""
+    import sys
+    import types
+
+    stub = types.ModuleType('cartopy')
+    stub.config = {'pre_existing_data_dir': '.'}
+    monkeypatch.setitem(sys.modules, 'cartopy', stub)
+    monkeypatch.delenv('CARTOPY_DATA_DIR', raising=False)
+    (tmp_path / 'data' / 'cartopy').mkdir(parents=True)
+
+    use_bundled_cartopy_data(str(tmp_path))
+    assert stub.config['pre_existing_data_dir'] == str(tmp_path / 'data' / 'cartopy')
+
+
+# =====================================================================================================================
+# The git-lfs pointer check — and the bundle in THIS checkout
+# =====================================================================================================================
+_POINTER = (b'version https://git-lfs.github.com/spec/v1\n'
+            b'oid sha256:797d675af9613f80b51ab6049fa32e589974d7a97c6497ca56772965f179ed26\nsize 1046728\n')
+
+
+def test_a_pointer_file_is_RECOGNISED(tmp_path):
+    path = tmp_path / 'ne_50m_coastline.shp'
+    path.write_bytes(_POINTER)
+    assert is_git_lfs_pointer(str(path))
+
+
+def test_a_real_binary_is_NOT_a_pointer(tmp_path):
+    """A shapefile starts with the big-endian magic 9994, nothing like the pointer text."""
+    path = tmp_path / 'ne_50m_coastline.shp'
+    path.write_bytes(b'\x00\x00\x27\x0a' + b'\x00' * 200)
+    assert not is_git_lfs_pointer(str(path))
+
+
+def test_a_file_SHORTER_than_the_magic_is_not_a_pointer(tmp_path):
+    """The read is capped at 42 bytes, so a shorter file must not raise or over-read."""
+    path = tmp_path / 'tiny'
+    path.write_bytes(b'version')
+    assert not is_git_lfs_pointer(str(path))
+
+
+@pytest.mark.parametrize('kind', ['missing', 'directory'])
+def test_an_unreadable_path_is_reported_as_NOT_a_pointer(tmp_path, kind):
+    """Those are different problems with their own messages; conflating them here would mislabel a missing bundle as an
+    un-pulled one and send the user to `git lfs pull` for nothing."""
+    target = tmp_path / 'absent' if kind == 'missing' else tmp_path
+    assert not is_git_lfs_pointer(str(target))
+
+
+def test_THIS_checkout_has_the_cartopy_bundle_and_it_is_NOT_a_pointer(repo_root):
+    """A checkout-integrity guard, not a unit test. Every map figure needs this one file, and a broken copy of it fails
+    deep inside a shapefile reader — so asserting it here means `pytest` names the cause instead of a pipeline run
+    naming a cartopy internal at the end of an hour's work. See data/cartopy/README.md.
+    """
+    bundle = os.path.join(repo_root, 'data', 'cartopy', 'shapefiles', 'natural_earth', 'physical')
+    shapefile = os.path.join(bundle, 'ne_50m_coastline.shp')
+
+    assert os.path.isfile(shapefile), f'the bundled coastline is missing: {shapefile}'
+    assert not is_git_lfs_pointer(shapefile), (
+        'data/cartopy/.../ne_50m_coastline.shp is a git-lfs POINTER, not the shapefile. The bundle is committed as '
+        'ORDINARY blobs, so this means the `data/cartopy/shapefiles/** -filter` exemption was dropped from '
+        '.gitattributes and '
+        'something with git-lfs installed re-pointerised it. Restore the exemption (see the test below).'
+    )
+    # Reading a shapefile needs .shx and .dbf as well as .shp; .prj carries the CRS and .cpg the encoding.
+    for extension in ('shx', 'dbf', 'prj', 'cpg'):
+        assert os.path.isfile(os.path.join(bundle, f'ne_50m_coastline.{extension}')), extension
+
+
+def test_the_cartopy_bundle_is_EXEMPT_from_the_git_lfs_filters(repo_root):
+    """The load-bearing line, asserted through git itself rather than by grepping `.gitattributes`.
+
+    `*.shp filter=lfs` still applies everywhere outside `data/cartopy/shapefiles/**`, so the exemption is what keeps this file an
+    ordinary blob. Delete it and the next commit by anyone with git-lfs installed turns the shapefile into a pointer.
+
+    It is also why the file is plain in the first place: an LFS object requires `git lfs install`, whose
+    `filter.lfs.required = true` makes EVERY git command in the repo exit 128 without the binary — measured, including
+    the `git diff HEAD` that `lazy.code_state_hash` runs, which then silently degrades the cache key to a hash of
+    `src/` alone.
+    """
+    import subprocess
+
+    path = 'data/cartopy/shapefiles/natural_earth/physical/ne_50m_coastline.shp'
+    result = subprocess.run(['git', 'check-attr', 'filter', 'diff', 'merge', '--', path],
+                            cwd=repo_root, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    for line in result.stdout.strip().splitlines():
+        attribute, value = line.rsplit(': ', 1)[0].rsplit(': ', 1)[-1], line.rsplit(': ', 1)[1]
+        assert value == 'unset', (
+            f'{attribute} is {value!r} for the bundled coastline — the `data/cartopy/shapefiles/** -filter -diff '
+            f'-merge` '
+            f'exemption in .gitattributes is gone, so this file will become a git-lfs pointer on the next commit made '
+            f'with git-lfs installed'
+        )
 
 
 # =====================================================================================================================

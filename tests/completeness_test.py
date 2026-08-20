@@ -188,10 +188,12 @@ def test_function_census_is_stable(repo_root):
 
     Step 5 block 5a added `io/environment`'s 4 (334): `parse_env_file`, `load_env_file`,
     `prepend_interpreter_to_path` and `use_bundled_cartopy_data` — the three things the process bootstrap now does to
-    `os.environ` so a fresh clone runs without a machine-specific launch script, plus the parser they share.
+    `os.environ` so a fresh clone runs without a machine-specific launch script, plus the parser they share. Block 5b
+    added `is_git_lfs_pointer` (335), which lives in `src/` rather than in the two `scripts/` that call it precisely
+    because `scripts/` is outside this census (see the boundary note above).
     """
     total = sum(1 for _ in _all_functions(repo_root))
-    assert total == 334, f'the testable surface moved from 334 to {total}; re-scope the coverage work-list'
+    assert total == 335, f'the testable surface moved from 335 to {total}; re-scope the coverage work-list'
 
 
 def test_exemption_list_has_not_grown(repo_root):

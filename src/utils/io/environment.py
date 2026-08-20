@@ -130,8 +130,8 @@ def prepend_interpreter_to_path() -> Optional[str]:
 def use_bundled_cartopy_data(root: str) -> Optional[str]:
     """Point ``CARTOPY_DATA_DIR`` at the repo's bundled Natural Earth data, if it is present.
 
-    Guarded on the directory existing so this is inert in a checkout that has not fetched the bundle (a clone without
-    git-lfs, where the shapefile is a pointer file). An explicit ``CARTOPY_DATA_DIR`` wins, matching ``.env``'s rule.
+    Guarded on the directory existing so this is inert in a checkout that does not carry the bundle. An explicit
+    ``CARTOPY_DATA_DIR`` wins, matching ``.env``'s rule.
 
     Args:
         root: Repository root.
@@ -147,4 +147,41 @@ def use_bundled_cartopy_data(root: str) -> Optional[str]:
         return None
 
     os.environ['CARTOPY_DATA_DIR'] = bundled
+
+    # ⚠️ cartopy reads CARTOPY_DATA_DIR ONCE, at import, into `cartopy.config['pre_existing_data_dir']` — so setting the
+    # variable after `import cartopy` is silently ineffective. Normal order is safe (`src.utils.plotting.maps` cannot be
+    # imported without this package's `__init__` running first), but a script that imports cartopy before `src` would
+    # otherwise fall through to the download cache with no sign of why. Repaired via `sys.modules` rather than an
+    # `import cartopy` here, which would drag a heavy import into every process that touches `src`.
+    already_imported = sys.modules.get('cartopy')
+    if already_imported is not None:
+        already_imported.config['pre_existing_data_dir'] = bundled
     return bundled
+
+
+def is_git_lfs_pointer(path: str) -> bool:
+    """True when ``path`` holds a git-lfs POINTER rather than the file itself.
+
+    Lives here, with the other "is this checkout usable" checks, because BOTH ``scripts/prewarm_cartopy.py`` and
+    ``scripts/preflight.py`` need it and ``scripts/`` is outside the test mirror — a copy in each would be untested in
+    two places.
+
+    Why it is needed even though the bundle is NOT an LFS object: ``.gitattributes`` still applies
+    ``*.shp filter=lfs`` everywhere outside ``data/cartopy/shapefiles/**``, and that exemption is one deleted line away from
+    gone — after which the next commit by anyone with git-lfs installed silently converts the shapefile into a
+    ~130-byte text stub. cartopy then dies with ``KeyError: 828781878`` inside ``shapefile.py`` (the first bytes of
+    "version" read as a shape type), which reads as corrupt data rather than a configuration mistake. Eight lines to
+    make a measured failure legible.
+
+    Args:
+        path: File to inspect.
+
+    Returns:
+        ``True`` only for a readable file whose first bytes are the pointer magic. A missing file, a directory or an
+        unreadable path is ``False`` — "not a pointer" — since those are different problems with their own messages.
+    """
+    try:
+        with open(path, 'rb') as handle:
+            return handle.read(42).startswith(b'version https://git-lfs.github.com/spec/v1')
+    except OSError:
+        return False

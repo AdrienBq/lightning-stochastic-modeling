@@ -12,6 +12,7 @@ Hence a rasterised probe.
 """
 import ast
 import inspect
+import os
 
 import matplotlib
 import numpy as np
@@ -458,3 +459,111 @@ def test_the_title_y_is_passed_EXPLICITLY():
     is understood as removing a fix rather than a redundant kwarg."""
     source = inspect.getsource(maps.frame_map_axis)
     assert 'y=1.02' in source, 'set_title needs an explicit y or the title is silently not drawn'
+
+
+# =====================================================================================================================
+# Plotting must not touch the network (Step 5 block 5b)
+#
+# cartopy fetches Natural Earth data lazily, at DRAW time, from wherever plotting runs — a compute node, often offline,
+# and at the END of a pipeline run. The repo bundles what the figures need under `data/cartopy` and the bootstrap points
+# `CARTOPY_DATA_DIR` there; these two tests are what keep that true.
+# =====================================================================================================================
+# ⚠️ BOTH tests below run in a SUBPROCESS, and that is not incidental. cartopy MEMOISES resolved feature geometries, so
+# `natural_earth()` is called only on the FIRST draw in a process — any earlier map in this file leaves the cache warm.
+# In-process, that made the "what is requested" assertion see an empty list and, worse, would have let the offline
+# assertion pass VACUOUSLY: with the geometries already in memory no download is attempted whatever the bundle holds.
+# A cold process is the only place either question has a real answer.
+_OFFLINE_PROBE = """
+import matplotlib; matplotlib.use('Agg')
+import src                          # bootstrap FIRST: cartopy reads CARTOPY_DATA_DIR once, at ITS import
+import json, os, cartopy
+from cartopy.io import Downloader, shapereader
+
+requested = []
+_original = shapereader.natural_earth
+def record(resolution='110m', category='physical', name='coastline'):
+    requested.append([resolution, category, name])
+    return _original(resolution=resolution, category=category, name=name)
+shapereader.natural_earth = record
+
+def refuse(self, *args, **kwargs):
+    raise AssertionError('cartopy attempted a DOWNLOAD: the bundle did not satisfy the figure')
+Downloader.acquire_resource = refuse
+Downloader._urlopen = refuse
+
+from matplotlib import pyplot as plt
+from src.utils.plotting import maps
+projection, data_crs = maps.geographic_context()
+figure = plt.figure(figsize=(4, 4))
+axis = maps.add_map_axis(figure, figure.add_gridspec(1, 1)[0, 0], projection)
+maps.frame_map_axis(axis, 'offline', left_labels=True, data_crs=data_crs)
+figure.canvas.draw()
+
+print(json.dumps({
+    'requested': requested,
+    'cartopy_data_dir': os.environ.get('CARTOPY_DATA_DIR'),
+    'pre_existing': str(cartopy.config['pre_existing_data_dir']),
+    'data_dir': str(cartopy.config['data_dir']),
+}))
+"""
+
+
+@pytest.fixture(scope='module')
+def offline_render(repo_root, tmp_path_factory):
+    """Render one map in a cold process with the download cache EMPTY and every downloader refusing.
+
+    ``XDG_DATA_HOME`` is redirected at an empty directory so cartopy's writable ``data_dir`` holds nothing — otherwise a
+    warm ``~/.local/share/cartopy`` satisfies the render and the test proves nothing about the bundle.
+    """
+    import json
+    import subprocess
+    import sys
+
+    empty_cache = tmp_path_factory.mktemp('empty_xdg')
+    environment = {**os.environ, 'PYTHONPATH': repo_root, 'XDG_DATA_HOME': str(empty_cache)}
+    environment.pop('CARTOPY_DATA_DIR', None)               # let the bootstrap find the bundle itself
+    result = subprocess.run([sys.executable, '-c', _OFFLINE_PROBE], cwd=repo_root, env=environment,
+                            capture_output=True, text=True)
+    return result, (json.loads(result.stdout.strip().splitlines()[-1]) if result.returncode == 0 else None)
+
+
+def test_a_map_RENDERS_with_an_EMPTY_cache_and_every_downloader_REFUSING(offline_render):
+    """The offline proof. A compute node has no network and plotting happens at the END of a pipeline run, so a fetch at
+    draw time fails after all the expensive work is done."""
+    result, payload = offline_render
+    assert result.returncode == 0, (
+        f'rendering a map needed the network or failed outright:\n{result.stderr[-2000:]}'
+    )
+    assert payload['pre_existing'] == payload['cartopy_data_dir'], (
+        'cartopy did not pick up CARTOPY_DATA_DIR — it reads the variable once, at import, so `src` must be imported '
+        'before cartopy'
+    )
+    assert payload['data_dir'] not in payload['pre_existing'], 'the download cache was not actually redirected'
+
+
+def test_the_figures_request_EXACTLY_the_dataset_the_repo_BUNDLES(offline_render):
+    """`frame_map_axis` calls `ax.coastlines()` at cartopy's default `resolution='auto'`, which picks the shapefile from
+    the AXES EXTENT — so the requirement is a property of the FIGURE, not of the code, and a projection or domain change
+    can silently move it to a resolution nothing bundled. Discovered by instrumenting rather than by listing filenames,
+    for the same reason: a hardcoded list would drift from `maps.py` exactly when it mattered.
+    """
+    _, payload = offline_render
+    requested = sorted({tuple(entry) for entry in payload['requested']})
+    assert requested == [('50m', 'physical', 'coastline')], (
+        f'the figures now request {requested}, but data/cartopy bundles only the 50m coastline. Either bundle the new '
+        f'dataset or accept a network call at plot time — see scripts/prewarm_cartopy.py.'
+    )
+
+
+def test_the_PREWARM_script_reports_the_bundle_as_complete(repo_root):
+    """Gives `scripts/prewarm_cartopy.py` a test despite `scripts/` sitting outside the mirror (see the note in
+    completeness_test.py). It exits non-zero exactly when a requested dataset is NOT bundled, which is the same property
+    as the test above — asserted through the tool a user would actually run.
+    """
+    import subprocess
+    import sys
+
+    result = subprocess.run([sys.executable, 'scripts/prewarm_cartopy.py'], cwd=repo_root,
+                            env={**os.environ, 'PYTHONPATH': repo_root}, capture_output=True, text=True)
+    assert result.returncode == 0, f'{result.stdout}\n{result.stderr[-1500:]}'
+    assert 'no network needed' in result.stdout
