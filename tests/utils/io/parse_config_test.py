@@ -160,6 +160,53 @@ def test_the_interpolated_data_paths_are_quoted_in_every_shipped_config(repo_roo
     assert not offenders, f'unquoted env interpolation: {offenders}'
 
 
+def test_every_variable_the_configs_interpolate_is_DOCUMENTED_in_dot_env_example(repo_root):
+    """``.env.example`` is the only place a new user learns which variables exist, and an unset one substitutes to the
+    EMPTY STRING rather than erroring — so a variable added to a config and forgotten here fails as a nonsense path deep
+    inside a stage. Documented includes commented-out (``UPSTREAM_MODEL`` ships commented on purpose: unset is
+    meaningful, and it is per-run rather than per-machine).
+    """
+    import glob
+    import re
+
+    interpolated = set()
+    for path in sorted(glob.glob(os.path.join(repo_root, 'config/**/*.yaml'), recursive=True)):
+        interpolated |= {match.group(1) for match in re.finditer(r'\{\{\$([A-Za-z_][A-Za-z0-9_]*)\}\}', open(path).read())}
+    interpolated.discard('VAR')                      # config/eval/metrics_hourly.yaml quotes the SYNTAX in prose
+
+    example = open(os.path.join(repo_root, '.env.example')).read()
+    documented = {match.group(1) for match in re.finditer(r'^\s*#?\s*([A-Z][A-Z0-9_]*)=', example, re.MULTILINE)}
+
+    assert not interpolated - documented, (
+        f'config interpolates {sorted(interpolated - documented)}, which .env.example never names'
+    )
+
+
+def test_dot_env_example_PARSES_with_the_loader_that_will_read_it(repo_root):
+    """It is a template, so it is never loaded in anger — which is exactly how a syntax error in it survives. The loader
+    RAISES on a non-assignment line, so a malformed example would break the first user who copies it.
+    """
+    from src.utils.io.environment import parse_env_file
+
+    parsed = parse_env_file(open(os.path.join(repo_root, '.env.example')).read(), source='.env.example')
+    # The two required ones are live (uncommented); everything else is commented out and so must not appear.
+    assert set(parsed) == {'DATA_ROOT', 'OUTPUT_ROOT'}, sorted(parsed)
+    assert not any(value.startswith('#') or ' #' in value for value in parsed.values()), parsed
+
+
+def test_dot_env_is_GITIGNORED_while_the_example_is_not(repo_root):
+    """A committed `.env` is a merge conflict on every clone — it is the one file that is legitimately different on
+    every machine. The example must NOT be ignored, or a fresh checkout has nothing to copy from."""
+    import subprocess
+
+    def ignored(name):
+        result = subprocess.run(['git', 'check-ignore', '-q', name], cwd=repo_root)
+        return result.returncode == 0
+
+    assert ignored('.env'), '.env is not gitignored'
+    assert not ignored('.env.example'), '.env.example is gitignored, so a fresh clone would not receive it'
+
+
 # =====================================================================================================================
 # Pipeline integrity across the shipped configs
 #

@@ -45,7 +45,6 @@ from lightning.pytorch.loggers import CSVLogger
 from torch.utils.data import DataLoader
 from yaml import safe_load
 
-from src import console_handler
 from src.utils.io import lazy
 from src.utils.io.data import compute_feature_stats, compute_upstream_stats, load_prepared_artifacts
 from src.utils.metrics.evaluation import climatology_brier, climatology_conditional_mae
@@ -58,9 +57,10 @@ try:
 except ImportError:
     optuna = None
 
+# No handler and no level of its own: `src/__init__.py` gives the whole `src.` hierarchy one console handler at INFO.
+# This module used to be the only library module that attached its own, which is why its diagnostics were the only
+# library ones a user ever saw; keeping it now would emit every record twice.
 logger = logging.getLogger(__name__)
-logger.addHandler(console_handler)
-logger.setLevel(logging.INFO)
 
 SAMPLERS = ('random', 'tpe')
 OPTUNA_JOURNAL_FILENAME = 'optuna_journal.log'

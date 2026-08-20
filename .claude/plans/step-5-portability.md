@@ -3,7 +3,10 @@
 > Part of the split rebuild plan. Index: [`rebuild-plan.md`](rebuild-plan.md) ·
 > Context: [`00-context.md`](00-context.md) · Prev: [Step 4](step-4-stages.md)
 
-> **Status: provisional — to be expanded** once [Step 4](step-4-stages.md) is done.
+> **Status: 🔵 IN PROGRESS** (opened 2026-08-20). [Step 4](step-4-stages.md) is ✅ done at `ef19af0`.
+>
+> **The goal is one sentence:** clone the repo on another remote, install the minimal requirements, launch the
+> pipeline. Everything below is either something that blocks that or something that makes it silently wrong.
 
 This repo is meant to be used on other machines or remote servers and by other users, so the paths baked in
 during Step 0 (`/homedata/aburq/.venvs/lightning-stochastic-modeling`, the `/homedata/aburq/batta_torch` data
@@ -68,7 +71,125 @@ Three things landed with it:
   a different `hourly-threshold`) is caught from the other side by `prepare_modeling`'s own staleness check, which
   RAISES on a `mode` / `hourly-threshold` mismatch. The two mechanisms cover each other.
 
-### Still open for this step
+## The survey — what a fresh clone actually hits (measured 2026-08-20)
+
+Ranked by whether it BLOCKS clone → install → launch, because that is this step's goal in one line.
+
+| # | Defect | Where | Blocks? |
+|---|---|---|---|
+| 1 | `mlflow.projects` builds the stage command from a hardcoded literal `"python"`, so **every stage subprocess resolves its interpreter from `PATH`** | `run_project.py:41` + `src/stages/run.py:150` | ❌ **yes** |
+| 2 | cartopy fetches its coastline shapefile at **plot** time | `plotting/maps.py:139` | ❌ **yes**, offline |
+| 3 | No per-user config: the env vars must be exported by hand and nothing names them | — | ⚠️ `setup` catches `OUTPUT_ROOT` only |
+| 4 | Install docs are pip-only and hardcode `/homedata/aburq/.venvs/...` + `module load python/meso-3.11` | `minimal_requirements.txt:4-6` | ⚠️ docs |
+| 5 | `output.log`, `mlruns/`, `mlflow.db` are written **into the checkout** | `src/__init__.py:8`, mlflow default | ⚠️ grows |
+| 6 | 590 `src/utils/*` records reach `output.log` and nothing else | 11 files | ergonomics |
+| 7 | A fresh clone has **no launch material at all** — `job_scripts/` is gitignored | — | ⚠️ |
+| 8 | `split_index.csv`'s `file` column is absolute into `$DATA_ROOT` | `prepare_modeling.py:422` | **DEFERRED** — see below |
+
+Measured facts that shrank three of these, each recorded so nobody re-hunts them:
+
+* **cartopy needs ONE file set, 1,128,501 bytes.** Instrumenting `shapereader.natural_earth` and rendering a real
+  figure through `frame_map_axis` at the EuroPP extent requests exactly `('50m', 'physical', 'coastline')`. The ~14 MB
+  in a warm `~/.local/share/cartopy` is other projects' leftovers — 10m coastline, admin boundary lines, land, ocean —
+  none of which this repo ever asks for. `resolution='auto'` picked 50m from the extent; a future extent change could
+  pick differently, and cartopy falls back to its writable cache when a file is absent, so bundling one resolution is
+  safe rather than brittle.
+* **`mlruns/` is only HALF the store.** Its run directories hold `artifacts/` and nothing else — no `meta.yaml`, no
+  `params/`, no `tags/`. The metadata is in **`mlflow.db`** (sqlite, repo root, 1.7 MB): 5 experiments, 54 runs, 534
+  params, 1798 metrics and **519 tags**, and the tags are where the lazy cache keys live. So a run's provenance and its
+  figures sit in two different gitignored files in the checkout. `job_scripts/pipeline.sh:58` already exports
+  `MLFLOW_TRACKING_URI=file:${OUTPUT_ROOT}/mlruns`, so sbatch is portable and `python run_project.py` is not — that
+  asymmetry is what `.env` closes.
+* **`git lfs` was NOT needed — and this step makes it needed.** `git lfs ls-files` is empty and neither tracked binary
+  matches a filter in `.gitattributes`, so the README's "also install git lfs" was a `plumber` leftover. Bundling the
+  coastline (decision 5) makes it true. ⚠️ **git-lfs is not installed on this host**; `module load git-lfs` gives
+  2.11.0, which is enough to add and push. Consequence to guard: a clone WITHOUT git-lfs gets a ~130-byte pointer file
+  where a shapefile should be, and plotting fails obscurely — so `preflight` must detect the pointer.
+
+**No hardcoded data path in `src/` or `config/`.** `git grep` over the tracked tree finds `/homedata` only in doc
+comments and the requirements header. The `{{$VAR}}` mechanism held; this step formalises it rather than replacing it.
+
+## Decisions taken (2026-08-20, with the user)
+
+1. **`.env` at the repo root, loaded in `src/__init__.py`.** Tracked `.env.example`, gitignored `.env`. Loaded at the
+   earliest import so it reaches `run_project.py`, every standalone stage, `pytest` and `scripts/*` from ONE place, and
+   **never overrides an already-set variable** — so a shell export or a slurm-inherited environment still wins. This
+   makes `src/__init__.py` explicitly the *process bootstrap* (`sys.path`, `.env`, `PATH`, `CARTOPY_DATA_DIR`, logging)
+   rather than an accidental one; it already mutated `sys.path`, the same class of side effect.
+   Contents are small — the config interpolates exactly three variables (`DATA_ROOT` ×11, `OUTPUT_ROOT` ×261,
+   `UPSTREAM_MODEL` ×6) plus mlflow's own `MLFLOW_TRACKING_URI`. `UPSTREAM_MODEL` ships commented out: it is a
+   per-RUN checkpoint path, not per-machine config. `PIPELINE_SEED` must NEVER appear there — the orchestrator owns it.
+   ⚠️ Consequence to watch: the four opt-in real-artifact tests in `evaluate_test.py` are gated on `OUTPUT_ROOT`, so a
+   local `.env` turns them from skipped into live. That is the intent, but it moves the skip count.
+2. **`output.log` is dropped**, console becomes the only sink. See the section below for what was in it.
+3. **One dependency list.** `environment.yml` becomes a real minimal recipe (`python=3.11`, `pip`, then
+   `-r minimal_requirements.txt`) so conda supplies only the interpreter; `uv` needs no file at all. Three documented
+   install paths, one list, so they cannot drift — which is the actual failure mode of "add conda support".
+4. **Track a generic `job_scripts.example/`.** ⚠️ Overrides the recommendation, which was to document
+   `python run_project.py` only. Kept because `_common.sh`'s repo-root search encodes real debugging
+   (`SLURM_SUBMIT_DIR` is where you ran `sbatch` FROM, and `sbatch` COPIES the script into `/var/spool/slurm/...`, so
+   neither obvious guess works). It stays **slurm** — that is expected; what gets sanitised is the site-specific part:
+   `--partition=zen16` (×7), the `--mem` 8G–128G / `--time` 15 min–3 days grid, and the `/homedata/aburq/...`
+   fallbacks become documented placeholders. Cost accepted: a second copy that can drift from the gitignored one
+   actually run.
+5. **Bundle the coastline via git-lfs**, as `.gitattributes` already dictates (`*.shp filter=lfs`). ⚠️ Overrides the
+   recommendation, which was a plain 1.1 MB binary with a `data/cartopy/**` filter exception. The trade taken: git-lfs
+   becomes a hard prerequisite of plotting, in exchange for keeping binaries out of git history proper.
+6. **DEFERRED: the `split_index.csv` relative-path fix.** It does not block a fresh clone — if `prepare_modeling` runs
+   on the remote, the absolute path it writes is correct and nothing breaks. Known limitation to record instead: **a
+   prepared directory is not movable**, so copying ~20 GiB between machines (rather than re-preparing, which costs a
+   full pass over 48 GB) fails, as does a `$DATA_ROOT` that moves under a scratch purge or remount. Only the two
+   **hourly** tiers are exposed — the nine daily tiers materialise features and never open `file`. The fix, when it is
+   wanted, is ~10 lines: write `sample_filename` relative, rejoin in `load_prepared_artifacts`, keep a legacy absolute
+   `file` column loading. Because the in-memory column stays `file`, `dataset.py` and `compute_feature_stats` need no
+   change at all.
+
+## Blocks
+
+| Block | Contents | Verified by |
+|---|---|---|
+| `5a` ✅ | **The bootstrap**: `.env` + the interpreter fix + the `CARTOPY_DATA_DIR` default + the logging sink | 29 loader unit tests; `.env.example` ↔ `config/` guards; three pipeline runs with the venv **removed** from `PATH`; the mutation check below |
+| `5b` | Bundle `ne_50m_coastline` (1.1 MB) via git-lfs + `scripts/prewarm_cartopy.py` as the fallback for a changed extent | a plotting test with `CARTOPY_DATA_DIR` at the bundle and the network unreachable |
+| `5c` | ~~Logging~~ — **merged into 5a**: it is three lines of the same 16-line file, and touching `src/__init__.py` twice would be worse than doing both at once | (see 5a) |
+| `5d` | Install paths (pip/uv/conda) + `scripts/preflight.py`, including the LFS-pointer check | preflight unit tests; a requirements/conda consistency guard |
+| `5e` | Docs + `job_scripts.example/`: the fresh-clone quickstart, `MLFLOW_TRACKING_URI`, the `GLIBCXX` wart | the by-hand gate — the user, on a different remote |
+
+### ✅ 5a as built (2026-08-20)
+
+`src/__init__.py` is now explicitly the **process bootstrap** — `sys.path`, `.env`, `PATH`, `CARTOPY_DATA_DIR`, logging
+— with the four helpers in the new `src/utils/io/environment.py`, beside `parse_config.py`, the other module that reads
+the environment. **1450 passed, 4 skipped, coverage 87.84 %** (from 1418 / 87.72).
+
+**`sys.executable` is the source of truth; `PATH` is only the channel mlflow insists on using.** Worth stating plainly,
+because it is what makes the fix work and what makes the new test honest:
+
+* a process launched by ABSOLUTE interpreter path never consults `PATH` — `subprocess.run([sys.executable, ...])`
+  bypasses it entirely — and `sys.executable` is set from how the process was invoked, not by searching `PATH`;
+* so the venv location is always recoverable inside the process, whatever `PATH` says. `prepend_interpreter_to_path`
+  copies `dirname(sys.executable)` to the front of `os.environ['PATH']`, and every child inherits that;
+* measured with the venv stripped from `PATH`: before `import src`, bare `python` resolved to `/usr/bin/python`; after
+  it, to the venv's — and a child could then `import mlflow`.
+
+Two things worth keeping:
+
+* **The e2e fixtures now REMOVE the venv from `PATH`** (`_path_without_the_venv`) instead of prepending it. Prepending
+  made the runs work while hiding the defect; removing it turns all three pipeline runs into a regression test for the
+  fix, and costs nothing because the parent is still launched by absolute path. Mutation-checked — commenting out that
+  one call fails `test_the_pipeline_EXITS_ZERO` in 4.7 s with `ModuleNotFoundError: No module named 'mlflow'` surfacing
+  as `Run (ID ...) failed`, exactly the misleading "broken stage" signature this defect produces in the wild.
+* **`pip install git-lfs` does NOT substitute for the client.** A PyPI package of that name exists — but it is
+  `git-lfs-fetch.py`, 5.6 KB of pure Python whose own metadata says it *"cannot fully replace the official git-lfs
+  client"* and that *"uploading files is not implemented at all"*. So it can materialise a pointer on a consumer
+  machine (as a separate `python -m git_lfs` command, not a git filter) but cannot author one. And the ordering is
+  against it regardless: **`pip install` runs after `git clone`**, so the venv does not exist when the pointers would
+  need smudging. ⚠️ This weakens decision 5 — the bundle's appeal was zero-setup-works-offline, and LFS adds a setup
+  step. Re-confirm before building 5b.
+
+Worth documenting as the FIRST post-install command, before the dataset is even copied:
+`pytest tests/pipeline_e2e_test.py --no-cov` already builds a synthetic `$DATA_ROOT` and drives the real pipeline end
+to end. It proves the install without the 48 GB.
+
+### Detail on the open items
 
 * ⚠️ **`mlflow.projects` shells out to a BARE `python`, not `sys.executable`.** Found in Step 4 block 4e, the first
   thing the end-to-end test hit. `run_project.py` calls `mlflow.projects.run(...)`, and with no `MLproject` file
@@ -164,14 +285,32 @@ What is affected, in rough order of how much it matters:
 * `reporting`'s "Requested plot date is not in the evaluated split; skipped" — a figure the user asked for, absent.
 * everything in `data.py`, `dataset.py`, `registry.py`, `validation.py`, `scores.py`, `diagnostics.py`, `maps.py`.
 
-**The fix is small but not local:** attach `console_handler` once to `logging.getLogger('src')` in `src/__init__.py`,
-then REMOVE the eight per-stage `addHandler` calls plus `tuning.py`'s and `run.py`'s `lazy.logger` one — otherwise
-every stage record is emitted twice, once by its own handler and once by the ancestor's. Ten files for a two-line
-idea, which is why it belongs to this step rather than to a block doing something else.
+## ✅ FIXED in block 5a — and the prescribed fix above was WRONG about scope
 
-While there, decide `output.log` itself: one unrotated file at the repo root, shared by every concurrent process, is
-the wrong destination for a pipeline whose outputs otherwise live under `$OUTPUT_ROOT`. Either move it there per run or
-drop the `basicConfig` call and let the console handler be the only sink.
+⚠️ **CORRECTED AGAIN 2026-08-20.** This section previously said the fix was *"attach `console_handler` once to
+`logging.getLogger('src')`, then REMOVE the eight per-stage `addHandler` calls plus `tuning.py`'s and `run.py`'s
+`lazy.logger` one … Ten files for a two-line idea."* **The eight stage calls must STAY.** A stage runs as
+`python src/stages/<stage>.py`, so its `__name__` is **`__main__`**, not `src.stages.<stage>` — which is exactly why
+`output.log` shows `INFO:__main__:` 551 times and `INFO:__init__:` 404 times. Those loggers sit OUTSIDE the `src.`
+hierarchy, so the ancestor handler never reaches them and removing their own would have left every stage silent on the
+console. The same applies to `run_project.py` (`__main__`) and `src/stages/__init__.py`'s seeding logger (`__init__`).
+
+So the real fix was **three files, not ten**:
+
+| | change |
+|---|---|
+| `src/__init__.py` | drop `basicConfig(filename=...)`; give `logging.getLogger('src')` the console handler **and** `setLevel(INFO)` — the library loggers are at `NOTSET`, so the level had to move with the handler or every `logger.info` would have gone silent |
+| `src/utils/modeling/tuning.py` | remove its `addHandler` + `setLevel` (it is `src.utils.modeling.tuning`, so the ancestor now covers it) and the now-unused `console_handler` import — it was the ONLY library module with its own handler, which is why its diagnostics were the only library ones a user ever saw |
+| `src/stages/run.py` | remove `lazy.logger.addHandler(...)` (`src.utils.io.lazy`, covered by the ancestor); **keep** its own `__main__` handler |
+
+Verified after: a `src.utils.metrics.evaluation` record reaches stderr **exactly once**, `logging.getLogger('src')` has
+one handler, the root logger has **zero**, and `output.log`'s mtime does not move. Third-party `lightning` /
+`matplotlib` records (1,364 of them) are no longer collected anywhere — accepted, since lightning prints its own
+progress and root now keeps its default WARNING level.
+
+`output.log` itself is **dropped** (decision 2). The 457 KB file at the repo root is left in place and still
+gitignored, so an existing checkout keeps it to read; nothing appends to it any more. Untracking it instead would make
+it appear in `git ls-files --others`, which the lazy cache keys on — so the ignore line stays, marked legacy.
 
 ⚠️ **Caveat on the "it fires" claim**: `src.utils.*` loggers are at `NOTSET`, so their effective level is inherited
 from root — which `basicConfig(level=INFO)` sets to INFO. Remove or change that call and every library `logger.info`

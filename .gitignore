@@ -5,10 +5,17 @@
 /mlruns/
 /.cmdstan/
 **/lightning_logs/
+# Legacy: nothing writes output.log since Step 5 dropped the `basicConfig(filename=...)` sink (the console is now the
+# only one). Kept so a stale file from before that change stays untracked -- untracking it would make it show up in
+# `git ls-files --others`, which the lazy cache keys on. Safe to delete the file, then this line.
 /output.log
 /outputs/
 **/*.db
 /job_scripts/
+
+# Per-user, per-machine paths -- see .env.example, which IS tracked. Never commit .env: it is the one file that is
+# legitimately different on every machine, so a committed copy is a merge conflict on every clone.
+/.env
 
 # Coverage / pytest artifacts. `.coverage` is a SQLite database rewritten by every pytest run, and the lazy cache
 # keys on `git diff HEAD` over the WHOLE repo -- so while it was tracked, having run the tests since the last commit

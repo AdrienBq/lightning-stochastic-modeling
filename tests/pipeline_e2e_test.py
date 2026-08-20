@@ -93,6 +93,26 @@ SELF_SKIPPED_FIGURES = {
 }
 
 
+def _path_without_the_venv():
+    """``PATH`` with the running interpreter's directory REMOVED — the fresh-clone condition, deliberately.
+
+    ``mlflow.projects`` builds every stage's command from a hardcoded literal (``ext_to_cmd = {".py": "python"}``), so a
+    stage subprocess resolves its interpreter from ``PATH`` rather than from the interpreter that launched the pipeline
+    — at both levels, ``run_project.py`` -> ``run.py`` and ``run.py`` -> each stage. Launching by absolute path with
+    nothing activated is exactly how a user on a new machine runs this.
+
+    ⚠️ Until Step 5 block 5a these fixtures PREPENDED the directory instead, which made the run work while masking the
+    defect. The fix now lives in ``src/__init__.py`` (``prepend_interpreter_to_path``), so removing it here is what
+    turns these runs into a regression test for it: revert that call and all three pipeline fixtures fail with
+    ``ModuleNotFoundError: No module named 'mlflow'`` inside the first stage.
+    """
+    directory = os.path.dirname(sys.executable)
+    return os.pathsep.join(
+        entry for entry in os.environ.get('PATH', '').split(os.pathsep)
+        if entry and entry != directory
+    )
+
+
 def _stage_blocks(config):
     """``[(stage name, parameters)]`` in pipeline order — the YAML is a list of single-key dicts."""
     return [(name, parameters) for stage in config['stages'] for name, parameters in stage.items()]
@@ -120,11 +140,7 @@ def pipeline_run(tmp_path_factory, repo_root):
     tracking_uri = f'file:{work / "mlruns"}'
     environment = dict(os.environ, DATA_ROOT=data_root, OUTPUT_ROOT=output_root,
                        MLFLOW_TRACKING_URI=tracking_uri)
-    # ⚠️ mlflow.projects' local backend shells out to a BARE `python`, not sys.executable. Under `pytest` the venv is
-    # usually not activated, so without this the stage subprocess gets the system interpreter and dies on
-    # `import mlflow` — a failure that looks like a broken stage and is not one. (Recorded as a portability wart in
-    # .claude/plans/step-5-portability.md: a real run depends on `python` resolving correctly too.)
-    environment['PATH'] = os.path.dirname(sys.executable) + os.pathsep + environment.get('PATH', '')
+    environment['PATH'] = _path_without_the_venv()          # see the helper: this run PROVES the interpreter fix
 
     completed = subprocess.run([sys.executable, 'run_project.py', config_path, 'pipeline_e2e'],
                                cwd=repo_root, env=environment, capture_output=True, text=True)
@@ -408,7 +424,7 @@ def comparison_run(pipeline_run, repo_root, tmp_path_factory):
 
     environment = dict(os.environ, DATA_ROOT=pipeline_run['data_root'], OUTPUT_ROOT=output_root,
                        MLFLOW_TRACKING_URI=f'file:{work / "mlruns"}')
-    environment['PATH'] = os.path.dirname(sys.executable) + os.pathsep + environment.get('PATH', '')
+    environment['PATH'] = _path_without_the_venv()
     completed = subprocess.run([sys.executable, 'run_project.py', config_path, 'comparison_e2e'],
                                cwd=repo_root, env=environment, capture_output=True, text=True)
     return {'completed': completed, 'stages': _stage_blocks(derived), 'labels': [
@@ -494,7 +510,7 @@ def hourly_pipeline_run(tmp_path_factory, repo_root):
     output_root = str(work / 'outputs')
     environment = dict(os.environ, DATA_ROOT=data_root, OUTPUT_ROOT=output_root,
                        MLFLOW_TRACKING_URI=f'file:{work / "mlruns"}')
-    environment['PATH'] = os.path.dirname(sys.executable) + os.pathsep + environment.get('PATH', '')
+    environment['PATH'] = _path_without_the_venv()
     completed = subprocess.run([sys.executable, 'run_project.py', config_path, 'pipeline_e2e_hourly'],
                                cwd=repo_root, env=environment, capture_output=True, text=True)
 

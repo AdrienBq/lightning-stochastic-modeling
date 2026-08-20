@@ -36,10 +36,12 @@ from src.utils.io.parse_config import parse_config
 from src.utils.io import lazy
 from src.utils.banner import make_banner
 
+# This one stays: a stage runs as `python src/stages/run.py`, so `__name__` is `__main__` and this logger sits OUTSIDE
+# the `src.` hierarchy that `src/__init__.py` hands the console handler to.
 logger = logging.getLogger(__name__)
 logger.addHandler(console_handler)
-# surface the lazy module's warnings (skipped byte-exact checks, degraded code-state) on the console too
-lazy.logger.addHandler(console_handler)
+# `lazy.logger` needs nothing here — it is `src.utils.io.lazy`, so the ancestor handler already carries its warnings
+# (skipped byte-exact checks, degraded code-state) to the console.
 
 
 def _coerce_bool(value, default: bool) -> bool:
