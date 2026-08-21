@@ -369,6 +369,137 @@ def test_PREFLIGHT_fails_and_NAMES_the_unset_variables(repo_root, tmp_path):
     assert "['DATA_ROOT', 'OUTPUT_ROOT']" in result.stdout, result.stdout
 
 
+# =====================================================================================================================
+# The tracked launch scripts (Step 5 block 5e)
+#
+# `job_scripts/` is gitignored scratch; `job_scripts.example/` is the tracked, site-agnostic version. A tracked launch
+# script is read as an instruction, so a machine-specific value in one is worse than no script at all.
+# =====================================================================================================================
+EXAMPLE_SCRIPTS = 'job_scripts.example'
+
+
+def _example_scripts(repo_root):
+    directory = os.path.join(repo_root, EXAMPLE_SCRIPTS)
+    return [os.path.join(directory, name) for name in sorted(os.listdir(directory)) if name.endswith('.sh')]
+
+
+def test_the_example_launch_scripts_are_SYNTACTICALLY_VALID(repo_root):
+    """`bash -n` on each. They are never executed by the suite — a slurm submission is not something pytest can do — so
+    without this a typo in one is found by a queued job failing in one second."""
+    import subprocess
+
+    broken = []
+    for path in _example_scripts(repo_root):
+        result = subprocess.run(['bash', '-n', path], capture_output=True, text=True)
+        if result.returncode != 0:
+            broken.append(f'{os.path.basename(path)}: {result.stderr.strip()}')
+    assert not broken, broken
+
+
+def test_the_example_launch_scripts_carry_NO_machine_specific_value(repo_root):
+    """Active lines only: the comments deliberately QUOTE the old `job_scripts/logs/...` path to explain why it changed,
+    and a guard that cannot tell an explanation from a setting would forbid documenting the fix.
+    """
+    offenders = []
+    for path in _example_scripts(repo_root):
+        for number, line in enumerate(open(path), start=1):
+            code = line.split('#', 1)[0]                       # drop comments, including the `#SBATCH` ones
+            if any(needle in code for needle in ('/homedata', '/home/aburq', 'zen16')):
+                offenders.append(f'{os.path.basename(path)}:{number}: {line.strip()}')
+    assert not offenders, f'machine-specific values on active lines: {offenders}'
+
+
+def test_the_example_scripts_name_NO_DIRECTORY_in_their_slurm_log_paths(repo_root):
+    """The failure this encodes cost a real job. slurm resolves a RELATIVE `--output` against the directory you submit
+    FROM, so `--output=job_scripts/logs/output/%x_%j.out` submitted from inside `job_scripts/` asks for
+    `job_scripts/job_scripts/logs/`, which slurm cannot create — killing the job in one second with NO log to say why.
+    Naming no directory means a log always appears wherever you stood.
+    """
+    import re
+
+    offenders = []
+    for path in _example_scripts(repo_root):
+        for number, line in enumerate(open(path), start=1):
+            match = re.match(r'#SBATCH\s+--(output|error)=(\S+)', line.strip())
+            if match and os.path.dirname(match.group(2)):
+                offenders.append(f'{os.path.basename(path)}:{number}: {line.strip()}')
+    assert not offenders, f'slurm log paths with a directory component: {offenders}'
+
+
+def test_every_example_stage_script_SOURCES_the_shared_common(repo_root):
+    """The repo-root search, the `.env` load, the interpreter check and the family/mode path mapping all live in
+    `_common.sh`. A script that re-derives any of them by hand is how the seven drift apart."""
+    for path in _example_scripts(repo_root):
+        if os.path.basename(path) == '_common.sh':
+            continue
+        text = open(path).read()
+        assert '_common.sh' in text, f'{os.path.basename(path)} does not source _common.sh'
+        assert 'FAMILY=' in text and 'STAGE_NAME=' in text, os.path.basename(path)
+
+
+def test_the_example_common_REFUSES_to_run_without_the_two_roots(repo_root, tmp_path):
+    """No fallback values, deliberately — the gitignored original hardcoded a machine's paths here. A
+    wrong-but-plausible default is worse than a missing one, because the run SUCCEEDS against the wrong data.
+    """
+    import subprocess
+
+    script = (
+        'set -euo pipefail\n'
+        'FAMILY=deterministic_unet; TIER=_smoke_cpu; MODE=daily; STAGE_NAME=probe\n'
+        f'source {EXAMPLE_SCRIPTS}/_common.sh\n'
+    )
+    environment = {key: value for key, value in os.environ.items() if key not in ('DATA_ROOT', 'OUTPUT_ROOT')}
+    result = subprocess.run(['bash', '-c', script], cwd=repo_root, env=environment, capture_output=True, text=True)
+
+    assert result.returncode == 2, f'expected exit 2, got {result.returncode}\n{result.stdout}\n{result.stderr}'
+    assert '.env.example' in result.stderr, result.stderr
+
+
+def test_the_example_common_DERIVES_the_task_dependent_paths_TOGETHER(repo_root, tmp_path):
+    """`MODE` must move the prepared directory, the search space AND the metrics config as one. Each has a silent
+    failure mode alone: a daily metrics suite cuts a probability field at `> 0` (POD ~ 1, a contingency table of
+    nonsense, nothing raised), and a daily search space names a selection metric the module rejects.
+    """
+    import subprocess
+
+    from tests.conftest import build_dataset_root
+
+    data_root = build_dataset_root(str(tmp_path / 'data'), n_days=2)
+    script = (
+        'set -euo pipefail\n'
+        'FAMILY=deterministic_unet; TIER=_smoke_cpu; MODE=hourly; STAGE_NAME=probe\n'
+        f'source {EXAMPLE_SCRIPTS}/_common.sh\n'
+        'echo "PREPARED=$PREPARED_PATH"; echo "SEARCH=$SEARCH_SPACE"; echo "METRICS=$METRICS_CONFIG"\n'
+    )
+    environment = {**os.environ, 'DATA_ROOT': data_root, 'OUTPUT_ROOT': str(tmp_path / 'out')}
+    result = subprocess.run(['bash', '-c', script], cwd=repo_root, env=environment, capture_output=True, text=True)
+
+    assert result.returncode == 0, f'{result.stdout}\n{result.stderr}'
+    assert 'prepared/hourly' in result.stdout, result.stdout
+    assert 'SEARCH=config/deterministic_unet/search_space_hourly.yaml' in result.stdout, result.stdout
+    assert 'METRICS=config/eval/metrics_hourly.yaml' in result.stdout, result.stdout
+
+
+def test_the_example_common_REJECTS_hourly_for_a_family_without_an_hourly_pipeline(repo_root, tmp_path):
+    """Only `deterministic_unet` has one. Left unchecked, `MODE=hourly FAMILY=diffusion` would name a prepared
+    directory nothing ever writes and fail much later, looking like missing data."""
+    import subprocess
+
+    from tests.conftest import build_dataset_root
+
+    data_root = build_dataset_root(str(tmp_path / 'data'), n_days=2)
+    script = (
+        'set -euo pipefail\n'
+        'FAMILY=diffusion; TIER=_smoke_cpu; MODE=hourly; STAGE_NAME=probe\n'
+        f'source {EXAMPLE_SCRIPTS}/_common.sh\n'
+    )
+    environment = {**os.environ, 'DATA_ROOT': data_root, 'OUTPUT_ROOT': str(tmp_path / 'out')}
+    result = subprocess.run(['bash', '-c', script], cwd=repo_root, env=environment, capture_output=True, text=True)
+
+    assert result.returncode == 2, result.stdout
+    assert 'deterministic_unet only' in result.stderr, result.stderr
+
+
 def test_the_cartopy_bundle_is_EXEMPT_from_the_git_lfs_filters(repo_root):
     """The load-bearing line, asserted through git itself rather than by grepping `.gitattributes`.
 

@@ -168,7 +168,48 @@ comments and the requirements header. The `{{$VAR}}` mechanism held; this step f
 | `5b` ✅ | Bundle `ne_50m_coastline` (1.1 MB, plain blobs) + `scripts/prewarm_cartopy.py` as the fallback for a changed extent | a cold-process render with the download cache EMPTY and every downloader refusing; both mutation-checked |
 | `5c` | ~~Logging~~ — **merged into 5a**: it is three lines of the same 16-line file, and touching `src/__init__.py` twice would be worse than doing both at once | (see 5a) |
 | `5d` ✅ | Install paths (pip/uv/conda) + `scripts/preflight.py`, including the LFS-pointer check | preflight run against a synthetic `$DATA_ROOT` (exit 0) and with the roots unset (exit 1, naming them); a requirements/conda consistency guard |
-| `5e` | Docs + `job_scripts.example/`: the fresh-clone quickstart, `MLFLOW_TRACKING_URI`, the `GLIBCXX` wart | the by-hand gate — the user, on a different remote |
+| `5e` ✅ | Docs + `job_scripts.example/`: the fresh-clone quickstart, `MLFLOW_TRACKING_URI`, the `GLIBCXX` wart | 8 new tests over the tracked scripts (`bash -n`, no site-specific active line, no directory in a slurm log path, `_common.sh` refuses without roots / derives the MODE paths together / rejects hourly for the wrong family); the by-hand gate is the user on a different remote |
+
+### ✅ 5e as built (2026-08-21)
+
+**`job_scripts.example/`** — 7 stage scripts + `_common.sh` + README, derived from the gitignored `job_scripts/` with
+everything site-specific removed: no venv path, no partition, no data roots. Runnable in place or copied to
+`job_scripts/` (the `source` line tries both). `_common.sh` sources `.env` itself with `set -a`, so ONE file configures
+both the Python side and the shell side.
+
+Three deliberate changes from the originals:
+
+1. **`--output=%x_%j.out`, naming no directory.** This is the fix for a real failure this session: the user's
+   `sbatch pipeline.sh` died in 1 s with exit 1 and NO log. `sacct` gave the cause —
+   `WorkDir = .../lightning-stochastic-modeling/job_scripts`, so the relative
+   `--output=job_scripts/logs/output/%x_%j.out` resolved to `job_scripts/job_scripts/logs/`, which slurm could not
+   create, and it has nowhere to report that. Naming no directory means a log always appears wherever you stood.
+   Guarded by a test that parses every `#SBATCH --output/--error` and rejects a directory component.
+2. **No fallback roots.** `_common.sh` exits 2 naming `.env.example` rather than defaulting to a machine's paths.
+   A wrong-but-plausible default is worse than a missing one: the run succeeds against the wrong data.
+3. **The interpreter comes from `$PYTHON` or `PATH`**, not a hardcoded venv. Both the shell and `src/__init__.py` put it
+   first on `PATH`, covering the per-stage scripts before any import and the orchestrated stages after.
+
+⚠️ **Two bugs found in the live `job_scripts/` while deriving the examples, both mine, both fixed in place:**
+
+* `prepare_modeling.sh` still referenced **`$TASK`** in 3 places after the user's `TASK` → `MODE` rename — I had
+  renamed `_common.sh` and missed this file. With `set -u` that is `unbound variable`, so
+  `sbatch job_scripts/prepare_modeling.sh` died immediately. A rename that leaves one file behind is invisible until
+  the file runs, which is the argument for the example scripts being tested at all.
+* `retrain_best.sh` ended its python invocation with a trailing `\` immediately before `echo`, so the echo and its
+  words became **arguments to the stage** and there was no `| tee "$LOG"`. `bash -n` passes it — it is valid
+  syntax — which is why the new test suite checks more than syntax.
+
+**Docs.** README gains a *Fresh clone on a new machine* section (clone → install → `.env` → preflight →
+`pytest tests/pipeline_e2e_test.py`, the last of which proves the wiring **without the 48 GB**), the three install
+paths, the `.env` table, the cluster section, the torch-build note and the `GLIBCXX` export. `CLAUDE.md` gains the
+`.env` mechanism and the `preflight` pointer. Corrected there too: the install section claimed **`git lfs` is
+required**; it is not, and never was — `git lfs ls-files` is empty and the bundled coastline is exempt from the filters.
+
+⚠️ **A claim I made this session and had to withdraw:** I reported `config/hello_world.yaml` as dead config pointing at
+a stage deleted in Step 4. Wrong — block 4a REVERSED that deletion after the usefulness check it mandated found two
+consumers (`README.md` and the config). `src/stages/hello_world.py` exists, and
+`python run_project.py config/hello_world.yaml README_CHECK` exits 0. Verified rather than assumed, this time.
 
 ### ✅ 5a as built (2026-08-20)
 

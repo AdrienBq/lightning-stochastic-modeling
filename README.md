@@ -51,25 +51,111 @@ admissible competitor.
 
 ## Installation
 
-[`minimal_requirements.txt`](minimal_requirements.txt) is the source of truth for the environment
-(Python 3.11, CPU-only). `environment.yml` is the template's conda recipe and is kept unmaintained.
+[`minimal_requirements.txt`](minimal_requirements.txt) is the **single source of truth** for the environment
+(Python 3.11; 3.12 also works). Three equivalent paths — pick one. Nothing is machine-specific: choose your own
+venv/prefix location.
 
 ```shell
-python -m venv /path/to/.venvs/lightning-stochastic-modeling
-source /path/to/.venvs/lightning-stochastic-modeling/bin/activate
+# venv + pip
+python3.11 -m venv ~/.venvs/lightning-stochastic-modeling
+source ~/.venvs/lightning-stochastic-modeling/bin/activate
 pip install -r minimal_requirements.txt
+
+# uv — same file, no extra config
+uv venv --python 3.11 ~/.venvs/lightning-stochastic-modeling
+source ~/.venvs/lightning-stochastic-modeling/bin/activate
+uv pip install -r minimal_requirements.txt
+
+# conda — supplies only the interpreter; pip installs the same file
+conda env create -f environment.yml
+conda activate lightning-stochastic-modeling
 ```
 
-Also install [`git lfs`](https://git-lfs.com/); the tracked file types are declared in
-[`.gitattributes`](.gitattributes).
+[`environment.yml`](environment.yml) deliberately lists **no packages of its own** — it installs
+`-r minimal_requirements.txt` — so the conda and pip paths cannot drift apart. Two enumerations of one dependency set
+agree the day they are written and diverge on the first version bump, and the symptom is an unreproducible *result*
+rather than an install error.
+
+**`git lfs` is not required.** `.gitattributes` declares LFS filters for large binary types, but the repo currently
+has zero LFS objects (`git lfs ls-files` is empty) and the bundled coastline is deliberately exempt from them — see
+[`data/cartopy/README.md`](data/cartopy/README.md) for why. Plain `git clone` is enough.
+
+Two environment warts worth knowing before they cost you an afternoon:
+
+- **`torch` build.** The requirements file does **not** pin the CPU wheel. It used to carry
+  `--extra-index-url .../whl/cpu`, and because a PEP 440 local version sorts above the plain one
+  (`2.8.0+cpu > 2.8.0`), that made pip prefer the CPU build on *every* machine — including a GPU node, where
+  `torch.cuda.is_available()` is then False and `accelerator: auto` silently trains on CPU. On a CPU-only machine,
+  opt in explicitly: `pip install -r minimal_requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu`.
+- **`GLIBCXX_3.4.29`.** On a cluster whose node ships an older `libstdc++` than the compiled wheels need (gcc ≥ 11),
+  `import torch` or `import shapely` fails naming that symbol. Prepend the environment's own lib directory:
+  `export LD_LIBRARY_PATH="${CONDA_PREFIX:-$VIRTUAL_ENV}/lib:$LD_LIBRARY_PATH"`.
+
+## Fresh clone on a new machine
+
+Five steps, and the first four need no dataset:
+
+```shell
+git clone git@github.com:AdrienBq/lightning-stochastic-modeling.git
+cd lightning-stochastic-modeling
+pip install -r minimal_requirements.txt        # in a fresh venv — see above
+
+cp .env.example .env                           # then edit DATA_ROOT and OUTPUT_ROOT
+python scripts/preflight.py                    # says exactly what is still missing
+pytest tests/pipeline_e2e_test.py -q --no-cov  # ~5 min: builds a SYNTHETIC dataset and runs the real pipeline
+```
+
+That last command is the one worth knowing about: it proves the install end to end — `run_project.py`, the
+orchestrator, every stage in its own subprocess, the metrics suite and the figures — **without the 48 GB dataset**.
+If it passes, what remains is data and compute, not wiring.
+
+Then, with a real `$DATA_ROOT` in place:
+
+```shell
+python run_project.py config/deterministic_unet/deterministic_unet_daily_smoke_cpu.yaml MY_EXPERIMENT
+```
+
+### `.env` — the per-user config
+
+A gitignored `.env` at the repo root, copied from the tracked [`.env.example`](.env.example). `src/__init__.py` loads
+it on the first `src.` import, so it reaches `run_project.py`, every stage subprocess, `pytest` and `scripts/*` from
+one place. The launch scripts source the same file (`set -a`), so one file configures both sides.
+
+⚠️ **An already-set variable always wins.** An explicit `export`, and the environment slurm hands a job, both override
+`.env` — so it is the fallback, not the authority, and it cannot silently retarget a running job. A line that is not a
+`KEY=VALUE` assignment **raises** rather than being skipped: a typo that quietly sets nothing is the failure this file
+exists to remove.
+
+| Variable | Required | What it is |
+|---|---|---|
+| `DATA_ROOT` | yes | the read-only dataset (11 × `{{$DATA_ROOT}}` in `config/`) |
+| `OUTPUT_ROOT` | yes | everything the pipelines write (261 × `{{$OUTPUT_ROOT}}`) |
+| `MLFLOW_TRACKING_URI` | no | where mlflow keeps runs. **Unset means the checkout**: `./mlruns/` for artifacts, and it grows without bound |
+| `UPSTREAM_MODEL` | no | per-*run*, not per-machine. Unset means "no warm start", which is how each stochastic family runs standalone |
+| `CARTOPY_DATA_DIR` | no | leave unset: the bootstrap points it at the committed coastline, so plotting needs no network |
+
+⛔ Never put `PIPELINE_SEED` there — the orchestrator derives it per stage and exports it before dispatch.
+
+### Running on a cluster
+
+[`job_scripts.example/`](job_scripts.example/) holds slurm launchers with nothing machine-specific in them: no venv
+path, no partition, no data roots. Run them in place, or copy the directory to `job_scripts/` (gitignored) and edit.
+
+```shell
+sbatch job_scripts.example/pipeline.sh          # from the REPO ROOT
+```
+
+⚠️ Their `--output`/`--error` name **no directory** on purpose, so a log always appears wherever you submitted from.
+See that directory's README for the rest — the `MODE` switch, the GPU toggle's two halves, and the four traps the
+scripts encode.
 
 ## Data
 
 The dataset root is given by the **`DATA_ROOT`** environment variable — no data path is hardcoded in code or
-config, so the repo moves between machines by setting that one variable:
+config, so the repo moves between machines by setting that one variable (in `.env`, or exported):
 
 ```shell
-export DATA_ROOT=/path/to/batta_torch      # e.g. /homedata/aburq/batta_torch on this host (~48 GB)
+export DATA_ROOT=/path/to/era5_postprocess          # ~48 GB
 ```
 
 ```
@@ -152,12 +238,19 @@ partition is identical across all of them.
 
 ```
 config/
-├── split/               split.yaml · split_smoke_cpu.yaml · split_smoke_gpu.yaml
-├── eval/                metrics_daily.yaml · probabilistic_eval.yaml · probabilistic_eval_smoke_cpu.yaml
-├── deterministic_unet/  deterministic_unet_daily.yaml · …_smoke_cpu.yaml · …_smoke_gpu.yaml · search_space_daily.yaml
-├── mc_dropout/          mc_dropout_daily.yaml          · …_smoke_cpu.yaml · …_smoke_gpu.yaml · search_space_daily.yaml
-└── diffusion/           diffusion_daily.yaml           · …_smoke_cpu.yaml · …_smoke_gpu.yaml · search_space_daily.yaml
+├── split/               split.yaml · split_smoke_cpu.yaml · split_smoke_gpu.yaml        (task-agnostic)
+├── eval/                metrics_daily.yaml · metrics_hourly.yaml
+│                        probabilistic_eval.yaml · probabilistic_eval_smoke_cpu.yaml
+├── deterministic_unet/  deterministic_unet_daily.yaml  · …_daily_smoke_cpu · …_daily_smoke_gpu
+│                        deterministic_unet_hourly.yaml · …_hourly_smoke_cpu
+│                        search_space_daily.yaml · search_space_hourly.yaml
+├── mc_dropout/          mc_dropout_daily.yaml          · …_daily_smoke_cpu · …_daily_smoke_gpu · search_space_daily.yaml
+└── diffusion/           diffusion_daily.yaml           · …_daily_smoke_cpu · …_daily_smoke_gpu · search_space_daily.yaml
 ```
+
+**Every task-specific file names its task**, so an unsuffixed name is never ambiguous. Only `deterministic_unet` has an
+hourly pipeline — it is the upstream for the other two, and the point of the hourly tier is to prove the classification
+path runs, not to sweep it.
 
 Each family has three tiers, differing only in scale: the full pipeline, plus a **`_smoke_cpu`** tier (8 mid-July
 days, 1 trial, 1 epoch, CPU) and a **`_smoke_gpu`** tier (18 days, 2 trials, mixed precision). The smoke tiers exist
@@ -166,7 +259,7 @@ days by explicit sample-id ranges in `config/split/split_smoke_*.yaml`, delibera
 occurrence base rate is non-zero — a winter slice would make every categorical and skill score degenerate.
 
 ```shell
-export DATA_ROOT=/path/to/batta_torch
+# DATA_ROOT and OUTPUT_ROOT come from .env (see "Fresh clone" above) or from your shell
 
 # the deterministic baseline first: it is also the upstream for the other two
 python run_project.py config/deterministic_unet/deterministic_unet_daily_smoke_cpu.yaml MY_EXPERIMENT

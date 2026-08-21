@@ -59,6 +59,14 @@ export DATA_ROOT=/path/to/era5_postprocess          # metadata.json, metadata.cs
 export OUTPUT_ROOT=/scratch/$USER/lightning-outputs # prepared/, tuning/, best/, evaluation/, reports/
 ```
 
+Or put them in a gitignored **`.env`** at the repo root (copy [`.env.example`](.env.example)). `src/__init__.py` loads
+it on the first `src.` import, so it reaches `run_project.py`, every stage subprocess, `pytest` and `scripts/*` from one
+place; `job_scripts.example/_common.sh` sources the same file, so one file configures both sides. ⚠️ **An already-set
+variable always wins** — `.env` is the fallback, not the authority, so an `export` or slurm's inherited environment
+still overrides it and it cannot silently retarget a running job. A line that is not a `KEY=VALUE` assignment raises
+rather than being skipped. Run **`python scripts/preflight.py`** to check the whole environment at once (roots,
+dependencies, the stage interpreter, the cartopy bundle, git) before queueing anything.
+
 An **unset** variable substitutes to the empty string rather than erroring (see the `{{$VAR}}` note below), so
 `'{{$OUTPUT_ROOT}}/family/prepared'` becomes `/family/prepared` — absolute, at the filesystem root. `setup`, the first
 stage of every pipeline, refuses that and names the variable; a missing `DATA_ROOT` still fails inside the stage.
