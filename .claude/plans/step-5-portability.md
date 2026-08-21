@@ -167,7 +167,7 @@ comments and the requirements header. The `{{$VAR}}` mechanism held; this step f
 | `5a` ✅ | **The bootstrap**: `.env` + the interpreter fix + the `CARTOPY_DATA_DIR` default + the logging sink | 29 loader unit tests; `.env.example` ↔ `config/` guards; three pipeline runs with the venv **removed** from `PATH`; the mutation check below |
 | `5b` ✅ | Bundle `ne_50m_coastline` (1.1 MB, plain blobs) + `scripts/prewarm_cartopy.py` as the fallback for a changed extent | a cold-process render with the download cache EMPTY and every downloader refusing; both mutation-checked |
 | `5c` | ~~Logging~~ — **merged into 5a**: it is three lines of the same 16-line file, and touching `src/__init__.py` twice would be worse than doing both at once | (see 5a) |
-| `5d` | Install paths (pip/uv/conda) + `scripts/preflight.py`, including the LFS-pointer check | preflight unit tests; a requirements/conda consistency guard |
+| `5d` ✅ | Install paths (pip/uv/conda) + `scripts/preflight.py`, including the LFS-pointer check | preflight run against a synthetic `$DATA_ROOT` (exit 0) and with the roots unset (exit 1, naming them); a requirements/conda consistency guard |
 | `5e` | Docs + `job_scripts.example/`: the fresh-clone quickstart, `MLFLOW_TRACKING_URI`, the `GLIBCXX` wart | the by-hand gate — the user, on a different remote |
 
 ### ✅ 5a as built (2026-08-20)
@@ -235,6 +235,42 @@ Mutation-checked twice, both failing for the right reason:
 One flaw found and fixed in the script itself: `unpulled_pointers()` originally ran AFTER `requested_datasets()`, so
 with a pointer in place the script crashed with cartopy's `KeyError: 828781878` instead of reporting the pointer —
 diagnosing after the render means never diagnosing at all.
+
+### ✅ 5d as built (2026-08-20)
+
+**One dependency list.** `minimal_requirements.txt` is the source of truth; `environment.yml` is now a real recipe that
+installs `python=3.11`, `pip`, then `-r minimal_requirements.txt`, so conda supplies only the interpreter. `uv` needs no
+file at all. A test pins the rule: conda may install `{python, pip}` and nothing else, and the pip section must
+reference the requirements file. Two enumerations of one dependency set agree the day they are written and diverge on
+the first version bump, and the symptom is an unreproducible RESULT rather than an install error.
+⚠️ **Not verifiable here** — no conda on this host, so `conda env create -f environment.yml` is untested. The YAML
+parses to the expected structure; the conda path itself is for the by-hand gate.
+
+⚠️ **A silent defect found and fixed while rewriting the header.** `minimal_requirements.txt` carried
+`--extra-index-url https://download.pytorch.org/whl/cpu`, and a PEP 440 local version identifier sorts ABOVE the plain
+one — `Version('2.8.0+cpu') > Version('2.8.0')` is `True`, and the interpreter here indeed has `torch 2.13.0+cpu`. So
+that line made pip prefer the **CPU build on every machine**, including a GPU node, where `torch.cuda.is_available()`
+is then False and `accelerator: auto` silently trains on CPU. Nothing raises; the run is merely slow, which is why it
+survived. The CPU-only install is now an explicit opt-in in a comment, and a test asserts no index override is active.
+That also un-breaks the `_smoke_gpu` tiers, which were shipping against a torch that could not see a GPU.
+
+The header's machine-specific lines are gone (`/homedata/aburq/.venvs/...`, `module load python/meso-3.11`), and a test
+sweeps `minimal_requirements.txt`, `environment.yml` and `.env.example` for `/homedata`, `/home/aburq` and
+`module load python`. Install instructions are read as instructions, so a stale one is worse than none. The Prefect
+trio's hard-won pins (3.7 + starlette 1.x breaks the ephemeral server) moved into a commented optional block rather
+than being lost with the old `environment.yml`.
+
+**`scripts/preflight.py`** — nine checks, printed as they complete (the dependency check really imports torch and
+lightning, ~26 s cold, and a silent half-minute reads as a hang). Each corresponds to something that otherwise fails
+late and in the wrong place: unset `DATA_ROOT` (fails inside `prepare_modeling`), unset `OUTPUT_ROOT` (paths at the
+filesystem root), a bare `python` that cannot `import mlflow` (reported as a broken STAGE), an LFS pointer where the
+coastline should be (reported as corrupt data), and a git that cannot run here (the lazy cache key degrades to a hash
+of `src/` alone, silently). Measured: 9.5 s warm, exit 0 against the real dataset (5843 samples), exit 1 naming
+`['DATA_ROOT', 'OUTPUT_ROOT']` when unset.
+
+It distinguishes **absent** from **installed-but-unusable** on purpose: the `GLIBCXX_3.4.29` wall raises a non-
+`ModuleNotFoundError` `ImportError`, and its fix is `LD_LIBRARY_PATH`, not `pip`. Reporting that as "missing" would
+send the user to the wrong remedy — which is why the check imports for real instead of using `find_spec`.
 
 ### Detail on the open items
 

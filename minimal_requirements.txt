@@ -1,16 +1,33 @@
-# Minimal dependency set for lightning-stochastic-modeling (Python 3.11, CPU-only).
+# Minimal dependency set for lightning-stochastic-modeling. Python 3.11 (3.12 also works; 3.11 is what the suite runs
+# on). THIS FILE IS THE SINGLE SOURCE OF TRUTH -- `environment.yml` defers to it rather than listing packages again, so
+# the conda and pip paths cannot drift apart.
 #
-#   module load python/meso-3.11
-#   python -m venv /homedata/aburq/.venvs/lightning-stochastic-modeling
-#   source /homedata/aburq/.venvs/lightning-stochastic-modeling/bin/activate
-#   pip install -r minimal_requirements.txt
+# Three install paths, all equivalent. Nothing here is machine-specific: pick your own venv/prefix location.
 #
-# This file is the source of truth for the environment; `environment.yml` is the template's conda
-# recipe and is kept unmaintained. Deps are added as rebuild steps need them -- keep this lean.
-
-# torch comes from the CPU wheel index: the default PyPI linux wheel bundles the CUDA runtime
-# (~2.5 GB of nvidia-* packages) and this machine has no GPU.
---extra-index-url https://download.pytorch.org/whl/cpu
+#   venv + pip
+#       python3.11 -m venv ~/.venvs/lightning-stochastic-modeling
+#       source ~/.venvs/lightning-stochastic-modeling/bin/activate
+#       pip install -r minimal_requirements.txt
+#
+#   uv (same file, no extra config)
+#       uv venv --python 3.11 ~/.venvs/lightning-stochastic-modeling
+#       source ~/.venvs/lightning-stochastic-modeling/bin/activate
+#       uv pip install -r minimal_requirements.txt
+#
+#   conda (supplies only the interpreter; pip installs this file)
+#       conda env create -f environment.yml
+#       conda activate lightning-stochastic-modeling
+#
+# Then verify the install WITHOUT the 48 GB dataset -- this builds a synthetic $DATA_ROOT and drives the real pipeline
+# end to end, every stage in a subprocess:
+#
+#       python scripts/preflight.py                     # what is missing, and where the paths point
+#       pytest tests/pipeline_e2e_test.py -q --no-cov   # ~5 min: the pipeline is wired
+#
+# On a cluster whose login node ships an older libstdc++ than the compiled wheels need (`GLIBCXX_3.4.29`, i.e. gcc >= 11
+# -- the symptom is an ImportError from torch or shapely naming GLIBCXX), prepend the environment's own lib directory:
+#
+#       export LD_LIBRARY_PATH="${CONDA_PREFIX:-$VIRTUAL_ENV}/lib:$LD_LIBRARY_PATH"
 
 # --- pipeline orchestration (run_project.py, src/stages/run.py) ---
 # mlflow < 3.13: from 3.13 the local file-store backend (the default when no tracking_uri is passed) is disabled.
@@ -19,6 +36,13 @@ fire>=0.6,<1
 pyyaml>=6,<7
 
 # --- modeling (shared U-net backbone + the three families) ---
+# ⚠️ NO `--extra-index-url https://download.pytorch.org/whl/cpu` here, and that is deliberate. A local version
+# identifier sorts ABOVE the plain one (`Version('2.8.0+cpu') > Version('2.8.0')` is True), so adding that index makes
+# pip prefer the CPU build on EVERY machine -- including a GPU node, where `torch.cuda.is_available()` is then False and
+# `accelerator: auto` silently trains on CPU. Slow but not wrong, so nothing raises. The default below works on both.
+#
+# On a CPU-only machine, opt in explicitly and save ~2.5 GB of nvidia-* packages:
+#     pip install -r minimal_requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
 torch>=2.4,<3
 lightning>=2.4,<3
 
@@ -35,6 +59,8 @@ scikit-learn>=1.5,<2
 # cartopy: the Step 1 map spec plots the gridded lightning field on a real projection with coastlines and
 # borders, so spatial error is interpretable (sea vs. land, orography). Ships manylinux wheels from 0.22, so
 # no system GEOS/PROJ build is needed on Python 3.11.
+# The coastline it needs is COMMITTED under data/cartopy (see that directory's README), so plotting makes no network
+# call -- which matters because cartopy would otherwise fetch at PLOT time, on whatever node is plotting.
 matplotlib>=3.9,<4
 cartopy>=0.22,<1
 
@@ -46,3 +72,9 @@ cartopy>=0.22,<1
 # rather than an optional extra.
 pytest>=8,<9
 pytest-cov>=5,<8
+
+# --- OPTIONAL: the Prefect orchestration frontend (`orchestrator: prefect` in a pipeline YAML) ---
+# Not installed by default; `src/stages/run.py` falls back to the mlflow backend automatically when Prefect is absent.
+# ⚠️ These three pins go together and are the hard-won part: Prefect 3.7 with starlette 1.x breaks Prefect's ephemeral
+# server ("'PrefectRouter' object has no attribute 'routes'"). The combination below is verified working.
+#     pip install 'prefect==3.1.15' 'fastapi==0.115.6' 'starlette==0.41.3'

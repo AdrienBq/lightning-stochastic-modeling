@@ -1,8 +1,13 @@
-"""Tests for src/utils/io/environment.py — the three things the process bootstrap does to ``os.environ``.
+"""Tests for src/utils/io/environment.py — what the process bootstrap does to ``os.environ`` — plus the install surface
+around it: the requirements/conda files, the committed cartopy bundle, and ``scripts/preflight.py``.
 
-All three are portability fixes, and all three have the same danger: they run once, on import, before anything reports
-what they did. So the tests care less about the happy path than about the three ways each could be silently wrong —
-overriding a variable the user set, growing ``PATH`` on repeated imports, and pointing at a bundle that is not there.
+The bootstrap helpers share one danger: they run once, on import, before anything reports what they did. So the tests
+care less about the happy path than about the ways each could be silently wrong — overriding a variable the user set,
+growing ``PATH`` on repeated imports, pointing at a bundle that is not there.
+
+The install-surface tests live here rather than in a file of their own because ``tests/`` mirrors ``src/`` one file per
+module (``completeness_test.py`` enforces it in both directions), and a new root-level file would be flagged as an
+orphan. They belong with this module by theme: every one of them asks "can this machine run the code".
 
 ⚠️ Every test that touches ``os.environ`` uses ``monkeypatch``, which restores it per test. Without that, a leaked
 ``DATA_ROOT`` would reach `pipeline_e2e_test.py` and make a real pipeline read the wrong dataset.
@@ -272,6 +277,96 @@ def test_THIS_checkout_has_the_cartopy_bundle_and_it_is_NOT_a_pointer(repo_root)
     # Reading a shapefile needs .shx and .dbf as well as .shp; .prj carries the CRS and .cpg the encoding.
     for extension in ('shx', 'dbf', 'prj', 'cpg'):
         assert os.path.isfile(os.path.join(bundle, f'ne_50m_coastline.{extension}')), extension
+
+
+def test_the_INSTALL_files_carry_no_machine_specific_path(repo_root):
+    """The whole point of Step 5. The requirements header used to open with
+    `python -m venv /homedata/aburq/.venvs/lightning-stochastic-modeling` and `module load python/meso-3.11`, which a
+    new user on a different cluster has to notice is not for them — install instructions are read as instructions.
+    """
+    offenders = []
+    for name in ('minimal_requirements.txt', 'environment.yml', '.env.example'):
+        text = open(os.path.join(repo_root, name)).read()
+        for number, line in enumerate(text.splitlines(), start=1):
+            if '/homedata' in line or '/home/aburq' in line or 'module load python' in line:
+                offenders.append(f'{name}:{number}: {line.strip()}')
+    assert not offenders, f'machine-specific paths in the install surface: {offenders}'
+
+
+def test_the_conda_recipe_DEFERS_to_the_requirements_file(repo_root):
+    """One dependency list, not two. Two enumerations agree the day they are written and diverge on the first version
+    bump, after which a conda user and a pip user run different code — and the difference shows up as an
+    unreproducible RESULT rather than an install error, which is the expensive kind.
+    """
+    from yaml import safe_load
+
+    recipe = safe_load(open(os.path.join(repo_root, 'environment.yml')))
+    dependencies = recipe['dependencies']
+    pip_sections = [entry['pip'] for entry in dependencies if isinstance(entry, dict) and 'pip' in entry]
+
+    assert pip_sections, 'environment.yml has no pip: section, so it cannot defer to minimal_requirements.txt'
+    assert any('-r minimal_requirements.txt' in entry for section in pip_sections for entry in section), \
+        'environment.yml must install `-r minimal_requirements.txt` rather than listing packages again'
+
+    # Everything conda itself installs must be the interpreter and pip, nothing that the requirements file also names.
+    conda_packages = {entry.split('=')[0].strip() for entry in dependencies if isinstance(entry, str)}
+    assert conda_packages == {'python', 'pip'}, (
+        f'environment.yml installs {sorted(conda_packages - {"python", "pip"})} through conda as well as pip through '
+        f'minimal_requirements.txt — that is the second list this file exists to avoid'
+    )
+
+
+def test_the_requirements_file_does_NOT_pin_the_torch_BUILD(repo_root):
+    """A regression guard on a measured, silent defect. `minimal_requirements.txt` used to carry
+    `--extra-index-url https://download.pytorch.org/whl/cpu`, and a local version identifier sorts ABOVE the plain one
+    (`Version('2.8.0+cpu') > Version('2.8.0')`), so pip preferred the CPU build on EVERY machine — including a GPU node,
+    where `torch.cuda.is_available()` is then False and `accelerator: auto` silently trains on CPU. Nothing raises; the
+    run is merely slow, which is why it survived. The CPU-only install is documented as an explicit opt-in instead.
+    """
+    lines = open(os.path.join(repo_root, 'minimal_requirements.txt')).read().splitlines()
+    active = [line for line in lines if line.strip() and not line.lstrip().startswith('#')]
+    offenders = [line for line in active if '--extra-index-url' in line or '--index-url' in line]
+    assert not offenders, (
+        f'an index override is active in minimal_requirements.txt: {offenders}. That silently changes which torch '
+        f'build every machine gets; keep it in a comment as an opt-in.'
+    )
+
+
+def test_PREFLIGHT_passes_against_a_synthetic_dataset_root(repo_root, tmp_path):
+    """`scripts/preflight.py` is the first command a new machine runs, so "it exits 0 when the machine is fine" is the
+    property worth pinning — and it can only be asserted with a valid `DATA_ROOT`, which `build_dataset_root` supplies
+    without the real 48 GB.
+    """
+    import subprocess
+    import sys
+
+    from tests.conftest import build_dataset_root
+
+    data_root = build_dataset_root(str(tmp_path / 'data'), n_days=3)
+    output_root = tmp_path / 'outputs'
+    output_root.mkdir()
+
+    environment = {**os.environ, 'PYTHONPATH': repo_root, 'DATA_ROOT': data_root,
+                   'OUTPUT_ROOT': str(output_root)}
+    result = subprocess.run([sys.executable, 'scripts/preflight.py'], cwd=repo_root, env=environment,
+                            capture_output=True, text=True)
+    assert result.returncode == 0, f'{result.stdout}\n{result.stderr[-1500:]}'
+    assert '3 samples' in result.stdout, result.stdout
+
+
+def test_PREFLIGHT_fails_and_NAMES_the_unset_variables(repo_root, tmp_path):
+    """The failure path matters more than the success one: an unset `DATA_ROOT` substitutes to the empty string and
+    fails deep inside `prepare_modeling`, so preflight's job is to say so first, by name."""
+    import subprocess
+    import sys
+
+    environment = {key: value for key, value in os.environ.items() if key not in ('DATA_ROOT', 'OUTPUT_ROOT')}
+    environment['PYTHONPATH'] = repo_root
+    result = subprocess.run([sys.executable, 'scripts/preflight.py'], cwd=repo_root, env=environment,
+                            capture_output=True, text=True)
+
+    assert result.returncode == 1, result.stdout
+    assert "['DATA_ROOT', 'OUTPUT_ROOT']" in result.stdout, result.stdout
 
 
 def test_the_cartopy_bundle_is_EXEMPT_from_the_git_lfs_filters(repo_root):

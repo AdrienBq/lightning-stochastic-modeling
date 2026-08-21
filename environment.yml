@@ -1,44 +1,25 @@
-# UNMAINTAINED: kept from the `plumber` template for anyone who prefers conda. The environment actually used by
-# this project is defined in `minimal_requirements.txt` (Python 3.11, pip/venv), which is the source of truth.
-#
-# Conda environment for the `plumber` ML pipeline template.
+# Conda path for lightning-stochastic-modeling. Conda supplies ONLY the interpreter; pip installs
+# `minimal_requirements.txt`, which stays the single source of truth for dependencies.
 #
 #   conda env create -f environment.yml
-#   conda activate plumber
+#   conda activate lightning-stochastic-modeling
 #
-# Python 3.11 is pinned because the optional Prefect stack below is verified working there; 3.12 also works (the
-# project's existing `cmcc-raws` env). The default `orchestrator: mlflow` backend needs only mlflow + fire +
-# pyyaml; the rest is for building real stages and the optional Prefect frontend.
-name: plumber
+# ⚠️ The one rule here is that this file must NOT list packages that `minimal_requirements.txt` lists. Two enumerations
+# of the same dependency set is the failure mode of "add conda support": they agree on the day they are written and
+# diverge on the first version bump, after which a conda user and a pip user run different code and the difference shows
+# up as an unreproducible result rather than an install error. `tests/environment_test.py` enforces the rule.
+#
+# The cost accepted for that: conda-forge builds of the compiled stack (torch, cartopy's GEOS/PROJ) are often better
+# behaved on old cluster nodes than manylinux wheels, and this file gives them up. If a node hits the
+# `GLIBCXX_3.4.29` wall (see minimal_requirements.txt), the first thing to try is still the LD_LIBRARY_PATH export
+# documented there; pinning the stack through conda-forge instead means accepting the second list.
+name: lightning-stochastic-modeling
 channels:
   - conda-forge
 dependencies:
+  # 3.11 is what the test suite runs on; 3.12 also works.
   - python=3.11
   - pip
-  # version-control helpers the template expects (git lfs tracks the ML binaries declared in .gitattributes)
-  - git
-  - git-lfs
-  # scientific stack used by stages, the plotting utils and deterministic seeding
-  - numpy
-  - pandas
-  - scikit-learn
-  - matplotlib
-  - joblib
-  - pyyaml
   - pip:
-      # --- core orchestration (required by both backends) ---
-      # mlflow is pinned < 3.13: from 3.13 the local file-store backend (the template's default when no
-      # tracking_uri is passed) is hard-disabled. The sqlite backend works on any version -- to use it, launch
-      # the UI with:  mlflow ui --backend-store-uri sqlite:///mlflow.db
-      - "mlflow>=2.12,<3.13"
-      - fire
-      # --- optional Prefect backend (orchestrator: prefect) ---
-      # Safe to delete: the orchestrator falls back to the mlflow backend automatically if Prefect is absent.
-      # This exact trio is pinned because the current Prefect 3.7 + starlette 1.x combination breaks Prefect's
-      # ephemeral server ("'PrefectRouter' object has no attribute 'routes'"); the versions below are verified.
-      - "prefect==3.1.15"
-      - "fastapi==0.115.6"
-      - "starlette==0.41.3"
-      # --- optional: PyTorch, only needed for neural-network stages (e.g. a notebook-style MLP). Uncomment for
-      #     the default CPU build; pick a CUDA/Metal build per https://pytorch.org if you need acceleration. ---
-      # - torch
+      # Relative to THIS file's directory, so it resolves wherever the repo is cloned.
+      - -r minimal_requirements.txt
