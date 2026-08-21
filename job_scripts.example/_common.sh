@@ -38,12 +38,27 @@ cd "$REPO_ROOT"                        # every stage resolves `config/...` and i
 # --- the per-user config ---------------------------------------------------------------------------------------------
 # `.env` is KEY=VALUE, which is readable by BOTH `src/__init__.py` and a shell — one config file, not two. `set -a`
 # exports what it sets, so the stage subprocesses inherit it.
-# ⚠️ An already-exported value still wins, matching the Python loader: `.env` is the fallback, not the authority.
+#
+# ⚠️ AN ALREADY-EXPORTED VALUE STILL WINS, matching `load_env_file` in src/utils/io/environment.py: `.env` is the
+# fallback, not the authority. This used to be a claim rather than a behaviour — a plain `. file` ASSIGNS
+# unconditionally, so `.env` silently overrode a job that exported its own DATA_ROOT, which is precisely the
+# retargeting that `test_an_ALREADY_SET_variable_is_NEVER_overridden` forbids on the Python side.
+#
+# Snapshot the exported environment, source the file, then re-assert the snapshot: a name that was already set keeps
+# its value, a name the file introduces survives. Doing it this way rather than parsing KEY=VALUE here keeps the
+# `.env` grammar defined in ONE place (parse_env_file) instead of two that agree until the first edit.
+# `grep -v` drops readonly entries (bash exports SHELLOPTS/BASHOPTS as `declare -rx` when they are exported at all);
+# re-declaring one of those fails, and under `set -e` that would kill the job instead of loading the config.
+# An EMPTY exported value counts as set and wins too, exactly as it does in Python — `UPSTREAM_MODEL=` means
+# "no warm start", and `.env` must not resurrect it.
 if [ -f "$REPO_ROOT/.env" ]; then
+    _env_snapshot="$(export -p | grep -vE '^declare -[a-zA-Z]*r')"
     set -a
     # shellcheck disable=SC1091
     . "$REPO_ROOT/.env"
     set +a
+    eval "$_env_snapshot"
+    unset _env_snapshot
 fi
 
 # --- the interpreter -------------------------------------------------------------------------------------------------

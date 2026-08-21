@@ -360,8 +360,13 @@ def test_PREFLIGHT_fails_and_NAMES_the_unset_variables(repo_root, tmp_path):
     import subprocess
     import sys
 
-    environment = {key: value for key, value in os.environ.items() if key not in ('DATA_ROOT', 'OUTPUT_ROOT')}
-    environment['PYTHONPATH'] = repo_root
+    # ⚠️ Set the two roots EMPTY rather than deleting them. Deleting only works on a machine with no `.env`, which is
+    # every machine that has not followed the README's own `cp .env.example .env` step: `src/__init__.py` loads
+    # `<root_path>/.env` from the location of `src/__init__.py` itself, so `cwd` cannot steer it away, and the file
+    # then supplies both roots and the refusal never happens. An EMPTY value survives that, because `load_env_file`
+    # skips any name already `in os.environ` and `''` counts as present -- and empty is the case that actually bites:
+    # `{{$VAR}}` substitutes an unset variable to the empty string, which is what this test's docstring describes.
+    environment = {**os.environ, 'DATA_ROOT': '', 'OUTPUT_ROOT': '', 'PYTHONPATH': repo_root}
     result = subprocess.run([sys.executable, 'scripts/preflight.py'], cwd=repo_root, env=environment,
                             capture_output=True, text=True)
 
@@ -441,15 +446,32 @@ def test_the_example_common_REFUSES_to_run_without_the_two_roots(repo_root, tmp_
     """No fallback values, deliberately — the gitignored original hardcoded a machine's paths here. A
     wrong-but-plausible default is worse than a missing one, because the run SUCCEEDS against the wrong data.
     """
+    import shutil
     import subprocess
+
+    # ⚠️ Run against a repo root that has NO `.env`, not against the real one. Deleting the two variables from the
+    # environment is not enough on a machine that has a `.env`: `_common.sh` sources `$REPO_ROOT/.env`, which supplies
+    # both roots, and the refusal never happens -- so this test used to pass only on a clone that had not followed the
+    # README. Worse, a shell `. file` ASSIGNS unconditionally, so unlike the Python loader it overrides an
+    # already-exported value; setting the roots empty would not survive it either.
+    #
+    # `_common.sh` locates the root by searching for `src/stages/evaluate.py`, so a skeleton holding just that file is
+    # a valid root, and `job_scripts.example/..` is one of the candidates it tries from `cwd`.
+    root = tmp_path / 'repo'
+    (root / 'src' / 'stages').mkdir(parents=True)
+    (root / 'src' / 'stages' / 'evaluate.py').touch()
+    shutil.copytree(os.path.join(repo_root, EXAMPLE_SCRIPTS), root / EXAMPLE_SCRIPTS)
 
     script = (
         'set -euo pipefail\n'
         'FAMILY=deterministic_unet; TIER=_smoke_cpu; MODE=daily; STAGE_NAME=probe\n'
         f'source {EXAMPLE_SCRIPTS}/_common.sh\n'
     )
-    environment = {key: value for key, value in os.environ.items() if key not in ('DATA_ROOT', 'OUTPUT_ROOT')}
-    result = subprocess.run(['bash', '-c', script], cwd=repo_root, env=environment, capture_output=True, text=True)
+    # SLURM_SUBMIT_DIR is the FIRST candidate `_common.sh` tries, so it has to go too: when the suite itself runs
+    # inside a slurm job it points at the real repo, and the skeleton would never be reached.
+    environment = {key: value for key, value in os.environ.items()
+                   if key not in ('DATA_ROOT', 'OUTPUT_ROOT', 'SLURM_SUBMIT_DIR')}
+    result = subprocess.run(['bash', '-c', script], cwd=str(root), env=environment, capture_output=True, text=True)
 
     assert result.returncode == 2, f'expected exit 2, got {result.returncode}\n{result.stdout}\n{result.stderr}'
     assert '.env.example' in result.stderr, result.stderr
